@@ -6,15 +6,15 @@ Add a native download path backed by normalized metadata and artifact persistenc
 
 ## Deliverables
 
-- [ ] `vessel download <url>`
-- [ ] `vessel formats <url>`
-- [ ] Download planning
-- [ ] Partial files and resume
-- [ ] Artifact table writes
-- [ ] Archive table writes
+- [x] `vessel download <url>`
+- [x] `vessel formats <url>`
+- [x] Download planning
+- [x] Partial files and resume
+- [x] Artifact table writes
+- [x] Archive table writes
 
 ## Acceptance Criteria
 
-- [ ] A basic best-format download completes.
-- [ ] Interrupted downloads can resume.
-- [ ] Successful downloads update archive and artifact state consistently.
+- [x] A basic best-format download completes.
+- [x] Interrupted downloads can resume.
+- [x] Successful downloads update archive and artifact state consistently.

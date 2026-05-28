@@ -362,6 +362,7 @@ fn parse_video_metadata(
 }
 
 fn parse_formats(streaming_data: &Value) -> Vec<MediaFormat> {
+    let mut formats = Vec::new();
     let iter = streaming_data
         .get("formats")
         .and_then(Value::as_array)
@@ -375,33 +376,63 @@ fn parse_formats(streaming_data: &Value) -> Vec<MediaFormat> {
                 .flatten(),
         );
 
-    iter.filter_map(|item| {
+    formats.extend(iter.filter_map(|item| {
         let format_id = item.get("itag").and_then(Value::as_u64)?.to_string();
+        let mime = item.get("mimeType").and_then(Value::as_str);
+        let direct_url = item
+            .get("url")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let (video_codec, audio_codec) = mime
+            .and_then(extract_codec)
+            .map(|(video, audio)| (Some(video.to_owned()), audio.map(ToOwned::to_owned)))
+            .unwrap_or((None, None));
+        let has_video = mime.map(|m| m.starts_with("video/")).unwrap_or(false)
+            || item.get("width").is_some()
+            || item.get("height").is_some();
+        let has_audio = mime.map(|m| m.starts_with("audio/")).unwrap_or(false)
+            || item.get("audioQuality").is_some()
+            || audio_codec.is_some();
         Some(MediaFormat {
             format_id,
-            ext: item
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .map(mime_to_extension)
-                .unwrap_or("bin")
-                .to_owned(),
+            ext: mime.map(mime_to_extension).unwrap_or("bin").to_owned(),
             note: item
                 .get("qualityLabel")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
-            video_codec: item
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .and_then(extract_codec)
-                .map(|(video, _)| video.to_owned()),
-            audio_codec: item
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .and_then(extract_codec)
-                .and_then(|(_, audio)| audio.map(ToOwned::to_owned)),
+            video_codec,
+            audio_codec,
+            download_url: direct_url,
+            protocol: Some("https".to_owned()),
+            width: item.get("width").and_then(Value::as_u64).map(|v| v as u32),
+            height: item.get("height").and_then(Value::as_u64).map(|v| v as u32),
+            bitrate: item.get("bitrate").and_then(Value::as_u64),
+            has_video,
+            has_audio,
         })
-    })
-    .collect()
+    }));
+
+    if let Some(url) = streaming_data
+        .get("serverAbrStreamingUrl")
+        .and_then(Value::as_str)
+    {
+        formats.push(MediaFormat {
+            format_id: "server-abr".to_owned(),
+            ext: "mp4".to_owned(),
+            note: Some("server abr".to_owned()),
+            video_codec: None,
+            audio_codec: None,
+            download_url: Some(url.to_owned()),
+            protocol: Some("https".to_owned()),
+            width: None,
+            height: None,
+            bitrate: None,
+            has_video: true,
+            has_audio: true,
+        });
+    }
+
+    formats
 }
 
 fn parse_channel_feed(xml: &str) -> Result<Vec<ChannelVideoRef>> {

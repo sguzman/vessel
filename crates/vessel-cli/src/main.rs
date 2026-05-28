@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
 use vessel_core::models::{InputKind, InputRef};
 use vessel_core::{Config, Result, VesselError, load_config};
+use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
     ChannelVideoRef, YoutubeExtractor, extract_channel, extract_video, list_channel_videos,
 };
@@ -145,8 +146,8 @@ async fn main() -> Result<()> {
             VideoSubcommand::History(args) => video_history(args, &config).await,
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url).await,
-        Commands::Formats(arg) => stub_formats(arg.url),
-        Commands::Download(args) => stub_download(args),
+        Commands::Formats(arg) => formats(arg.url).await,
+        Commands::Download(args) => download(args, &config).await,
     }
 }
 
@@ -446,35 +447,108 @@ async fn video_history(args: VideoRefArg, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn stub_formats(url: String) -> Result<()> {
+async fn formats(url: String) -> Result<()> {
+    let video = extract_video(&parse_video_input(&url)).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "formats",
-            "url": url,
-            "baseline_selector_ast": FormatSelector::Fallback(vec![
-                FormatSelector::Merge(
-                    Box::new(FormatSelector::BestVideo),
-                    Box::new(FormatSelector::BestAudio),
-                ),
-                FormatSelector::Best,
-            ])
+            "video_id": video.video_id,
+            "title": video.title,
+            "formats": video.formats,
+            "default_selector": "best",
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
     );
     Ok(())
 }
 
-fn stub_download(args: DownloadArgs) -> Result<()> {
+async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let video = extract_video(&parse_video_input(&args.url)).await?;
+    let archived = store.is_video_archived("youtube", &video.video_id).await?;
+    if archived {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "skipped",
+                "reason": "already archived",
+                "video_id": video.video_id,
+            }))
+            .map_err(|err| VesselError::Config(err.to_string()))?
+        );
+        return Ok(());
+    }
+
+    let selector = parse_format_selector(args.format.as_deref());
+    let planner = BasicDownloadPlanner;
+    let fallback_shape = select_format_for_output(&video, &selector);
+    let native_plan = planner.plan(&video, selector.clone(), &config.download.output);
+    let fallback_output_path =
+        render_fallback_output_path(&video, fallback_shape, &config.download.output);
+    let result = match native_plan {
+        Ok(plan) => match execute_download(&plan).await {
+            Ok(result) => result,
+            Err(_err) if binary_available("yt-dlp") => {
+                fallback_download_with_ytdlp(&args.url, args.format.as_deref(), &plan.output_path)
+                    .await?;
+                let bytes_written = tokio::fs::metadata(&plan.output_path).await?.len();
+                vessel_download::DownloadResult {
+                    format_id: fallback_shape
+                        .as_ref()
+                        .map(|format| format.format_id.clone())
+                        .unwrap_or_else(|| plan.format_id.clone()),
+                    output_path: plan.output_path.clone(),
+                    temp_path: plan.temp_path.clone(),
+                    bytes_written,
+                    resumed: false,
+                }
+            }
+            Err(err) => return Err(err),
+        },
+        Err(_err) if binary_available("yt-dlp") => {
+            fallback_download_with_ytdlp(&args.url, args.format.as_deref(), &fallback_output_path)
+                .await?;
+            let bytes_written = tokio::fs::metadata(&fallback_output_path).await?.len();
+            vessel_download::DownloadResult {
+                format_id: fallback_shape
+                    .as_ref()
+                    .map(|format| format.format_id.clone())
+                    .unwrap_or_else(|| "yt-dlp".to_owned()),
+                output_path: fallback_output_path.clone(),
+                temp_path: fallback_output_path.with_extension("part"),
+                bytes_written,
+                resumed: false,
+            }
+        }
+        Err(err) => return Err(err),
+    };
+    let file_hash = hash_file(&result.output_path).await?;
+    let artifact = store
+        .insert_artifact(
+            &video.video_id,
+            "video",
+            &result.output_path.to_string_lossy(),
+            &file_hash,
+            result.bytes_written,
+            Some(&result.format_id),
+        )
+        .await?;
+    store
+        .insert_archive_entry("youtube", &video.video_id, &artifact.artifact_id)
+        .await?;
+
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "download",
-            "url": args.url,
-            "format": args.format.unwrap_or_else(|| "best".to_owned()),
-            "next": "Wire extractor metadata into download planning and artifact/archive persistence."
+            "status": "downloaded",
+            "video_id": video.video_id,
+            "title": video.title,
+            "format_id": result.format_id,
+            "output_path": result.output_path,
+            "bytes_written": result.bytes_written,
+            "resumed": result.resumed,
+            "artifact_id": artifact.artifact_id,
+            "content_hash": artifact.content_hash,
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
     );
@@ -588,6 +662,85 @@ fn parse_channel_input(raw: &str) -> InputRef {
     }
 }
 
+fn parse_format_selector(raw: Option<&str>) -> FormatSelector {
+    match raw {
+        None | Some("best") => FormatSelector::Best,
+        Some("worst") => FormatSelector::Worst,
+        Some("ba") | Some("bestaudio") => FormatSelector::BestAudio,
+        Some("bv") | Some("bestvideo") => FormatSelector::BestVideo,
+        Some(value) => FormatSelector::ExactFormatId(value.to_owned()),
+    }
+}
+
+fn select_format_for_output<'a>(
+    video: &'a vessel_core::models::VideoMetadata,
+    selector: &FormatSelector,
+) -> Option<&'a vessel_core::models::MediaFormat> {
+    match selector {
+        FormatSelector::ExactFormatId(format_id) => video
+            .formats
+            .iter()
+            .find(|format| format.format_id == *format_id),
+        FormatSelector::Worst => video
+            .formats
+            .iter()
+            .filter(|format| format.has_video || format.has_audio)
+            .min_by_key(|format| {
+                (
+                    u8::from(format.has_video && format.has_audio),
+                    format.height.unwrap_or(0),
+                    format.bitrate.unwrap_or(0),
+                )
+            }),
+        _ => video
+            .formats
+            .iter()
+            .filter(|format| format.has_video || format.has_audio)
+            .max_by_key(|format| {
+                (
+                    u8::from(format.has_video && format.has_audio),
+                    format.height.unwrap_or(0),
+                    format.bitrate.unwrap_or(0),
+                )
+            }),
+    }
+}
+
+fn render_fallback_output_path(
+    video: &vessel_core::models::VideoMetadata,
+    format: Option<&vessel_core::models::MediaFormat>,
+    template: &str,
+) -> std::path::PathBuf {
+    let ext = format.map(|format| format.ext.as_str()).unwrap_or("mp4");
+    let mut output = template.to_owned();
+    output = output.replace("%(id)s", &sanitize_component(&video.video_id));
+    output = output.replace(
+        "%(title)s",
+        &sanitize_component(video.title.as_deref().unwrap_or(&video.video_id)),
+    );
+    output = output.replace(
+        "%(channel)s",
+        &sanitize_component(video.channel_id.as_deref().unwrap_or("unknown-channel")),
+    );
+    output = output.replace(
+        "%(upload_date)s",
+        &sanitize_component(video.upload_date.as_deref().unwrap_or("unknown-date")),
+    );
+    output = output.replace("%(ext)s", ext);
+    std::path::PathBuf::from(output)
+}
+
+fn sanitize_component(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ if ch.is_control() => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
 async fn extract_video_id_from_input(raw: &str) -> Result<String> {
     let registry = build_registry();
     let input = parse_video_input(raw);
@@ -611,6 +764,34 @@ fn increment_summary(summary: &mut serde_json::Value, key: &str, delta: usize) {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     summary[key] = serde_json::Value::from(current + delta as u64);
+}
+
+async fn hash_file(path: &std::path::Path) -> Result<String> {
+    let bytes = tokio::fs::read(path).await?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+async fn fallback_download_with_ytdlp(
+    url: &str,
+    requested_format: Option<&str>,
+    output_path: &std::path::Path,
+) -> Result<()> {
+    let mut command = tokio::process::Command::new("yt-dlp");
+    command.arg("--no-progress");
+    command.arg("--output").arg(output_path);
+    if let Some(format) = requested_format {
+        command.arg("-f").arg(format);
+    }
+    command.arg(url);
+
+    let status = command.status().await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(VesselError::Extractor(format!(
+            "yt-dlp fallback failed with exit status {status}"
+        )))
+    }
 }
 
 fn binary_available(name: &str) -> bool {

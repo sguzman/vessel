@@ -55,6 +55,18 @@ pub struct StoredTrackedChannel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ArtifactRecord {
+    pub artifact_id: String,
+    pub video_id: String,
+    pub artifact_kind: String,
+    pub path: String,
+    pub content_hash: String,
+    pub byte_size: i64,
+    pub format_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StoredVideoSnapshot {
     pub snapshot_id: String,
     pub video_id: String,
@@ -145,6 +157,94 @@ ORDER BY added_at ASC
             .execute(&self.pool)
             .await
             .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn is_video_archived(&self, platform: &str, external_id: &str) -> Result<bool> {
+        let archive_key = format!("{platform}:{external_id}");
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM download_archive WHERE archive_key = ?1",
+        )
+        .bind(archive_key)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(exists > 0)
+    }
+
+    pub async fn insert_artifact(
+        &self,
+        video_id: &str,
+        artifact_kind: &str,
+        path: &str,
+        content_hash: &str,
+        byte_size: u64,
+        format_id: Option<&str>,
+    ) -> Result<ArtifactRecord> {
+        let artifact_id = Uuid::now_v7().to_string();
+        let created_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT INTO artifacts (
+    id, video_id, artifact_kind, path, content_hash, byte_size, format_id, created_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+        )
+        .bind(&artifact_id)
+        .bind(video_id)
+        .bind(artifact_kind)
+        .bind(path)
+        .bind(content_hash)
+        .bind(byte_size as i64)
+        .bind(format_id)
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(ArtifactRecord {
+            artifact_id,
+            video_id: video_id.to_owned(),
+            artifact_kind: artifact_kind.to_owned(),
+            path: path.to_owned(),
+            content_hash: content_hash.to_owned(),
+            byte_size: byte_size as i64,
+            format_id: format_id.map(ToOwned::to_owned),
+            created_at,
+        })
+    }
+
+    pub async fn insert_archive_entry(
+        &self,
+        platform: &str,
+        external_id: &str,
+        artifact_id: &str,
+    ) -> Result<()> {
+        let archive_id = Uuid::now_v7().to_string();
+        let downloaded_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        let archive_key = format!("{platform}:{external_id}");
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO download_archive (
+    id, platform, external_id, archive_key, downloaded_at, artifact_id
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+"#,
+        )
+        .bind(archive_id)
+        .bind(platform)
+        .bind(external_id)
+        .bind(archive_key)
+        .bind(downloaded_at)
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
         Ok(())
     }
 

@@ -71,6 +71,13 @@ pub struct MediaFormat {
     pub note: Option<String>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
+    pub download_url: Option<String>,
+    pub protocol: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub bitrate: Option<u64>,
+    pub has_video: bool,
+    pub has_audio: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

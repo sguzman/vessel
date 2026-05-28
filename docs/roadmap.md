@@ -20,7 +20,7 @@
 | [01](milestones/01-youtube-video-metadata.md) | YouTube Video Metadata | Completed |
 | [02](milestones/02-dataset-ledger.md) | Dataset Ledger | Completed |
 | [03](milestones/03-channel-tracking.md) | Channel Tracking | Completed |
-| [04](milestones/04-basic-download.md) | Basic Download | Planned |
+| [04](milestones/04-basic-download.md) | Basic Download | Completed |
 | [05](milestones/05-subs-thumbs-comments.md) | Subtitles, Thumbnails, Comments | Planned |
 | [06](milestones/06-ytdlp-bridge.md) | yt-dlp Bridge | Planned |
 | [07](milestones/07-format-selector-parity.md) | Format Selector Parity | Planned |

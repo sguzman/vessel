@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+reqwest.workspace = true
 serde.workspace = true
+tokio.workspace = true
 vessel-core = { path = "../vessel-core" }
 vessel-formats = { path = "../vessel-formats" }

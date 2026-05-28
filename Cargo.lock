@@ -2586,6 +2586,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vessel-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clap",
  "serde_json",
  "time",
@@ -2620,7 +2621,9 @@ dependencies = [
 name = "vessel-download"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "serde",
+ "tokio",
  "vessel-core",
  "vessel-formats",
 ]

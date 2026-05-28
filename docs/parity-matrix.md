@@ -10,7 +10,7 @@
 - [x] Native YouTube video metadata extraction
 - [x] Video snapshot history
 - [x] Channel tracking and sync
-- [ ] Basic native download path
+- [x] Basic native download path
 - [ ] Subtitles
 - [ ] Thumbnails
 - [ ] Comments
@@ -18,10 +18,10 @@
 ## Downloader And Postprocessing
 
 - [ ] Format selector parser for baseline expressions
-- [ ] Output template rendering
-- [ ] Resume and partial file handling
-- [ ] Artifact persistence
-- [ ] Archive semantics
+- [x] Output template rendering
+- [x] Resume and partial file handling
+- [x] Artifact persistence
+- [x] Archive semantics
 - [ ] FFmpeg merge/remux
 - [ ] Audio extraction
 - [ ] Metadata embedding
@@ -42,5 +42,5 @@
 - [x] Metadata changes create exactly one new snapshot.
 - [ ] Failed fetches preserve prior latest state.
 - [ ] Deleted/private states preserve old metadata.
-- [ ] Download resume keeps archive and artifacts consistent.
+- [x] Download resume keeps archive and artifacts consistent.
 - [ ] Format selection matches documented baseline expressions.
