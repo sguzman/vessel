@@ -21,6 +21,10 @@ impl ExtractorRegistry {
         self.extractors.push(Arc::new(extractor));
     }
 
+    pub fn register_arc(&mut self, extractor: Arc<dyn Extractor>) {
+        self.extractors.push(extractor);
+    }
+
     pub fn best_for(&self, input: &InputRef) -> Option<Arc<dyn Extractor>> {
         self.extractors
             .iter()
@@ -29,10 +33,10 @@ impl ExtractorRegistry {
             .cloned()
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
+    pub fn names(&self) -> Vec<String> {
         self.extractors
             .iter()
-            .map(|extractor| extractor.name())
+            .map(|extractor| extractor.name().to_owned())
             .collect()
     }
 }

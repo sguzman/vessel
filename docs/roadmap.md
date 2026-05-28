@@ -25,7 +25,7 @@
 | [06](milestones/06-native-parity.md) | Native Parity | Completed |
 | [07](milestones/07-format-selector-parity.md) | Format Selector Parity | Completed |
 | [08](milestones/08-postprocessing.md) | Postprocessing | Completed |
-| [09](milestones/09-plugin-system.md) | Plugin System | Planned |
+| [09](milestones/09-plugin-system.md) | Plugin System | Completed |
 
 ## Parity Tiers
 

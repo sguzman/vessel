@@ -11,5 +11,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
+toml.workspace = true
 url.workspace = true
+uuid.workspace = true
 vessel-core = { path = "../vessel-core" }

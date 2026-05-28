@@ -2642,7 +2642,9 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "toml",
  "url",
+ "uuid",
  "vessel-core",
 ]
 

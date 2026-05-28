@@ -11,7 +11,10 @@ use vessel_extractors::youtube::{
     ChannelVideoRef, YoutubeExtractor, extract_channel, extract_comments, extract_video,
     list_channel_videos,
 };
-use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
+use vessel_extractors::{
+    ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog,
+    load_plugins,
+};
 use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
 use vessel_postprocess::{PostprocessRequest, build_plan, execute_plan};
@@ -38,6 +41,7 @@ enum Commands {
     Info(UrlArg),
     Formats(UrlArg),
     Download(DownloadArgs),
+    Plugin(PluginCommand),
 }
 
 #[derive(Debug, Args)]
@@ -64,6 +68,27 @@ struct DownloadArgs {
     subtitles: bool,
     #[arg(long = "convert-subs")]
     convert_subs: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct PluginCommand {
+    #[command(subcommand)]
+    command: PluginSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginSubcommand {
+    List,
+    Install(PluginInstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct PluginInstallArgs {
+    name: String,
+    #[arg(long = "dir")]
+    dir: Option<String>,
+    #[arg(long = "kind", default_value = "fixture-extractor")]
+    kind: String,
 }
 
 #[derive(Debug, Args)]
@@ -185,7 +210,7 @@ async fn main() -> Result<()> {
             ChannelSubcommand::Sync(args) => channel_sync(args, &config).await,
         },
         Commands::Video(cmd) => match cmd.command {
-            VideoSubcommand::Refresh(args) => video_refresh(args, &config).await,
+            VideoSubcommand::Refresh(args) => video_refresh(args, &config, &paths).await,
             VideoSubcommand::History(args) => video_history(args, &config).await,
             VideoSubcommand::Subtitles(cmd) => match cmd.command {
                 VideoSubtitlesSubcommand::Sync(args) => video_subtitles_sync(args, &config).await,
@@ -194,9 +219,13 @@ async fn main() -> Result<()> {
                 VideoCommentsSubcommand::Sync(args) => video_comments_sync(args, &config).await,
             },
         },
-        Commands::Info(arg) => extract_preview(arg.url, InputKind::Url).await,
+        Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths).await,
         Commands::Formats(arg) => formats(arg.url).await,
         Commands::Download(args) => download(args, &config).await,
+        Commands::Plugin(cmd) => match cmd.command {
+            PluginSubcommand::List => plugin_list(&paths).await,
+            PluginSubcommand::Install(args) => plugin_install(args, &paths).await,
+        },
     }
 }
 
@@ -212,6 +241,8 @@ async fn doctor(
     let requested = config.database.url.clone();
     let db_target = requested.strip_prefix("sqlite://").unwrap_or(&requested);
     let db_exists = Path::new(db_target).exists();
+    let plugin_dirs = plugin_directories(paths);
+    let plugins = load_plugins(&plugin_dirs);
     let report = serde_json::json!({
         "config_paths": {
             "system": paths.system,
@@ -225,6 +256,23 @@ async fn doctor(
         },
         "binaries": {
             "ffmpeg": binary_available("ffmpeg"),
+        },
+        "plugins": {
+            "directories": plugin_dirs,
+            "loaded": plugins.plugins(),
+            "errors": plugins.errors(),
+        },
+        "providers": {
+            "youtube_po_token": provider_status(
+                &plugins,
+                config.youtube.po_token_provider.as_deref(),
+                "youtube.po_token",
+            ),
+            "youtube_cookies": provider_status(
+                &plugins,
+                config.youtube.cookies_from_browser.as_deref(),
+                "youtube.cookies",
+            ),
         }
     });
     println!(
@@ -276,8 +324,12 @@ async fn dataset_init(args: DatasetInitArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn extract_preview(url: String, kind: InputKind) -> Result<()> {
-    let registry = build_registry();
+async fn extract_preview(
+    url: String,
+    kind: InputKind,
+    paths: &vessel_core::ConfigPaths,
+) -> Result<()> {
+    let registry = build_registry(&load_runtime_plugins(paths));
     let input = InputRef { raw: url, kind };
     let extractor = registry
         .best_for(&input)
@@ -402,9 +454,13 @@ async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
     }
 }
 
-async fn video_refresh(args: VideoRefArg, config: &Config) -> Result<()> {
+async fn video_refresh(
+    args: VideoRefArg,
+    config: &Config,
+    paths: &vessel_core::ConfigPaths,
+) -> Result<()> {
     let (store, _) = init_sqlite_database(&config.database.url).await?;
-    let registry = build_registry();
+    let registry = build_registry(&load_runtime_plugins(paths));
     let input = parse_video_input(&args.video);
     let target_id = args.video.clone();
     let run_id = store.start_run("video refresh").await?;
@@ -733,9 +789,12 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn build_registry() -> ExtractorRegistry {
+fn build_registry(plugins: &PluginCatalog) -> ExtractorRegistry {
     let mut registry = ExtractorRegistry::default();
     registry.register(YoutubeExtractor);
+    for extractor in plugins.extractors() {
+        registry.register_arc(extractor);
+    }
     registry
 }
 
@@ -872,8 +931,154 @@ fn sanitize_component(input: &str) -> String {
         .collect()
 }
 
+async fn plugin_list(paths: &vessel_core::ConfigPaths) -> Result<()> {
+    let directories = plugin_directories(paths);
+    let plugins = load_runtime_plugins(paths);
+    let report = serde_json::json!({
+        "status": "ok",
+        "directories": directories,
+        "plugins": plugins.plugins(),
+        "errors": plugins.errors(),
+        "providers": plugins.providers(),
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn plugin_install(
+    args: PluginInstallArgs,
+    paths: &vessel_core::ConfigPaths,
+) -> Result<()> {
+    let target_root = args
+        .dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_project_plugin_dir(paths));
+    let plugin_id = sanitize_plugin_id(&args.name);
+    let plugin_dir = target_root.join(&plugin_id);
+    let fixtures_dir = plugin_dir.join("fixtures");
+    tokio::fs::create_dir_all(&fixtures_dir).await?;
+
+    match args.kind.as_str() {
+        "fixture-extractor" => {
+            let manifest = format!(
+                "id = \"{plugin_id}\"\nversion = \"0.1.0\"\n\n[[extractors]]\nid = \"fixture\"\nname = \"{plugin_id} fixture\"\nkind = \"fixture\"\nfixtures = \"fixtures/videos.json\"\nmatch_contains = [\"fixture://{plugin_id}\", \"example.test/{plugin_id}\"]\nsupport_level = \"generic\"\n\n[[providers]]\nid = \"po_token\"\npurpose = \"youtube.po_token\"\nkind = \"env\"\nenv = \"VESSEL_{}_PO_TOKEN\"\n",
+                plugin_id.to_ascii_uppercase().replace('-', "_")
+            );
+            tokio::fs::write(plugin_dir.join("plugin.toml"), manifest).await?;
+            tokio::fs::write(
+                fixtures_dir.join("videos.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "videos": {},
+                    "channels": {},
+                }))
+                .map_err(|err| VesselError::Config(err.to_string()))?,
+            )
+            .await?;
+        }
+        "provider-env" => {
+            let manifest = format!(
+                "id = \"{plugin_id}\"\nversion = \"0.1.0\"\n\n[[providers]]\nid = \"po_token\"\npurpose = \"youtube.po_token\"\nkind = \"env\"\nenv = \"VESSEL_{}_PO_TOKEN\"\n",
+                plugin_id.to_ascii_uppercase().replace('-', "_")
+            );
+            tokio::fs::write(plugin_dir.join("plugin.toml"), manifest).await?;
+        }
+        other => {
+            return Err(VesselError::Unsupported(format!(
+                "unsupported plugin scaffold kind `{other}`; supported kinds are fixture-extractor and provider-env"
+            )));
+        }
+    }
+
+    let report = serde_json::json!({
+        "status": "installed",
+        "plugin_id": plugin_id,
+        "kind": args.kind,
+        "path": plugin_dir,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+fn load_runtime_plugins(paths: &vessel_core::ConfigPaths) -> PluginCatalog {
+    load_plugins(&plugin_directories(paths))
+}
+
+fn plugin_directories(paths: &vessel_core::ConfigPaths) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(parent) = paths.system.parent() {
+        directories.push(parent.join("plugins"));
+    }
+    if let Some(parent) = paths.user.parent() {
+        directories.push(parent.join("plugins"));
+    }
+    directories.push(default_project_plugin_dir(paths));
+    directories
+}
+
+fn default_project_plugin_dir(paths: &vessel_core::ConfigPaths) -> PathBuf {
+    paths.project
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("plugins")
+}
+
+fn sanitize_plugin_id(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
+}
+
+fn provider_status(
+    plugins: &PluginCatalog,
+    configured: Option<&str>,
+    purpose: &str,
+) -> serde_json::Value {
+    match configured {
+        None => serde_json::json!({
+            "configured": false,
+        }),
+        Some(reference) => match plugins.resolve_provider(reference, purpose) {
+            Ok(Some(provider)) => serde_json::json!({
+                "configured": true,
+                "reference": format!("{}.{}", provider.plugin_id, provider.provider_id),
+                "purpose": provider.purpose,
+                "resolved": true,
+                "value_present": !provider.value.is_empty(),
+            }),
+            Ok(None) => serde_json::json!({
+                "configured": true,
+                "reference": reference,
+                "resolved": false,
+            }),
+            Err(err) => serde_json::json!({
+                "configured": true,
+                "reference": reference,
+                "resolved": false,
+                "error": err.to_string(),
+            }),
+        },
+    }
+}
+
 async fn extract_video_id_from_input(raw: &str) -> Result<String> {
-    let registry = build_registry();
+    let paths = vessel_core::ConfigPaths::discover();
+    let registry = build_registry(&load_runtime_plugins(&paths));
     let input = parse_video_input(raw);
     let extractor = registry
         .best_for(&input)

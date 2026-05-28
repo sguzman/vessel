@@ -34,7 +34,7 @@
 - [x] Native YouTube download hardening for cipher/signature-protected media
 - [ ] Additional native extractors beyond YouTube
 - [ ] Option-level CLI parity campaign
-- [ ] Plugin API and plugin management
+- [x] Plugin API and plugin management
 - [ ] External downloader parity
 
 ## Regression Targets

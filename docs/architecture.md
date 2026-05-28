@@ -4,7 +4,7 @@
 
 - `vessel-cli`: user-facing CLI and command wiring.
 - `vessel-core`: config, errors, event model, normalized metadata types.
-- `vessel-extractors`: extractor traits, registry, and site-specific implementations.
+- `vessel-extractors`: extractor traits, registry, site-specific implementations, and manifest-based plugin loading.
 - `vessel-ledger`: ledger-facing sync APIs and decisions.
 - `vessel-store`: SQLite schema, migrations, and store traits.
 - `vessel-logging`: `tracing` initialization and log formatting.
@@ -20,6 +20,7 @@
 - The ledger owns idempotency, snapshot insertion rules, and fetch-run recording.
 - The store owns persistence details and current-vs-history table semantics.
 - Logging consumes the internal event stream rather than inventing separate state transitions.
+- Plugins extend extractors and provider resolution through manifests and data files rather than patching built-in crates.
 
 ## Event Flow
 
@@ -29,6 +30,7 @@
 4. Ledger hashes normalized payloads and decides whether snapshots changed.
 5. Store persists current rows, snapshots, and fetch attempts.
 6. Download and postprocess stages attach artifacts later in the roadmap.
+7. Plugin manifests can register extra extractors and provider hooks at runtime.
 
 ## Initial Assumptions
 

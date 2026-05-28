@@ -30,7 +30,7 @@ pub enum ExtractedItem {
 
 #[async_trait]
 pub trait Extractor: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     fn supports(&self, input: &InputRef) -> SupportLevel;
 

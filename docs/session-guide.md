@@ -11,6 +11,7 @@
 7. Harden native YouTube downloads and broaden native comment pagination.
 8. Complete baseline format selector parsing and evaluation parity.
 9. Add FFmpeg-backed merge, remux, audio extraction, metadata/thumbnail embedding, and subtitle conversion.
+10. Add manifest-based plugin discovery, extractor extensions, and provider hooks.
 
 ## Definition Of Done
 

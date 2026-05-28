@@ -27,7 +27,7 @@ pub struct ChannelVideoRef {
 
 #[async_trait]
 impl Extractor for YoutubeExtractor {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "youtube"
     }
 
