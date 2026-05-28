@@ -2624,6 +2624,8 @@ version = "0.1.0"
 dependencies = [
  "reqwest",
  "serde",
+ "serde_json",
+ "time",
  "tokio",
  "vessel-core",
  "vessel-formats",
@@ -2648,6 +2650,7 @@ name = "vessel-formats"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror",
 ]
 
 [[package]]

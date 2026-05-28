@@ -9,6 +9,7 @@
 5. Add download planning and file transaction semantics.
 6. Add native subtitles, thumbnails, and first-pass native comments.
 7. Harden native YouTube downloads and broaden native comment pagination.
+8. Complete baseline format selector parsing and evaluation parity.
 
 ## Definition Of Done
 

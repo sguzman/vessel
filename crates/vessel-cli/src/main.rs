@@ -12,7 +12,7 @@ use vessel_extractors::youtube::{
     list_channel_videos,
 };
 use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
-use vessel_formats::FormatSelector;
+use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
 use vessel_store::{StoredTrackedChannel, init_sqlite_database};
 
@@ -574,7 +574,7 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let selector = parse_format_selector(args.format.as_deref());
+    let selector = parse_format_selector(args.format.as_deref())?;
     let planner = BasicDownloadPlanner;
     let plan = match planner.plan(&video, selector.clone(), &config.download.output) {
         Ok(plan) => plan,
@@ -758,13 +758,11 @@ fn parse_channel_input(raw: &str) -> InputRef {
     }
 }
 
-fn parse_format_selector(raw: Option<&str>) -> FormatSelector {
+fn parse_format_selector(raw: Option<&str>) -> Result<FormatSelector> {
     match raw {
-        None | Some("best") => FormatSelector::Best,
-        Some("worst") => FormatSelector::Worst,
-        Some("ba") | Some("bestaudio") => FormatSelector::BestAudio,
-        Some("bv") | Some("bestvideo") => FormatSelector::BestVideo,
-        Some(value) => FormatSelector::ExactFormatId(value.to_owned()),
+        None => Ok(FormatSelector::Best),
+        Some(value) => parse_selector(value)
+            .map_err(|err| VesselError::Unsupported(format!("invalid format selector: {err}"))),
     }
 }
 

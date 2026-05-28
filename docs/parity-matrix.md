@@ -17,7 +17,7 @@
 
 ## Downloader And Postprocessing
 
-- [ ] Format selector parser for baseline expressions
+- [x] Format selector parser for baseline expressions
 - [x] Output template rendering
 - [x] Resume and partial file handling
 - [x] Artifact persistence
@@ -44,4 +44,4 @@
 - [ ] Failed fetches preserve prior latest state.
 - [ ] Deleted/private states preserve old metadata.
 - [x] Download resume keeps archive and artifacts consistent.
-- [ ] Format selection matches documented baseline expressions.
+- [x] Format selection matches documented baseline expressions.
