@@ -45,6 +45,7 @@ pub struct ChannelMetadata {
     pub view_count: Option<u64>,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     pub fetched_at: OffsetDateTime,
     pub raw: Value,
 }
@@ -82,6 +83,7 @@ pub struct VideoMetadata {
     pub description: Option<String>,
     pub duration_seconds: Option<u64>,
     pub upload_date: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub release_timestamp: Option<OffsetDateTime>,
     pub view_count: Option<u64>,
     pub like_count: Option<u64>,
@@ -90,6 +92,7 @@ pub struct VideoMetadata {
     pub formats: Vec<MediaFormat>,
     pub subtitles: Vec<SubtitleTrack>,
     pub thumbnails: Vec<Thumbnail>,
+    #[serde(with = "time::serde::rfc3339")]
     pub fetched_at: OffsetDateTime,
     pub raw: Value,
 }

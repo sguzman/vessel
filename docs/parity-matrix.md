@@ -7,7 +7,7 @@
 - [x] Config loading
 - [x] Logging bootstrap
 - [x] SQLite schema bootstrap
-- [ ] Native YouTube video metadata extraction
+- [x] Native YouTube video metadata extraction
 - [ ] Video snapshot history
 - [ ] Channel tracking and sync
 - [ ] Basic native download path

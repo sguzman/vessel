@@ -17,7 +17,7 @@
 | Milestone | Title | Status |
 | --- | --- | --- |
 | [00](milestones/00-skeleton.md) | Skeleton | In Progress |
-| [01](milestones/01-youtube-video-metadata.md) | YouTube Video Metadata | Planned |
+| [01](milestones/01-youtube-video-metadata.md) | YouTube Video Metadata | In Progress |
 | [02](milestones/02-dataset-ledger.md) | Dataset Ledger | Planned |
 | [03](milestones/03-channel-tracking.md) | Channel Tracking | Planned |
 | [04](milestones/04-basic-download.md) | Basic Download | Planned |
