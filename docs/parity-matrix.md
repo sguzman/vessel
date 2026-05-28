@@ -13,7 +13,7 @@
 - [x] Basic native download path
 - [x] Subtitles
 - [x] Thumbnails
-- [x] Comments
+- [ ] Comments
 
 ## Downloader And Postprocessing
 
@@ -30,7 +30,8 @@
 
 ## Compatibility Milestones
 
-- [ ] `yt-dlp` bridge backend
+- [ ] Native YouTube comment extraction
+- [ ] Native YouTube download hardening for cipher/signature-protected media
 - [ ] Additional native extractors beyond YouTube
 - [ ] Option-level CLI parity campaign
 - [ ] Plugin API and plugin management

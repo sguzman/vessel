@@ -34,4 +34,4 @@
 
 - Native-first and YouTube-first.
 - SQLite-first; PostgreSQL is deferred until the ledger semantics are stable.
-- `yt-dlp` bridge support is a compatibility milestone, not the initial architecture center.
+- Strict native-only runtime: `vessel` must not shell out to Python or `yt-dlp` for supported behavior.

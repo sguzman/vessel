@@ -4,7 +4,7 @@ use std::process::Command;
 use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
-use vessel_core::models::{CommentMetadata, InputKind, InputRef, VideoMetadata};
+use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{Config, Result, VesselError, load_config};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -209,7 +209,6 @@ async fn doctor(
         },
         "binaries": {
             "ffmpeg": binary_available("ffmpeg"),
-            "yt-dlp": binary_available("yt-dlp"),
         }
     });
     println!(
@@ -299,6 +298,13 @@ async fn channel_add(args: ChannelAddArgs, config: &Config) -> Result<()> {
 }
 
 async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
+    if args.comments {
+        return print_unsupported_report(
+            "channel.sync.comments",
+            "native YouTube comment extraction is not implemented yet",
+        );
+    }
+
     let (store, _) = init_sqlite_database(&config.database.url).await?;
     let tracked_channels = store.list_tracked_channels().await?;
     let run_id = store.start_run("channel sync").await?;
@@ -514,30 +520,21 @@ async fn video_subtitles_sync(args: VideoRefArg, config: &Config) -> Result<()> 
     Ok(())
 }
 
-async fn video_comments_sync(args: VideoRefArg, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
-    let video = extract_video(&parse_video_input(&args.video)).await?;
-    store.upsert_video_snapshot(&video).await?;
-    let comments = fetch_comments_with_ytdlp(&video.url).await?;
-    let comment_snapshots_inserted = store.sync_comments(&comments).await?;
-    let history = store.load_comment_history(&video.video_id).await?;
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "synced",
-            "video_id": video.video_id,
-            "title": video.title,
-            "comments_fetched": comments.len(),
-            "comment_snapshots_inserted": comment_snapshots_inserted,
-            "history_counts": {
-                "comments": history.comments.len(),
-                "snapshots": history.snapshots.len(),
-            },
-        }))
-        .map_err(|err| VesselError::Config(err.to_string()))?
-    );
-    Ok(())
+async fn video_comments_sync(args: VideoRefArg, _config: &Config) -> Result<()> {
+    let lookup = if args.video.contains("://") {
+        extract_video_id_from_input(&args.video).await.ok()
+    } else {
+        Some(args.video)
+    };
+    let details = serde_json::json!({
+        "video": lookup,
+        "native_todo": "youtube comment extraction",
+    });
+    print_unsupported_report_with_details(
+        "video.comments.sync",
+        "native YouTube comment extraction is not implemented yet",
+        details,
+    )
 }
 
 async fn formats(url: String) -> Result<()> {
@@ -574,46 +571,34 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
 
     let selector = parse_format_selector(args.format.as_deref());
     let planner = BasicDownloadPlanner;
-    let fallback_shape = select_format_for_output(&video, &selector);
-    let native_plan = planner.plan(&video, selector.clone(), &config.download.output);
-    let fallback_output_path =
-        render_fallback_output_path(&video, fallback_shape, &config.download.output);
-    let result = match native_plan {
-        Ok(plan) => match execute_download(&plan).await {
-            Ok(result) => result,
-            Err(_err) if binary_available("yt-dlp") => {
-                fallback_download_with_ytdlp(&args.url, args.format.as_deref(), &plan.output_path)
-                    .await?;
-                let bytes_written = tokio::fs::metadata(&plan.output_path).await?.len();
-                vessel_download::DownloadResult {
-                    format_id: fallback_shape
-                        .as_ref()
-                        .map(|format| format.format_id.clone())
-                        .unwrap_or_else(|| plan.format_id.clone()),
-                    output_path: plan.output_path.clone(),
-                    temp_path: plan.temp_path.clone(),
-                    bytes_written,
-                    resumed: false,
-                }
-            }
-            Err(err) => return Err(err),
-        },
-        Err(_err) if binary_available("yt-dlp") => {
-            fallback_download_with_ytdlp(&args.url, args.format.as_deref(), &fallback_output_path)
-                .await?;
-            let bytes_written = tokio::fs::metadata(&fallback_output_path).await?.len();
-            vessel_download::DownloadResult {
-                format_id: fallback_shape
-                    .as_ref()
-                    .map(|format| format.format_id.clone())
-                    .unwrap_or_else(|| "yt-dlp".to_owned()),
-                output_path: fallback_output_path.clone(),
-                temp_path: fallback_output_path.with_extension("part"),
-                bytes_written,
-                resumed: false,
-            }
+    let plan = match planner.plan(&video, selector.clone(), &config.download.output) {
+        Ok(plan) => plan,
+        Err(err) => {
+            return print_unsupported_report_with_details(
+                "download.plan",
+                &format!("native download planning failed: {err}"),
+                serde_json::json!({
+                    "video_id": video.video_id,
+                    "requested_format": args.format,
+                    "native_only": true,
+                }),
+            );
         }
-        Err(err) => return Err(err),
+    };
+    let result = match execute_download(&plan).await {
+        Ok(result) => result,
+        Err(err) => {
+            return print_unsupported_report_with_details(
+                "download.execute",
+                &format!("native download failed without external fallback: {err}"),
+                serde_json::json!({
+                    "video_id": video.video_id,
+                    "format_id": plan.format_id,
+                    "output_path": plan.output_path,
+                    "native_only": true,
+                }),
+            );
+        }
     };
     let file_hash = hash_file(&result.output_path).await?;
     let artifact = store
@@ -737,10 +722,10 @@ async fn sync_channel_video(
     if args.download_thumbnails {
         sync_video_thumbnails(store, &video).await?;
     }
-    if args.comments {
-        let comments = fetch_comments_with_ytdlp(&video.url).await?;
-        store.sync_comments(&comments).await?;
-    }
+    debug_assert!(
+        !args.comments,
+        "comment sync should be rejected before execution"
+    );
     Ok(snapshot_inserted)
 }
 
@@ -776,64 +761,6 @@ fn parse_format_selector(raw: Option<&str>) -> FormatSelector {
         Some("bv") | Some("bestvideo") => FormatSelector::BestVideo,
         Some(value) => FormatSelector::ExactFormatId(value.to_owned()),
     }
-}
-
-fn select_format_for_output<'a>(
-    video: &'a vessel_core::models::VideoMetadata,
-    selector: &FormatSelector,
-) -> Option<&'a vessel_core::models::MediaFormat> {
-    match selector {
-        FormatSelector::ExactFormatId(format_id) => video
-            .formats
-            .iter()
-            .find(|format| format.format_id == *format_id),
-        FormatSelector::Worst => video
-            .formats
-            .iter()
-            .filter(|format| format.has_video || format.has_audio)
-            .min_by_key(|format| {
-                (
-                    u8::from(format.has_video && format.has_audio),
-                    format.height.unwrap_or(0),
-                    format.bitrate.unwrap_or(0),
-                )
-            }),
-        _ => video
-            .formats
-            .iter()
-            .filter(|format| format.has_video || format.has_audio)
-            .max_by_key(|format| {
-                (
-                    u8::from(format.has_video && format.has_audio),
-                    format.height.unwrap_or(0),
-                    format.bitrate.unwrap_or(0),
-                )
-            }),
-    }
-}
-
-fn render_fallback_output_path(
-    video: &vessel_core::models::VideoMetadata,
-    format: Option<&vessel_core::models::MediaFormat>,
-    template: &str,
-) -> std::path::PathBuf {
-    let ext = format.map(|format| format.ext.as_str()).unwrap_or("mp4");
-    let mut output = template.to_owned();
-    output = output.replace("%(id)s", &sanitize_component(&video.video_id));
-    output = output.replace(
-        "%(title)s",
-        &sanitize_component(video.title.as_deref().unwrap_or(&video.video_id)),
-    );
-    output = output.replace(
-        "%(channel)s",
-        &sanitize_component(video.channel_id.as_deref().unwrap_or("unknown-channel")),
-    );
-    output = output.replace(
-        "%(upload_date)s",
-        &sanitize_component(video.upload_date.as_deref().unwrap_or("unknown-date")),
-    );
-    output = output.replace("%(ext)s", ext);
-    std::path::PathBuf::from(output)
 }
 
 fn sanitize_component(input: &str) -> String {
@@ -985,121 +912,6 @@ fn http_client() -> Result<Client> {
         .map_err(|err| VesselError::Extractor(format!("http client build failed: {err}")))
 }
 
-async fn fetch_comments_with_ytdlp(video_url: &str) -> Result<Vec<CommentMetadata>> {
-    if !binary_available("yt-dlp") {
-        return Err(VesselError::Unsupported(
-            "comment sync currently requires yt-dlp to be installed".to_owned(),
-        ));
-    }
-
-    let temp_dir = std::env::temp_dir().join(format!("vessel-comments-{}", uuid::Uuid::now_v7()));
-    tokio::fs::create_dir_all(&temp_dir).await?;
-    let output_template = temp_dir.join("%(id)s");
-    let status = tokio::process::Command::new("yt-dlp")
-        .arg("--skip-download")
-        .arg("--write-comments")
-        .arg("--write-info-json")
-        .arg("--no-progress")
-        .arg("--extractor-args")
-        .arg("youtube:max_comments=200,100,100,20,2;comment_sort=top")
-        .arg("--output")
-        .arg(&output_template)
-        .arg(video_url)
-        .status()
-        .await?;
-    if !status.success() {
-        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-        return Err(VesselError::Extractor(format!(
-            "yt-dlp comment extraction failed with exit status {status}"
-        )));
-    }
-
-    let mut entries = tokio::fs::read_dir(&temp_dir).await?;
-    let mut info_json_path = None;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".info.json"))
-        {
-            info_json_path = Some(path);
-            break;
-        }
-    }
-    let Some(info_json_path) = info_json_path else {
-        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-        return Err(VesselError::Extractor(
-            "yt-dlp did not produce an .info.json file for comments".to_owned(),
-        ));
-    };
-
-    let raw = tokio::fs::read_to_string(&info_json_path).await?;
-    let value: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|err| VesselError::Extractor(err.to_string()))?;
-    let comments = parse_comment_metadata(&value);
-    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-    Ok(comments)
-}
-
-fn parse_comment_metadata(root: &serde_json::Value) -> Vec<CommentMetadata> {
-    let mut comments = Vec::new();
-    let Some(video_id) = root.get("id").and_then(serde_json::Value::as_str) else {
-        return comments;
-    };
-    if let Some(items) = root.get("comments").and_then(serde_json::Value::as_array) {
-        for item in items {
-            flatten_comment(item, video_id, &mut comments);
-        }
-    }
-    comments
-}
-
-fn flatten_comment(value: &serde_json::Value, video_id: &str, output: &mut Vec<CommentMetadata>) {
-    let Some(comment_id) = value.get("id").and_then(serde_json::Value::as_str) else {
-        return;
-    };
-
-    output.push(CommentMetadata {
-        platform: vessel_core::models::Platform::YouTube,
-        comment_id: comment_id.to_owned(),
-        video_id: video_id.to_owned(),
-        author_channel_id: value
-            .get("author_id")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned),
-        author_name: value
-            .get("author")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned),
-        text: value
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        like_count: value.get("like_count").and_then(serde_json::Value::as_u64),
-        reply_count: value.get("reply_count").and_then(serde_json::Value::as_u64),
-        published_at: value
-            .get("timestamp")
-            .and_then(serde_json::Value::as_i64)
-            .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-            .and_then(|timestamp| {
-                timestamp
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            }),
-        fetched_at: OffsetDateTime::now_utc(),
-        raw: value.clone(),
-    });
-
-    if let Some(replies) = value.get("replies").and_then(serde_json::Value::as_array) {
-        for reply in replies {
-            flatten_comment(reply, video_id, output);
-        }
-    }
-}
-
 fn thumbnail_extension(url: &str) -> &'static str {
     let lower = url.to_ascii_lowercase();
     if lower.contains(".webp") {
@@ -1111,27 +923,28 @@ fn thumbnail_extension(url: &str) -> &'static str {
     }
 }
 
-async fn fallback_download_with_ytdlp(
-    url: &str,
-    requested_format: Option<&str>,
-    output_path: &std::path::Path,
-) -> Result<()> {
-    let mut command = tokio::process::Command::new("yt-dlp");
-    command.arg("--no-progress");
-    command.arg("--output").arg(output_path);
-    if let Some(format) = requested_format {
-        command.arg("-f").arg(format);
-    }
-    command.arg(url);
+fn print_unsupported_report(feature: &str, message: &str) -> Result<()> {
+    print_unsupported_report_with_details(feature, message, serde_json::json!({}))
+}
 
-    let status = command.status().await?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(VesselError::Extractor(format!(
-            "yt-dlp fallback failed with exit status {status}"
-        )))
-    }
+fn print_unsupported_report_with_details(
+    feature: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    let report = serde_json::json!({
+        "status": "unsupported",
+        "feature": feature,
+        "message": message,
+        "native_only": true,
+        "details": details,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
 }
 
 fn binary_available(name: &str) -> bool {

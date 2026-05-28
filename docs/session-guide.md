@@ -7,17 +7,18 @@
 3. Persist video snapshots and video history queries.
 4. Add tracked channels and channel sync.
 5. Add download planning and file transaction semantics.
-6. Add comments, subtitles, and thumbnails.
-7. Add bridge compatibility and close parity gaps.
+6. Add native subtitles and thumbnails, while keeping unsupported native gaps explicit.
+7. Implement native comments and native download hardening.
 
 ## Definition Of Done
 
 - A milestone is done when its acceptance checklist is complete and the relevant command path is no longer a stub.
 - Schema changes must preserve the current-vs-snapshots distinction.
 - New behavior should add tests for idempotency or compatibility when applicable.
+- Unsupported features must fail explicitly and may not shell out to Python or `yt-dlp`.
 
 ## Future Session Rules
 
 - Keep extraction, ledger, and download changes separated by crate boundary.
 - Do not bypass the event model with ad hoc logging once real execution paths are added.
-- Treat bridge support as temporary compatibility, not the long-term architecture center.
+- Preserve the native-only runtime contract even when parity gaps remain.
