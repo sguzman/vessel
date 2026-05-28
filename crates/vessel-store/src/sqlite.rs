@@ -50,6 +50,7 @@ pub struct StoredVideoSnapshot {
     pub video_id: String,
     pub fetched_at: String,
     pub content_hash: String,
+    pub changed_fields: Vec<String>,
     pub normalized_json: serde_json::Value,
     pub raw_json: serde_json::Value,
 }
@@ -128,6 +129,7 @@ SELECT
     video_id,
     fetched_at,
     content_hash,
+    changed_fields_json,
     normalized_json,
     raw_json
 FROM video_snapshots
@@ -148,6 +150,10 @@ ORDER BY fetched_at DESC
                     video_id: row.get("video_id"),
                     fetched_at: row.get("fetched_at"),
                     content_hash: row.get("content_hash"),
+                    changed_fields: serde_json::from_str::<Vec<String>>(
+                        &row.get::<String, _>("changed_fields_json"),
+                    )
+                    .map_err(|err| VesselError::Database(err.to_string()))?,
                     normalized_json: serde_json::from_str::<serde_json::Value>(
                         &row.get::<String, _>("normalized_json"),
                     )
@@ -368,9 +374,19 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         video: &VideoMetadata,
         content_hash: &str,
     ) -> Result<bool> {
+        let next_projection = video_snapshot_projection(video);
+        let previous_projection = self
+            .latest_video_snapshot_projection(&video.video_id)
+            .await?;
+        let changed_fields = previous_projection
+            .as_ref()
+            .map(|previous| diff_paths(previous, &next_projection))
+            .unwrap_or_default();
         let normalized_json =
             serde_json::to_string(video).map_err(|err| VesselError::Database(err.to_string()))?;
         let raw_json = serde_json::to_string(&video.raw)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        let changed_fields_json = serde_json::to_string(&changed_fields)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let fetched_at = video
             .fetched_at
@@ -390,7 +406,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         .bind(content_hash.to_owned())
         .bind(normalized_json)
         .bind(raw_json)
-        .bind("{}")
+        .bind(changed_fields_json)
         .execute(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
@@ -507,8 +523,42 @@ impl Ledger for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    async fn latest_video_snapshot_projection(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = sqlx::query(
+            r#"
+SELECT normalized_json
+FROM video_snapshots
+WHERE video_id = ?1
+ORDER BY fetched_at DESC
+LIMIT 1
+"#,
+        )
+        .bind(video_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        row.map(|row| {
+            let json =
+                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("normalized_json"))
+                    .map_err(|err| VesselError::Database(err.to_string()))?;
+            Ok(video_snapshot_projection_from_value(&json))
+        })
+        .transpose()
+    }
+}
+
 fn channel_snapshot_hash(channel: &ChannelMetadata) -> Result<String> {
-    canonical_json_hash(&serde_json::json!({
+    canonical_json_hash(&channel_snapshot_projection(channel))
+        .map_err(|err| VesselError::Database(err.to_string()))
+}
+
+fn channel_snapshot_projection(channel: &ChannelMetadata) -> serde_json::Value {
+    serde_json::json!({
         "platform": &channel.platform,
         "channel_id": &channel.channel_id,
         "handle": &channel.handle,
@@ -520,12 +570,16 @@ fn channel_snapshot_hash(channel: &ChannelMetadata) -> Result<String> {
         "view_count": channel.view_count,
         "avatar_url": &channel.avatar_url,
         "banner_url": &channel.banner_url,
-    }))
-    .map_err(|err| VesselError::Database(err.to_string()))
+    })
 }
 
 fn video_snapshot_hash(video: &VideoMetadata) -> Result<String> {
-    canonical_json_hash(&serde_json::json!({
+    canonical_json_hash(&video_snapshot_projection(video))
+        .map_err(|err| VesselError::Database(err.to_string()))
+}
+
+fn video_snapshot_projection(video: &VideoMetadata) -> serde_json::Value {
+    serde_json::json!({
         "platform": &video.platform,
         "video_id": &video.video_id,
         "channel_id": &video.channel_id,
@@ -542,8 +596,71 @@ fn video_snapshot_hash(video: &VideoMetadata) -> Result<String> {
         "formats": &video.formats,
         "subtitles": &video.subtitles,
         "thumbnails": &video.thumbnails,
-    }))
-    .map_err(|err| VesselError::Database(err.to_string()))
+    })
+}
+
+fn video_snapshot_projection_from_value(value: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "platform": value.get("platform"),
+        "video_id": value.get("video_id"),
+        "channel_id": value.get("channel_id"),
+        "url": value.get("url"),
+        "title": value.get("title"),
+        "description": value.get("description"),
+        "duration_seconds": value.get("duration_seconds"),
+        "upload_date": value.get("upload_date"),
+        "release_timestamp": value.get("release_timestamp"),
+        "view_count": value.get("view_count"),
+        "like_count": value.get("like_count"),
+        "comment_count": value.get("comment_count"),
+        "availability": value.get("availability"),
+        "formats": value.get("formats"),
+        "subtitles": value.get("subtitles"),
+        "thumbnails": value.get("thumbnails"),
+    })
+}
+
+fn diff_paths(previous: &serde_json::Value, next: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_diff_paths(previous, next, "", &mut paths);
+    paths
+}
+
+fn collect_diff_paths(
+    previous: &serde_json::Value,
+    next: &serde_json::Value,
+    prefix: &str,
+    output: &mut Vec<String>,
+) {
+    match (previous, next) {
+        (serde_json::Value::Object(previous_map), serde_json::Value::Object(next_map)) => {
+            let mut keys = previous_map
+                .keys()
+                .chain(next_map.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match (previous_map.get(&key), next_map.get(&key)) {
+                    (Some(previous_value), Some(next_value)) => {
+                        collect_diff_paths(previous_value, next_value, &path, output);
+                    }
+                    _ => output.push(path),
+                }
+            }
+        }
+        _ => {
+            if previous != next {
+                output.push(prefix.to_owned());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +726,48 @@ mod tests {
         assert!(!second);
         assert_eq!(history.snapshots.len(), 1);
         assert!(history.current.is_some());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn changed_video_metadata_creates_one_new_snapshot_with_diff() {
+        let path = temp_db_path("diff");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+        let fetched_at = OffsetDateTime::now_utc();
+
+        let mut changed_video = sample_video(fetched_at + time::Duration::minutes(1));
+        changed_video.title = Some("Updated Title".to_owned());
+        changed_video.view_count = Some(200);
+
+        let first = store
+            .upsert_video_snapshot(&sample_video(fetched_at))
+            .await
+            .expect("first upsert");
+        let second = store
+            .upsert_video_snapshot(&changed_video)
+            .await
+            .expect("changed upsert");
+        let third = store
+            .upsert_video_snapshot(&changed_video)
+            .await
+            .expect("repeat changed upsert");
+        let history = store
+            .load_video_history("video-123")
+            .await
+            .expect("history");
+
+        assert!(first);
+        assert!(second);
+        assert!(!third);
+        assert_eq!(history.snapshots.len(), 2);
+        assert_eq!(
+            history.snapshots[0].changed_fields,
+            vec!["title".to_owned(), "view_count".to_owned()]
+        );
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
