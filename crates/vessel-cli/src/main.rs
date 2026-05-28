@@ -5,11 +5,13 @@ use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
 use vessel_core::models::{InputKind, InputRef};
 use vessel_core::{Config, Result, VesselError, load_config};
-use vessel_extractors::youtube::YoutubeExtractor;
+use vessel_extractors::youtube::{
+    ChannelVideoRef, YoutubeExtractor, extract_channel, extract_video, list_channel_videos,
+};
 use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
 use vessel_formats::FormatSelector;
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
-use vessel_store::init_sqlite_database;
+use vessel_store::{StoredTrackedChannel, init_sqlite_database};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -135,8 +137,8 @@ async fn main() -> Result<()> {
             DatasetSubcommand::Init(args) => dataset_init(args, &config).await,
         },
         Commands::Channel(cmd) => match cmd.command {
-            ChannelSubcommand::Add(args) => stub_channel_add(args),
-            ChannelSubcommand::Sync(args) => stub_channel_sync(args),
+            ChannelSubcommand::Add(args) => channel_add(args, &config).await,
+            ChannelSubcommand::Sync(args) => channel_sync(args, &config).await,
         },
         Commands::Video(cmd) => match cmd.command {
             VideoSubcommand::Refresh(args) => video_refresh(args, &config).await,
@@ -225,39 +227,6 @@ async fn dataset_init(args: DatasetInitArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn stub_channel_add(args: ChannelAddArgs) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "channel add",
-            "channel": args.channel,
-            "next": "Persist tracked channel identities in the ledger."
-        }))
-        .map_err(|err| VesselError::Config(err.to_string()))?
-    );
-    Ok(())
-}
-
-fn stub_channel_sync(args: ChannelSyncArgs) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "channel sync",
-            "options": {
-                "comments": args.comments,
-                "subtitles": args.subtitles,
-                "since": args.since,
-                "max_videos": args.max_videos,
-            },
-            "next": "Implement channel discovery, staleness policy, and snapshot upserts."
-        }))
-        .map_err(|err| VesselError::Config(err.to_string()))?
-    );
-    Ok(())
-}
-
 async fn extract_preview(url: String, kind: InputKind) -> Result<()> {
     let registry = build_registry();
     let input = InputRef { raw: url, kind };
@@ -272,6 +241,115 @@ async fn extract_preview(url: String, kind: InputKind) -> Result<()> {
         serde_json::to_string_pretty(&item).map_err(|err| VesselError::Config(err.to_string()))?
     );
     Ok(())
+}
+
+async fn channel_add(args: ChannelAddArgs, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let input = parse_channel_input(&args.channel);
+    let channel = extract_channel(&input).await?;
+    store.upsert_channel_snapshot(&channel).await?;
+    store.add_tracked_channel(&channel).await?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "tracked",
+            "channel_id": channel.channel_id,
+            "handle": channel.handle,
+            "title": channel.title,
+            "url": channel.url,
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let tracked_channels = store.list_tracked_channels().await?;
+    let run_id = store.start_run("channel sync").await?;
+    let started_at = OffsetDateTime::now_utc();
+
+    let result = async {
+        let mut summary = serde_json::json!({
+            "status": "synced",
+            "run_id": run_id,
+            "tracked_channels": tracked_channels.len(),
+            "channels_processed": 0usize,
+            "channel_snapshots_inserted": 0usize,
+            "videos_discovered": 0usize,
+            "video_snapshots_inserted": 0usize,
+            "video_refreshes_skipped_by_since": 0usize,
+            "errors": 0usize,
+            "options": {
+                "comments": args.comments,
+                "subtitles": args.subtitles,
+                "since": args.since,
+                "max_videos": args.max_videos,
+            }
+        });
+
+        for tracked in tracked_channels {
+            match sync_one_channel(&store, &tracked, &args, run_id, started_at).await {
+                Ok(channel_report) => {
+                    increment_summary(&mut summary, "channels_processed", 1);
+                    increment_summary(
+                        &mut summary,
+                        "channel_snapshots_inserted",
+                        usize::from(channel_report.channel_snapshot_inserted),
+                    );
+                    increment_summary(
+                        &mut summary,
+                        "videos_discovered",
+                        channel_report.videos_discovered,
+                    );
+                    increment_summary(
+                        &mut summary,
+                        "video_snapshots_inserted",
+                        channel_report.video_snapshots_inserted,
+                    );
+                    increment_summary(
+                        &mut summary,
+                        "video_refreshes_skipped_by_since",
+                        channel_report.skipped_by_since,
+                    );
+                }
+                Err(err) => {
+                    increment_summary(&mut summary, "errors", 1);
+                    store
+                        .record_attempt(FetchAttempt {
+                            run_id,
+                            target_kind: "channel".to_owned(),
+                            target_external_id: tracked.channel_id.clone(),
+                            status: AttemptStatus::Failed,
+                            started_at,
+                            finished_at: OffsetDateTime::now_utc(),
+                            error_message: Some(err.to_string()),
+                        })
+                        .await?;
+                }
+            }
+        }
+
+        store.finish_run(run_id, true).await?;
+        Ok::<_, VesselError>(summary)
+    }
+    .await;
+
+    match result {
+        Ok(summary) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|err| VesselError::Config(err.to_string()))?
+            );
+            Ok(())
+        }
+        Err(err) => {
+            store.finish_run(run_id, false).await?;
+            Err(err)
+        }
+    }
 }
 
 async fn video_refresh(args: VideoRefArg, config: &Config) -> Result<()> {
@@ -409,11 +487,100 @@ fn build_registry() -> ExtractorRegistry {
     registry
 }
 
+#[derive(Debug, Default)]
+struct ChannelSyncReport {
+    channel_snapshot_inserted: bool,
+    videos_discovered: usize,
+    video_snapshots_inserted: usize,
+    skipped_by_since: usize,
+}
+
+async fn sync_one_channel(
+    store: &vessel_store::SqliteStore,
+    tracked: &StoredTrackedChannel,
+    args: &ChannelSyncArgs,
+    run_id: uuid::Uuid,
+    started_at: OffsetDateTime,
+) -> Result<ChannelSyncReport> {
+    let input = parse_channel_input(&tracked.canonical_url);
+    let channel = extract_channel(&input).await?;
+    let channel_snapshot_inserted = store.upsert_channel_snapshot(&channel).await?;
+    store
+        .record_attempt(FetchAttempt {
+            run_id,
+            target_kind: "channel".to_owned(),
+            target_external_id: channel.channel_id.clone(),
+            status: AttemptStatus::Success,
+            started_at,
+            finished_at: OffsetDateTime::now_utc(),
+            error_message: None,
+        })
+        .await?;
+
+    let mut videos = list_channel_videos(&input).await?;
+    let discovered_count = videos.len();
+    if let Some(since) = &args.since {
+        videos.retain(|video| {
+            video
+                .published_at
+                .as_deref()
+                .map(|published| published >= since.as_str())
+                .unwrap_or(true)
+        });
+    }
+    let skipped_by_since = discovered_count.saturating_sub(videos.len());
+    if let Some(max_videos) = args.max_videos {
+        videos.truncate(max_videos);
+    }
+
+    let mut report = ChannelSyncReport {
+        channel_snapshot_inserted,
+        videos_discovered: discovered_count,
+        ..ChannelSyncReport::default()
+    };
+
+    for video_ref in videos {
+        if sync_channel_video(store, video_ref).await? {
+            report.video_snapshots_inserted += 1;
+        }
+    }
+
+    report.skipped_by_since = skipped_by_since;
+    store
+        .mark_tracked_channel_synced(&channel.channel_id)
+        .await?;
+    Ok(report)
+}
+
+async fn sync_channel_video(
+    store: &vessel_store::SqliteStore,
+    video_ref: ChannelVideoRef,
+) -> Result<bool> {
+    let input = InputRef {
+        raw: video_ref.video_id,
+        kind: InputKind::VideoId,
+    };
+    let video = extract_video(&input).await?;
+    store.upsert_video_snapshot(&video).await
+}
+
 fn parse_video_input(raw: &str) -> InputRef {
     let kind = if raw.contains("://") {
         InputKind::Url
     } else {
         InputKind::VideoId
+    };
+    InputRef {
+        raw: raw.to_owned(),
+        kind,
+    }
+}
+
+fn parse_channel_input(raw: &str) -> InputRef {
+    let kind = if raw.contains("://") || raw.contains('@') || raw.contains("/channel/") {
+        InputKind::Url
+    } else {
+        InputKind::ChannelId
     };
     InputRef {
         raw: raw.to_owned(),
@@ -436,6 +603,14 @@ async fn extract_video_id_from_input(raw: &str) -> Result<String> {
             "history lookup requires a video target".to_owned(),
         )),
     }
+}
+
+fn increment_summary(summary: &mut serde_json::Value, key: &str, delta: usize) {
+    let current = summary
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    summary[key] = serde_json::Value::from(current + delta as u64);
 }
 
 fn binary_available(name: &str) -> bool {

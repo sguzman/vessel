@@ -45,6 +45,16 @@ pub struct StoredVideoLatest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StoredTrackedChannel {
+    pub channel_id: String,
+    pub canonical_url: String,
+    pub handle: Option<String>,
+    pub title: Option<String>,
+    pub added_at: String,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StoredVideoSnapshot {
     pub snapshot_id: String,
     pub video_id: String,
@@ -69,6 +79,73 @@ impl SqliteStore {
 
     pub fn pool(&self) -> &Pool<Sqlite> {
         &self.pool
+    }
+
+    pub async fn add_tracked_channel(&self, channel: &ChannelMetadata) -> Result<()> {
+        let added_at = channel
+            .fetched_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT INTO tracked_channels (
+    channel_id, canonical_url, handle, title, added_at, last_sync_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(channel_id) DO UPDATE SET
+    canonical_url = excluded.canonical_url,
+    handle = excluded.handle,
+    title = excluded.title
+"#,
+        )
+        .bind(channel.channel_id.clone())
+        .bind(channel.url.clone())
+        .bind(channel.handle.clone())
+        .bind(channel.title.clone())
+        .bind(added_at)
+        .bind(None::<String>)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn list_tracked_channels(&self) -> Result<Vec<StoredTrackedChannel>> {
+        let rows = sqlx::query(
+            r#"
+SELECT channel_id, canonical_url, handle, title, added_at, last_sync_at
+FROM tracked_channels
+ORDER BY added_at ASC
+"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| StoredTrackedChannel {
+                channel_id: row.get("channel_id"),
+                canonical_url: row.get("canonical_url"),
+                handle: row.get("handle"),
+                title: row.get("title"),
+                added_at: row.get("added_at"),
+                last_sync_at: row.get("last_sync_at"),
+            })
+            .collect())
+    }
+
+    pub async fn mark_tracked_channel_synced(&self, channel_id: &str) -> Result<()> {
+        let synced_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query("UPDATE tracked_channels SET last_sync_at = ?2 WHERE channel_id = ?1")
+            .bind(channel_id)
+            .bind(synced_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
     }
 
     pub async fn load_video_history(&self, video_ref: &str) -> Result<VideoHistory> {
@@ -670,7 +747,7 @@ mod tests {
 
     use time::OffsetDateTime;
     use uuid::Uuid;
-    use vessel_core::models::{Availability, Platform, VideoMetadata};
+    use vessel_core::models::{Availability, ChannelMetadata, Platform, VideoMetadata};
     use vessel_ledger::Ledger;
 
     use super::init_sqlite_database;
@@ -768,6 +845,44 @@ mod tests {
             history.snapshots[0].changed_fields,
             vec!["title".to_owned(), "view_count".to_owned()]
         );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn tracked_channels_can_be_added_and_listed() {
+        let path = temp_db_path("tracked");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+        let now = OffsetDateTime::now_utc();
+
+        let channel = ChannelMetadata {
+            platform: Platform::YouTube,
+            channel_id: "UC-tracked".to_owned(),
+            handle: Some("@tracked".to_owned()),
+            url: "https://www.youtube.com/@tracked".to_owned(),
+            title: Some("Tracked".to_owned()),
+            description: Some("Tracked channel".to_owned()),
+            subscriber_count: None,
+            video_count: None,
+            view_count: None,
+            avatar_url: None,
+            banner_url: None,
+            fetched_at: now,
+            raw: serde_json::json!({ "tracked": true }),
+        };
+
+        store
+            .add_tracked_channel(&channel)
+            .await
+            .expect("add channel");
+        let tracked = store.list_tracked_channels().await.expect("list tracked");
+
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].channel_id, "UC-tracked");
+        assert_eq!(tracked[0].handle.as_deref(), Some("@tracked"));
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));

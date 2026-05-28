@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS channel_snapshots (
     UNIQUE(channel_id, content_hash)
 );
 
+CREATE TABLE IF NOT EXISTS tracked_channels (
+    channel_id TEXT PRIMARY KEY,
+    canonical_url TEXT NOT NULL,
+    handle TEXT,
+    title TEXT,
+    added_at TEXT NOT NULL,
+    last_sync_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS videos (
     id TEXT PRIMARY KEY,
     platform TEXT NOT NULL,

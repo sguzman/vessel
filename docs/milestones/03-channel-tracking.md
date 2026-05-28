@@ -6,14 +6,14 @@ Track channels and synchronize current and historical channel/video metadata.
 
 ## Deliverables
 
-- [ ] `vessel channel add <channel>`
-- [ ] `vessel channel sync`
-- [ ] Channel snapshot persistence
-- [ ] Video discovery from channels
-- [ ] Freshness policy implementation
+- [x] `vessel channel add <channel>`
+- [x] `vessel channel sync`
+- [x] Channel snapshot persistence
+- [x] Video discovery from channels
+- [x] Freshness policy implementation
 
 ## Acceptance Criteria
 
-- [ ] Channels are stored as tracked targets.
-- [ ] Sync discovers new videos and updates known ones.
-- [ ] Re-running sync without changes does not create duplicate snapshots.
+- [x] Channels are stored as tracked targets.
+- [x] Sync discovers new videos and updates known ones.
+- [x] Re-running sync without changes does not create duplicate snapshots.

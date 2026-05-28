@@ -9,7 +9,7 @@
 - [x] SQLite schema bootstrap
 - [x] Native YouTube video metadata extraction
 - [x] Video snapshot history
-- [ ] Channel tracking and sync
+- [x] Channel tracking and sync
 - [ ] Basic native download path
 - [ ] Subtitles
 - [ ] Thumbnails
@@ -38,7 +38,7 @@
 
 ## Regression Targets
 
-- [ ] Re-running channel sync does not duplicate snapshots.
+- [x] Re-running channel sync does not duplicate snapshots.
 - [x] Metadata changes create exactly one new snapshot.
 - [ ] Failed fetches preserve prior latest state.
 - [ ] Deleted/private states preserve old metadata.
