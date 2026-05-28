@@ -14,6 +14,7 @@ use vessel_extractors::youtube::{
 use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
 use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
+use vessel_postprocess::{PostprocessRequest, build_plan, execute_plan};
 use vessel_store::{StoredTrackedChannel, init_sqlite_database};
 
 #[derive(Debug, Parser)]
@@ -49,6 +50,20 @@ struct DownloadArgs {
     url: String,
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
+    #[arg(long = "remux-video")]
+    remux_video: Option<String>,
+    #[arg(short = 'x', long = "extract-audio")]
+    extract_audio: bool,
+    #[arg(long = "audio-format", default_value = "mp3")]
+    audio_format: String,
+    #[arg(long = "embed-metadata")]
+    embed_metadata: bool,
+    #[arg(long = "embed-thumbnail")]
+    embed_thumbnail: bool,
+    #[arg(long = "subtitles")]
+    subtitles: bool,
+    #[arg(long = "convert-subs")]
+    convert_subs: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -585,6 +600,15 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
                 serde_json::json!({
                     "video_id": video.video_id,
                     "requested_format": args.format,
+                    "requested_postprocess": {
+                        "remux_video": args.remux_video,
+                        "extract_audio": args.extract_audio,
+                        "audio_format": args.audio_format,
+                        "embed_metadata": args.embed_metadata,
+                        "embed_thumbnail": args.embed_thumbnail,
+                        "subtitles": args.subtitles,
+                        "convert_subs": args.convert_subs,
+                    },
                     "native_only": true,
                 }),
             );
@@ -598,24 +622,92 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
                 &format!("native download failed without external fallback: {err}"),
                 serde_json::json!({
                     "video_id": video.video_id,
-                    "format_id": plan.format_id,
+                    "format_ids": plan.downloads.iter().map(|item| item.format_id.clone()).collect::<Vec<_>>(),
                     "output_path": plan.output_path,
                     "native_only": true,
                 }),
             );
         }
     };
-    let file_hash = hash_file(&result.output_path).await?;
+
+    let subtitle_paths = if args.subtitles || args.convert_subs.is_some() {
+        sync_subtitle_artifacts(&store, &video).await?
+    } else {
+        Vec::new()
+    };
+
+    let thumbnail_path = if args.embed_thumbnail {
+        sync_primary_thumbnail_artifact(&store, &video).await?
+    } else {
+        None
+    };
+
+    let extract_audio_format = args.extract_audio.then(|| args.audio_format.clone());
+    let postprocess_request = PostprocessRequest {
+        video_title: video.title.clone(),
+        channel_id: video.channel_id.clone(),
+        description: video.description.clone(),
+        final_output_path: postprocess_output_path(&plan.output_path, &args),
+        media_inputs: result
+            .files
+            .iter()
+            .map(|file| file.output_path.clone())
+            .collect(),
+        thumbnail_path: thumbnail_path.clone(),
+        subtitle_paths: subtitle_paths.iter().map(PathBuf::from).collect(),
+        remux_video: args.remux_video.clone(),
+        extract_audio: extract_audio_format,
+        embed_metadata: args.embed_metadata,
+        embed_thumbnail: args.embed_thumbnail,
+        convert_subtitles: args.convert_subs.clone(),
+    };
+    let postprocess_plan = build_plan(&postprocess_request);
+    let postprocess_result = execute_plan(&postprocess_request, &postprocess_plan).await?;
+
+    let final_output_path = postprocess_result
+        .final_media_path
+        .clone()
+        .unwrap_or_else(|| plan.output_path.clone());
+    let file_hash = hash_file(&final_output_path).await?;
+    let byte_size = tokio::fs::metadata(&final_output_path).await?.len();
     let artifact = store
         .insert_artifact(
             &video.video_id,
             "video",
-            &result.output_path.to_string_lossy(),
+            &final_output_path.to_string_lossy(),
             &file_hash,
-            result.bytes_written,
-            Some(&result.format_id),
+            byte_size,
+            Some(
+                &result
+                    .files
+                    .iter()
+                    .map(|file| file.format_id.clone())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            ),
         )
         .await?;
+    let mut generated_artifacts = Vec::new();
+    for generated in postprocess_result.generated_artifacts {
+        let generated_hash = hash_file(&generated.path).await?;
+        let generated_size = tokio::fs::metadata(&generated.path).await?.len();
+        let stored = store
+            .insert_artifact(
+                &video.video_id,
+                &generated.kind,
+                &generated.path.to_string_lossy(),
+                &generated_hash,
+                generated_size,
+                None,
+            )
+            .await?;
+        generated_artifacts.push(serde_json::json!({
+            "artifact_id": stored.artifact_id,
+            "kind": stored.artifact_kind,
+            "path": stored.path,
+            "content_hash": stored.content_hash,
+        }));
+    }
     store
         .insert_archive_entry("youtube", &video.video_id, &artifact.artifact_id)
         .await?;
@@ -626,12 +718,15 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
             "status": "downloaded",
             "video_id": video.video_id,
             "title": video.title,
-            "format_id": result.format_id,
-            "output_path": result.output_path,
-            "bytes_written": result.bytes_written,
-            "resumed": result.resumed,
+            "format_ids": result.files.iter().map(|file| file.format_id.clone()).collect::<Vec<_>>(),
+            "output_path": final_output_path,
+            "bytes_written": byte_size,
+            "resumed": result.files.iter().any(|file| file.resumed),
             "artifact_id": artifact.artifact_id,
             "content_hash": artifact.content_hash,
+            "downloaded_files": result.files,
+            "postprocess_plan": postprocess_plan,
+            "generated_artifacts": generated_artifacts,
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
     );
@@ -811,6 +906,16 @@ fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+fn postprocess_output_path(base_output_path: &Path, args: &DownloadArgs) -> PathBuf {
+    if let Some(audio_format) = args.extract_audio.then_some(args.audio_format.as_str()) {
+        return base_output_path.with_extension(audio_format);
+    }
+    if let Some(remux_video) = args.remux_video.as_deref() {
+        return base_output_path.with_extension(remux_video);
+    }
+    base_output_path.to_path_buf()
+}
+
 async fn sync_video_thumbnails(
     store: &vessel_store::SqliteStore,
     video: &VideoMetadata,
@@ -841,6 +946,14 @@ async fn sync_video_thumbnails(
         paths.push(path.to_string_lossy().into_owned());
     }
     Ok(paths)
+}
+
+async fn sync_primary_thumbnail_artifact(
+    store: &vessel_store::SqliteStore,
+    video: &VideoMetadata,
+) -> Result<Option<PathBuf>> {
+    let paths = sync_video_thumbnails(store, video).await?;
+    Ok(paths.last().map(PathBuf::from))
 }
 
 async fn sync_subtitle_artifacts(

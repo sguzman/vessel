@@ -2599,6 +2599,7 @@ dependencies = [
  "vessel-formats",
  "vessel-ledger",
  "vessel-logging",
+ "vessel-postprocess",
  "vessel-store",
 ]
 
@@ -2678,6 +2679,9 @@ name = "vessel-postprocess"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tokio",
+ "uuid",
+ "vessel-core",
 ]
 
 [[package]]

@@ -9,23 +9,43 @@ use vessel_core::models::{MediaFormat, VideoMetadata};
 use vessel_core::{Result, VesselError};
 use vessel_formats::FormatSelector;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DownloadRole {
+    Media,
+    Video,
+    Audio,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadPlan {
-    pub video_id: String,
+pub struct PlannedDownload {
     pub format_id: String,
     pub url: String,
     pub output_path: PathBuf,
     pub temp_path: PathBuf,
-    pub selector: FormatSelector,
+    pub role: DownloadRole,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadResult {
+pub struct DownloadPlan {
+    pub video_id: String,
+    pub output_path: PathBuf,
+    pub selector: FormatSelector,
+    pub downloads: Vec<PlannedDownload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadedFile {
     pub format_id: String,
     pub output_path: PathBuf,
     pub temp_path: PathBuf,
     pub bytes_written: u64,
     pub resumed: bool,
+    pub role: DownloadRole,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadResult {
+    pub files: Vec<DownloadedFile>,
 }
 
 pub trait DownloadPlanner: Send + Sync {
@@ -47,86 +67,190 @@ impl DownloadPlanner for BasicDownloadPlanner {
         selector: FormatSelector,
         output_template: &str,
     ) -> Result<DownloadPlan> {
-        let format = select_format(item, &selector)?;
-        let output_path = render_output_path(item, format, output_template);
-        let temp_path = output_path.with_extension(format!("{}.part", format.ext));
+        let output_ext = planned_output_extension(item, &selector)?;
+        let output_path = render_output_path(item, &output_ext, output_template);
+        let selected_formats = select_formats(item, &selector)?;
+        let downloads = selected_formats
+            .into_iter()
+            .enumerate()
+            .map(|(index, planned)| {
+                let output_path = if planned.role == DownloadRole::Media && index == 0 {
+                    output_path.clone()
+                } else {
+                    sibling_download_path(&output_path, &planned.format.format_id, &planned.format.ext)
+                };
+                let temp_path =
+                    output_path.with_extension(format!("{}.part", planned.format.ext));
+                Ok(PlannedDownload {
+                    format_id: planned.format.format_id.clone(),
+                    url: planned.format.download_url.clone().ok_or_else(|| {
+                        VesselError::Unsupported("selected format has no download url".to_owned())
+                    })?,
+                    output_path,
+                    temp_path,
+                    role: planned.role,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(DownloadPlan {
             video_id: item.video_id.clone(),
-            format_id: format.format_id.clone(),
-            url: format.download_url.clone().ok_or_else(|| {
-                VesselError::Unsupported("selected format has no download url".to_owned())
-            })?,
             output_path,
-            temp_path,
             selector,
+            downloads,
         })
     }
 }
 
 pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
-    if let Some(parent) = plan.output_path.parent() {
-        fs::create_dir_all(parent).await?;
+    let mut files = Vec::new();
+    for download in &plan.downloads {
+        if let Some(parent) = download.output_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let existing_bytes = fs::metadata(&download.temp_path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        let client = Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            )
+            .build()
+            .map_err(|err| VesselError::Extractor(format!("http client build failed: {err}")))?;
+        let mut request = client.get(&download.url);
+        if existing_bytes > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| VesselError::Extractor(format!("download request failed: {err}")))?;
+        let status = response.status();
+        if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
+            return Err(VesselError::Extractor(format!(
+                "download returned http status {status}"
+            )));
+        }
+
+        let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT && existing_bytes > 0;
+        let append = resumed;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(!append)
+            .append(append)
+            .open(&download.temp_path)
+            .await?;
+
+        let mut bytes_written = if resumed { existing_bytes } else { 0 };
+        let mut response = response;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| VesselError::Extractor(format!("download stream failed: {err}")))?
+        {
+            file.write_all(&chunk).await?;
+            bytes_written += chunk.len() as u64;
+        }
+        file.flush().await?;
+        drop(file);
+
+        fs::rename(&download.temp_path, &download.output_path).await?;
+        files.push(DownloadedFile {
+            format_id: download.format_id.clone(),
+            output_path: download.output_path.clone(),
+            temp_path: download.temp_path.clone(),
+            bytes_written,
+            resumed,
+            role: download.role,
+        });
     }
 
-    let existing_bytes = fs::metadata(&plan.temp_path)
-        .await
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    Ok(DownloadResult { files })
+}
 
-    let client = Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        )
-        .build()
-        .map_err(|err| VesselError::Extractor(format!("http client build failed: {err}")))?;
-    let mut request = client.get(&plan.url);
-    if existing_bytes > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
+#[derive(Clone, Copy)]
+struct SelectedFormat<'a> {
+    format: &'a MediaFormat,
+    role: DownloadRole,
+}
+
+fn select_formats<'a>(item: &'a VideoMetadata, selector: &FormatSelector) -> Result<Vec<SelectedFormat<'a>>> {
+    match selector {
+        FormatSelector::Merge(left, right) => {
+            let mut selected = Vec::new();
+            selected.extend(select_formats(item, left)?);
+            selected.extend(select_formats(item, right)?);
+            Ok(selected)
+        }
+        FormatSelector::Fallback(selectors) => {
+            let mut last_error = None;
+            for branch in selectors {
+                match select_formats(item, branch) {
+                    Ok(formats) => return Ok(formats),
+                    Err(err) => last_error = Some(err),
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                VesselError::Unsupported("fallback selector had no branches".to_owned())
+            }))
+        }
+        selector => {
+            let format = select_format(item, selector)?;
+            Ok(vec![SelectedFormat {
+                format,
+                role: selector_role(selector, format),
+            }])
+        }
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|err| VesselError::Extractor(format!("download request failed: {err}")))?;
-    let status = response.status();
-    if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
-        return Err(VesselError::Extractor(format!(
-            "download returned http status {status}"
-        )));
+}
+
+fn planned_output_extension(item: &VideoMetadata, selector: &FormatSelector) -> Result<String> {
+    match selector {
+        FormatSelector::Merge(left, right) => {
+            let left = select_format(item, left)?;
+            let right = select_format(item, right)?;
+            Ok(merge_output_extension(left, right))
+        }
+        FormatSelector::Fallback(selectors) => {
+            let mut last_error = None;
+            for branch in selectors {
+                match planned_output_extension(item, branch) {
+                    Ok(ext) => return Ok(ext),
+                    Err(err) => last_error = Some(err),
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                VesselError::Unsupported("fallback selector had no branches".to_owned())
+            }))
+        }
+        selector => Ok(select_format(item, selector)?.ext.clone()),
     }
+}
 
-    let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT && existing_bytes > 0;
-    let append = resumed;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(!append)
-        .append(append)
-        .open(&plan.temp_path)
-        .await?;
-
-    let mut bytes_written = if resumed { existing_bytes } else { 0 };
-    let mut response = response;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| VesselError::Extractor(format!("download stream failed: {err}")))?
-    {
-        file.write_all(&chunk).await?;
-        bytes_written += chunk.len() as u64;
+fn merge_output_extension(left: &MediaFormat, right: &MediaFormat) -> String {
+    if left.ext == right.ext && matches!(left.ext.as_str(), "mp4" | "webm" | "mkv") {
+        return left.ext.clone();
     }
-    file.flush().await?;
-    drop(file);
+    if matches!(left.ext.as_str(), "mp4" | "m4a") && matches!(right.ext.as_str(), "mp4" | "m4a") {
+        return "mp4".to_owned();
+    }
+    "mkv".to_owned()
+}
 
-    fs::rename(&plan.temp_path, &plan.output_path).await?;
-
-    Ok(DownloadResult {
-        format_id: plan.format_id.clone(),
-        output_path: plan.output_path.clone(),
-        temp_path: plan.temp_path.clone(),
-        bytes_written,
-        resumed,
-    })
+fn selector_role(selector: &FormatSelector, format: &MediaFormat) -> DownloadRole {
+    match selector {
+        FormatSelector::BestAudio => DownloadRole::Audio,
+        FormatSelector::BestVideo => DownloadRole::Video,
+        FormatSelector::Filtered { base, .. } => selector_role(base, format),
+        _ if format.has_video && !format.has_audio => DownloadRole::Video,
+        _ if format.has_audio && !format.has_video => DownloadRole::Audio,
+        _ => DownloadRole::Media,
+    }
 }
 
 fn select_format<'a>(
@@ -185,13 +309,16 @@ fn select_format<'a>(
             }))
         }
         FormatSelector::Merge(_, _) => Err(VesselError::Unsupported(
-            "merge selectors require postprocessing and are not executable yet".to_owned(),
+            "merge selectors must be resolved through multi-format planning".to_owned(),
         )),
     }
 }
 
 fn best_downloadable_format(formats: &[MediaFormat]) -> Option<&MediaFormat> {
-    best_from_candidates(formats.iter().filter(|format| format.download_url.is_some()), SelectorKind::Best)
+    best_from_candidates(
+        formats.iter().filter(|format| format.download_url.is_some()),
+        SelectorKind::Best,
+    )
 }
 
 fn worst_downloadable_format(formats: &[MediaFormat]) -> Option<&MediaFormat> {
@@ -375,7 +502,7 @@ fn compare_u64_option(left: Option<u64>, op: &str, right: &str) -> Result<bool> 
     Ok(result)
 }
 
-fn render_output_path(item: &VideoMetadata, format: &MediaFormat, template: &str) -> PathBuf {
+fn render_output_path(item: &VideoMetadata, ext: &str, template: &str) -> PathBuf {
     let mut output = template.to_owned();
     output = output.replace("%(id)s", &sanitize_component(&item.video_id));
     output = output.replace(
@@ -390,8 +517,16 @@ fn render_output_path(item: &VideoMetadata, format: &MediaFormat, template: &str
         "%(upload_date)s",
         &sanitize_component(item.upload_date.as_deref().unwrap_or("unknown-date")),
     );
-    output = output.replace("%(ext)s", &format.ext);
+    output = output.replace("%(ext)s", ext);
     Path::new(&output).to_path_buf()
+}
+
+fn sibling_download_path(final_output_path: &Path, format_id: &str, ext: &str) -> PathBuf {
+    let stem = final_output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    final_output_path.with_file_name(format!("{stem}.f{format_id}.{ext}"))
 }
 
 fn sanitize_component(input: &str) -> String {
@@ -407,7 +542,8 @@ fn sanitize_component(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BasicDownloadPlanner, DownloadPlanner};
+    use super::{BasicDownloadPlanner, DownloadPlanner, DownloadRole};
+    use std::path::PathBuf;
     use vessel_core::models::{Availability, MediaFormat, Platform, VideoMetadata};
     use vessel_formats::parse_selector;
 
@@ -492,11 +628,16 @@ mod tests {
     }
 
     #[test]
-    fn fallback_selector_resolves_to_best_when_merge_is_not_executable() {
+    fn merge_fallback_plans_combined_output() {
         let planner = BasicDownloadPlanner;
         let selector = parse_selector("bestvideo+bestaudio/best").unwrap();
         let plan = planner.plan(&sample_video(), selector, "%(id)s.%(ext)s").unwrap();
-        assert_eq!(plan.format_id, "22");
+        assert_eq!(plan.output_path, PathBuf::from("video123.mkv"));
+        assert_eq!(plan.downloads.len(), 2);
+        assert_eq!(plan.downloads[0].format_id, "137");
+        assert_eq!(plan.downloads[0].role, DownloadRole::Video);
+        assert_eq!(plan.downloads[1].format_id, "251");
+        assert_eq!(plan.downloads[1].role, DownloadRole::Audio);
     }
 
     #[test]
@@ -504,7 +645,7 @@ mod tests {
         let planner = BasicDownloadPlanner;
         let selector = parse_selector("best[ext=mp4]").unwrap();
         let plan = planner.plan(&sample_video(), selector, "%(id)s.%(ext)s").unwrap();
-        assert_eq!(plan.format_id, "22");
+        assert_eq!(plan.downloads[0].format_id, "22");
     }
 
     #[test]
@@ -512,7 +653,7 @@ mod tests {
         let planner = BasicDownloadPlanner;
         let selector = parse_selector("bestvideo[height<=720]").unwrap();
         let plan = planner.plan(&sample_video(), selector, "%(id)s.%(ext)s").unwrap();
-        assert_eq!(plan.format_id, "22");
+        assert_eq!(plan.downloads[0].format_id, "22");
     }
 
     #[test]
@@ -520,6 +661,6 @@ mod tests {
         let planner = BasicDownloadPlanner;
         let selector = parse_selector("bestaudio").unwrap();
         let plan = planner.plan(&sample_video(), selector, "%(id)s.%(ext)s").unwrap();
-        assert_eq!(plan.format_id, "251");
+        assert_eq!(plan.downloads[0].format_id, "251");
     }
 }

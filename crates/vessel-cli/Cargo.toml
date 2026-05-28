@@ -22,4 +22,5 @@ vessel-extractors = { path = "../vessel-extractors" }
 vessel-formats = { path = "../vessel-formats" }
 vessel-ledger = { path = "../vessel-ledger" }
 vessel-logging = { path = "../vessel-logging" }
+vessel-postprocess = { path = "../vessel-postprocess" }
 vessel-store = { path = "../vessel-store" }

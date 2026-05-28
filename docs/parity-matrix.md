@@ -22,11 +22,11 @@
 - [x] Resume and partial file handling
 - [x] Artifact persistence
 - [x] Archive semantics
-- [ ] FFmpeg merge/remux
-- [ ] Audio extraction
-- [ ] Metadata embedding
-- [ ] Thumbnail embedding
-- [ ] Subtitle conversion
+- [x] FFmpeg merge/remux
+- [x] Audio extraction
+- [x] Metadata embedding
+- [x] Thumbnail embedding
+- [x] Subtitle conversion
 
 ## Compatibility Milestones
 

@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+vessel-core = { path = "../vessel-core" }
