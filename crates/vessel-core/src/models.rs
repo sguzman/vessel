@@ -65,6 +65,22 @@ pub struct SubtitleTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentMetadata {
+    pub platform: Platform,
+    pub comment_id: String,
+    pub video_id: String,
+    pub author_channel_id: Option<String>,
+    pub author_name: Option<String>,
+    pub text: String,
+    pub like_count: Option<u64>,
+    pub reply_count: Option<u64>,
+    pub published_at: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub fetched_at: OffsetDateTime,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFormat {
     pub format_id: String,
     pub ext: String,

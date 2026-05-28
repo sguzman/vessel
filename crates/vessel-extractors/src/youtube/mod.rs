@@ -9,8 +9,8 @@ use url::Url;
 use vessel_core::Result;
 use vessel_core::VesselError;
 use vessel_core::models::{
-    Availability, ChannelMetadata, InputKind, InputRef, MediaFormat, Platform, Thumbnail,
-    VideoMetadata,
+    Availability, ChannelMetadata, InputKind, InputRef, MediaFormat, Platform, SubtitleTrack,
+    Thumbnail, VideoMetadata,
 };
 
 use crate::traits::{ExtractContext, ExtractRequest, ExtractedItem, Extractor, SupportLevel};
@@ -334,6 +334,7 @@ fn parse_video_metadata(
         .unwrap_or_default();
 
     let formats = streaming_data.map(parse_formats).unwrap_or_default();
+    let subtitles = parse_subtitles(raw);
 
     Ok(VideoMetadata {
         platform: Platform::YouTube,
@@ -354,7 +355,7 @@ fn parse_video_metadata(
         comment_count: None,
         availability: parse_availability(raw, details),
         formats,
-        subtitles: Vec::new(),
+        subtitles,
         thumbnails,
         fetched_at,
         raw: raw.clone(),
@@ -555,6 +556,33 @@ fn parse_availability(raw: &Value, details: &serde_json::Map<String, Value>) -> 
         Some("ERROR") => Availability::Deleted,
         _ => Availability::Unknown,
     }
+}
+
+fn parse_subtitles(raw: &Value) -> Vec<SubtitleTrack> {
+    raw.get("captions")
+        .and_then(|value| value.get("playerCaptionsTracklistRenderer"))
+        .and_then(|value| value.get("captionTracks"))
+        .and_then(Value::as_array)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter_map(|track| {
+                    Some(SubtitleTrack {
+                        language: track.get("languageCode")?.as_str()?.to_owned(),
+                        url: track
+                            .get("baseUrl")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        is_auto_generated: track
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(|kind| kind == "asr")
+                            .unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn find_object_with_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {

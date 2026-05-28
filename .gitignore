@@ -3,3 +3,7 @@ logs
 .cache
 tmp
 *.sqlite
+*-shm
+*-wal
+thumbnails
+subtitles

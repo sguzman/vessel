@@ -71,6 +71,59 @@ CREATE TABLE IF NOT EXISTS video_snapshots (
     UNIQUE(video_id, content_hash)
 );
 
+CREATE TABLE IF NOT EXISTS subtitle_tracks (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    url TEXT,
+    is_auto_generated INTEGER NOT NULL,
+    latest_snapshot_id TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(video_id, language, is_auto_generated)
+);
+
+CREATE TABLE IF NOT EXISTS subtitle_snapshots (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    is_auto_generated INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    normalized_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    changed_fields_json TEXT,
+    UNIQUE(video_id, language, is_auto_generated, content_hash)
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    comment_id TEXT NOT NULL UNIQUE,
+    video_id TEXT NOT NULL,
+    author_channel_id TEXT,
+    author_name TEXT,
+    text TEXT NOT NULL,
+    like_count INTEGER,
+    reply_count INTEGER,
+    published_at TEXT,
+    updated_at TEXT NOT NULL,
+    latest_snapshot_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS comment_snapshots (
+    id TEXT PRIMARY KEY,
+    comment_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    normalized_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    changed_fields_json TEXT,
+    UNIQUE(comment_id, content_hash)
+);
+
 CREATE TABLE IF NOT EXISTS fetch_runs (
     id TEXT PRIMARY KEY,
     command TEXT NOT NULL,

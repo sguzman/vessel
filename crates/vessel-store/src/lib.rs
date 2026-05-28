@@ -3,6 +3,7 @@ pub mod sqlite;
 pub mod traits;
 
 pub use sqlite::{
-    ArtifactRecord, DatabasePaths, SqliteStore, StoredTrackedChannel, StoredVideoLatest,
-    StoredVideoSnapshot, VideoHistory, init_sqlite_database,
+    ArtifactRecord, CommentHistory, DatabasePaths, SqliteStore, StoredComment,
+    StoredCommentSnapshot, StoredSubtitleSnapshot, StoredSubtitleTrack, StoredTrackedChannel,
+    StoredVideoLatest, StoredVideoSnapshot, SubtitleHistory, VideoHistory, init_sqlite_database,
 };

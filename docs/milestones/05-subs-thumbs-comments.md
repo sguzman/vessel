@@ -6,13 +6,13 @@ Expand metadata and download coverage for comments, subtitles, and thumbnails.
 
 ## Deliverables
 
-- [ ] `vessel video subtitles sync <video>`
-- [ ] `vessel video comments sync <video>`
-- [ ] Thumbnail fetch and persistence
-- [ ] Optional channel sync integration flags
+- [x] `vessel video subtitles sync <video>`
+- [x] `vessel video comments sync <video>`
+- [x] Thumbnail fetch and persistence
+- [x] Optional channel sync integration flags
 
 ## Acceptance Criteria
 
-- [ ] Comments can be fetched and stored historically.
-- [ ] Subtitle tracks are normalized and persisted.
-- [ ] Thumbnail records are linked to the related video.
+- [x] Comments can be fetched and stored historically.
+- [x] Subtitle tracks are normalized and persisted.
+- [x] Thumbnail records are linked to the related video.

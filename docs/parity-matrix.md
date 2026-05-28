@@ -11,9 +11,9 @@
 - [x] Video snapshot history
 - [x] Channel tracking and sync
 - [x] Basic native download path
-- [ ] Subtitles
-- [ ] Thumbnails
-- [ ] Comments
+- [x] Subtitles
+- [x] Thumbnails
+- [x] Comments
 
 ## Downloader And Postprocessing
 

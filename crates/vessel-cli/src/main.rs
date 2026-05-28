@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Args, Parser, Subcommand};
+use reqwest::Client;
 use time::OffsetDateTime;
-use vessel_core::models::{InputKind, InputRef};
+use vessel_core::models::{CommentMetadata, InputKind, InputRef, VideoMetadata};
 use vessel_core::{Config, Result, VesselError, load_config};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -100,6 +101,8 @@ struct ChannelSyncArgs {
     comments: bool,
     #[arg(long)]
     subtitles: bool,
+    #[arg(long = "download-thumbnails")]
+    download_thumbnails: bool,
     #[arg(long)]
     since: Option<String>,
     #[arg(long = "max-videos")]
@@ -116,11 +119,35 @@ struct VideoCommand {
 enum VideoSubcommand {
     Refresh(VideoRefArg),
     History(VideoRefArg),
+    Subtitles(VideoSubtitlesCommand),
+    Comments(VideoCommentsCommand),
 }
 
 #[derive(Debug, Args)]
 struct VideoRefArg {
     video: String,
+}
+
+#[derive(Debug, Args)]
+struct VideoSubtitlesCommand {
+    #[command(subcommand)]
+    command: VideoSubtitlesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum VideoSubtitlesSubcommand {
+    Sync(VideoRefArg),
+}
+
+#[derive(Debug, Args)]
+struct VideoCommentsCommand {
+    #[command(subcommand)]
+    command: VideoCommentsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum VideoCommentsSubcommand {
+    Sync(VideoRefArg),
 }
 
 #[tokio::main]
@@ -144,6 +171,12 @@ async fn main() -> Result<()> {
         Commands::Video(cmd) => match cmd.command {
             VideoSubcommand::Refresh(args) => video_refresh(args, &config).await,
             VideoSubcommand::History(args) => video_history(args, &config).await,
+            VideoSubcommand::Subtitles(cmd) => match cmd.command {
+                VideoSubtitlesSubcommand::Sync(args) => video_subtitles_sync(args, &config).await,
+            },
+            VideoSubcommand::Comments(cmd) => match cmd.command {
+                VideoCommentsSubcommand::Sync(args) => video_comments_sync(args, &config).await,
+            },
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url).await,
         Commands::Formats(arg) => formats(arg.url).await,
@@ -285,6 +318,7 @@ async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
             "options": {
                 "comments": args.comments,
                 "subtitles": args.subtitles,
+                "download_thumbnails": args.download_thumbnails,
                 "since": args.since,
                 "max_videos": args.max_videos,
             }
@@ -377,6 +411,9 @@ async fn video_refresh(args: VideoRefArg, config: &Config) -> Result<()> {
             }
         };
         let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
+        let subtitle_snapshots_inserted =
+            store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+        let thumbnail_artifacts = sync_video_thumbnails(&store, &video).await?;
         let finished_at = OffsetDateTime::now_utc();
         store
             .record_attempt(FetchAttempt {
@@ -397,6 +434,8 @@ async fn video_refresh(args: VideoRefArg, config: &Config) -> Result<()> {
             "video_id": video.video_id,
             "title": video.title,
             "snapshot_inserted": snapshot_inserted,
+            "subtitle_snapshots_inserted": subtitle_snapshots_inserted,
+            "thumbnail_artifacts": thumbnail_artifacts,
             "fetched_at": video.fetched_at.format(&time::format_description::well_known::Rfc3339)
                 .map_err(|err| VesselError::Config(err.to_string()))?,
         }))
@@ -443,6 +482,60 @@ async fn video_history(args: VideoRefArg, config: &Config) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&history)
             .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn video_subtitles_sync(args: VideoRefArg, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let video = extract_video(&parse_video_input(&args.video)).await?;
+    store.upsert_video_snapshot(&video).await?;
+    let subtitle_snapshots_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+    let artifact_paths = sync_subtitle_artifacts(&store, &video).await?;
+    let history = store.load_subtitle_history(&video.video_id).await?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "synced",
+            "video_id": video.video_id,
+            "title": video.title,
+            "tracks": video.subtitles.len(),
+            "subtitle_snapshots_inserted": subtitle_snapshots_inserted,
+            "artifacts_written": artifact_paths.len(),
+            "artifact_paths": artifact_paths,
+            "history_counts": {
+                "tracks": history.tracks.len(),
+                "snapshots": history.snapshots.len(),
+            },
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn video_comments_sync(args: VideoRefArg, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let video = extract_video(&parse_video_input(&args.video)).await?;
+    store.upsert_video_snapshot(&video).await?;
+    let comments = fetch_comments_with_ytdlp(&video.url).await?;
+    let comment_snapshots_inserted = store.sync_comments(&comments).await?;
+    let history = store.load_comment_history(&video.video_id).await?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "synced",
+            "video_id": video.video_id,
+            "title": video.title,
+            "comments_fetched": comments.len(),
+            "comment_snapshots_inserted": comment_snapshots_inserted,
+            "history_counts": {
+                "comments": history.comments.len(),
+                "snapshots": history.snapshots.len(),
+            },
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
     );
     Ok(())
 }
@@ -614,7 +707,7 @@ async fn sync_one_channel(
     };
 
     for video_ref in videos {
-        if sync_channel_video(store, video_ref).await? {
+        if sync_channel_video(store, video_ref, args).await? {
             report.video_snapshots_inserted += 1;
         }
     }
@@ -629,13 +722,26 @@ async fn sync_one_channel(
 async fn sync_channel_video(
     store: &vessel_store::SqliteStore,
     video_ref: ChannelVideoRef,
+    args: &ChannelSyncArgs,
 ) -> Result<bool> {
     let input = InputRef {
         raw: video_ref.video_id,
         kind: InputKind::VideoId,
     };
     let video = extract_video(&input).await?;
-    store.upsert_video_snapshot(&video).await
+    let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
+    if args.subtitles {
+        store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+        sync_subtitle_artifacts(store, &video).await?;
+    }
+    if args.download_thumbnails {
+        sync_video_thumbnails(store, &video).await?;
+    }
+    if args.comments {
+        let comments = fetch_comments_with_ytdlp(&video.url).await?;
+        store.sync_comments(&comments).await?;
+    }
+    Ok(snapshot_inserted)
 }
 
 fn parse_video_input(raw: &str) -> InputRef {
@@ -768,7 +874,241 @@ fn increment_summary(summary: &mut serde_json::Value, key: &str, delta: usize) {
 
 async fn hash_file(path: &std::path::Path) -> Result<String> {
     let bytes = tokio::fs::read(path).await?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    Ok(hash_bytes(&bytes))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+async fn sync_video_thumbnails(
+    store: &vessel_store::SqliteStore,
+    video: &VideoMetadata,
+) -> Result<Vec<String>> {
+    let client = http_client()?;
+    let mut paths = Vec::new();
+    for thumbnail in &video.thumbnails {
+        let bytes = fetch_binary(&client, &thumbnail.url).await?;
+        let ext = thumbnail_extension(&thumbnail.url);
+        let label = match (thumbnail.width, thumbnail.height) {
+            (Some(width), Some(height)) => format!("{width}x{height}"),
+            _ => "original".to_owned(),
+        };
+        let path = PathBuf::from("thumbnails")
+            .join(&video.video_id)
+            .join(format!("{label}.{ext}"));
+        write_bytes(&path, &bytes).await?;
+        store
+            .insert_artifact(
+                &video.video_id,
+                "thumbnail",
+                &path.to_string_lossy(),
+                &hash_bytes(&bytes),
+                bytes.len() as u64,
+                None,
+            )
+            .await?;
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    Ok(paths)
+}
+
+async fn sync_subtitle_artifacts(
+    store: &vessel_store::SqliteStore,
+    video: &VideoMetadata,
+) -> Result<Vec<String>> {
+    let client = http_client()?;
+    let mut paths = Vec::new();
+    for track in &video.subtitles {
+        let Some(url) = track.url.as_deref() else {
+            continue;
+        };
+        let bytes = fetch_binary(&client, url).await?;
+        let suffix = if track.is_auto_generated { ".auto" } else { "" };
+        let path = PathBuf::from("subtitles")
+            .join(&video.video_id)
+            .join(format!(
+                "{}{}.vtt",
+                sanitize_component(&track.language),
+                suffix
+            ));
+        write_bytes(&path, &bytes).await?;
+        store
+            .insert_artifact(
+                &video.video_id,
+                "subtitle",
+                &path.to_string_lossy(),
+                &hash_bytes(&bytes),
+                bytes.len() as u64,
+                None,
+            )
+            .await?;
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    Ok(paths)
+}
+
+async fn fetch_binary(client: &Client, url: &str) -> Result<Vec<u8>> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| VesselError::Extractor(format!("artifact request failed: {err}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(VesselError::Extractor(format!(
+            "artifact request returned http status {status}"
+        )));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| VesselError::Extractor(format!("artifact response decode failed: {err}")))
+}
+
+async fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
+
+fn http_client() -> Result<Client> {
+    Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        )
+        .build()
+        .map_err(|err| VesselError::Extractor(format!("http client build failed: {err}")))
+}
+
+async fn fetch_comments_with_ytdlp(video_url: &str) -> Result<Vec<CommentMetadata>> {
+    if !binary_available("yt-dlp") {
+        return Err(VesselError::Unsupported(
+            "comment sync currently requires yt-dlp to be installed".to_owned(),
+        ));
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("vessel-comments-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(&temp_dir).await?;
+    let output_template = temp_dir.join("%(id)s");
+    let status = tokio::process::Command::new("yt-dlp")
+        .arg("--skip-download")
+        .arg("--write-comments")
+        .arg("--write-info-json")
+        .arg("--no-progress")
+        .arg("--extractor-args")
+        .arg("youtube:max_comments=200,100,100,20,2;comment_sort=top")
+        .arg("--output")
+        .arg(&output_template)
+        .arg(video_url)
+        .status()
+        .await?;
+    if !status.success() {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err(VesselError::Extractor(format!(
+            "yt-dlp comment extraction failed with exit status {status}"
+        )));
+    }
+
+    let mut entries = tokio::fs::read_dir(&temp_dir).await?;
+    let mut info_json_path = None;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".info.json"))
+        {
+            info_json_path = Some(path);
+            break;
+        }
+    }
+    let Some(info_json_path) = info_json_path else {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err(VesselError::Extractor(
+            "yt-dlp did not produce an .info.json file for comments".to_owned(),
+        ));
+    };
+
+    let raw = tokio::fs::read_to_string(&info_json_path).await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|err| VesselError::Extractor(err.to_string()))?;
+    let comments = parse_comment_metadata(&value);
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    Ok(comments)
+}
+
+fn parse_comment_metadata(root: &serde_json::Value) -> Vec<CommentMetadata> {
+    let mut comments = Vec::new();
+    let Some(video_id) = root.get("id").and_then(serde_json::Value::as_str) else {
+        return comments;
+    };
+    if let Some(items) = root.get("comments").and_then(serde_json::Value::as_array) {
+        for item in items {
+            flatten_comment(item, video_id, &mut comments);
+        }
+    }
+    comments
+}
+
+fn flatten_comment(value: &serde_json::Value, video_id: &str, output: &mut Vec<CommentMetadata>) {
+    let Some(comment_id) = value.get("id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+
+    output.push(CommentMetadata {
+        platform: vessel_core::models::Platform::YouTube,
+        comment_id: comment_id.to_owned(),
+        video_id: video_id.to_owned(),
+        author_channel_id: value
+            .get("author_id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        author_name: value
+            .get("author")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        text: value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        like_count: value.get("like_count").and_then(serde_json::Value::as_u64),
+        reply_count: value.get("reply_count").and_then(serde_json::Value::as_u64),
+        published_at: value
+            .get("timestamp")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+            .and_then(|timestamp| {
+                timestamp
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            }),
+        fetched_at: OffsetDateTime::now_utc(),
+        raw: value.clone(),
+    });
+
+    if let Some(replies) = value.get("replies").and_then(serde_json::Value::as_array) {
+        for reply in replies {
+            flatten_comment(reply, video_id, output);
+        }
+    }
+}
+
+fn thumbnail_extension(url: &str) -> &'static str {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains(".webp") {
+        "webp"
+    } else if lower.contains(".png") {
+        "png"
+    } else {
+        "jpg"
+    }
 }
 
 async fn fallback_download_with_ytdlp(
