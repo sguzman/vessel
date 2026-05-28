@@ -519,7 +519,7 @@ async fn video_comments_sync(args: VideoRefArg, config: &Config) -> Result<()> {
     let input = parse_video_input(&args.video);
     let video = extract_video(&input).await?;
     store.upsert_video_snapshot(&video).await?;
-    let comments = extract_comments(&input, 20).await?;
+    let comments = extract_comments(&input, 100).await?;
     let comment_snapshots_inserted = store.sync_comments(&comments).await?;
     let history = store.load_comment_history(&video.video_id).await?;
 
@@ -728,7 +728,7 @@ async fn sync_channel_video(
         sync_video_thumbnails(store, &video).await?;
     }
     if args.comments {
-        let comments = extract_comments(&input, 20).await?;
+        let comments = extract_comments(&input, 40).await?;
         store.sync_comments(&comments).await?;
     }
     Ok(snapshot_inserted)

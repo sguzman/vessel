@@ -8,7 +8,7 @@
 4. Add tracked channels and channel sync.
 5. Add download planning and file transaction semantics.
 6. Add native subtitles, thumbnails, and first-pass native comments.
-7. Implement native download hardening and deeper comment coverage.
+7. Harden native YouTube downloads and broaden native comment pagination.
 
 ## Definition Of Done
 

@@ -66,13 +66,20 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
     let video_id = canonical_video_id(input)?;
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let html = fetch_text(&url).await?;
-    let player_response = extract_embedded_json(&html, "var ytInitialPlayerResponse = ")
+    let mut player_response = extract_embedded_json(&html, "var ytInitialPlayerResponse = ")
         .or_else(|| extract_embedded_json(&html, "ytInitialPlayerResponse = "))
         .ok_or_else(|| {
             VesselError::Extractor(
                 "failed to locate ytInitialPlayerResponse in watch page".to_owned(),
             )
         })?;
+    if let Some(api_key) = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"") {
+        if let Ok(android_response) =
+            fetch_player_response(&api_key, &video_id, "ANDROID", "20.10.38").await
+        {
+            merge_streaming_data(&mut player_response, &android_response);
+        }
+    }
     parse_video_metadata(&player_response, &url, OffsetDateTime::now_utc())
 }
 
@@ -99,13 +106,25 @@ pub async fn extract_comments(
             "youtube watch page did not expose a comment continuation".to_owned(),
         )
     })?;
-    let page = fetch_comment_page(&api_key, &client_version, &visitor_data, &continuation).await?;
-    Ok(parse_comment_page(
-        &video_id,
-        &page,
-        OffsetDateTime::now_utc(),
-        max_comments,
-    ))
+    let fetched_at = OffsetDateTime::now_utc();
+    let mut comments = Vec::new();
+    let mut next_token = Some(continuation);
+
+    while let Some(token) = next_token.take() {
+        let page = fetch_comment_page(&api_key, &client_version, &visitor_data, &token).await?;
+        comments.extend(parse_comment_page(
+            &video_id,
+            &page,
+            fetched_at,
+            max_comments.saturating_sub(comments.len()),
+        ));
+        if comments.len() >= max_comments {
+            break;
+        }
+        next_token = find_next_comment_continuation(&page);
+    }
+
+    Ok(comments)
 }
 
 pub async fn extract_channel(input: &InputRef) -> Result<ChannelMetadata> {
@@ -248,6 +267,51 @@ fn extract_config_string(input: &str, marker: &str) -> Option<String> {
     let rest = &input[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_owned())
+}
+
+async fn fetch_player_response(
+    api_key: &str,
+    video_id: &str,
+    client_name: &str,
+    client_version: &str,
+) -> Result<Value> {
+    let client = http_client()?;
+    let response = client
+        .post(format!(
+            "https://www.youtube.com/youtubei/v1/player?key={api_key}"
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": client_name,
+                    "clientVersion": client_version,
+                }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|err| VesselError::Extractor(format!("youtube player request failed: {err}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(VesselError::Extractor(format!(
+            "youtube player request returned http status {status}"
+        )));
+    }
+    response.json::<Value>().await.map_err(|err| {
+        VesselError::Extractor(format!("youtube player response decode failed: {err}"))
+    })
+}
+
+fn merge_streaming_data(into: &mut Value, from: &Value) {
+    let Some(streaming_data) = from.get("streamingData").cloned() else {
+        return;
+    };
+
+    if let Some(into) = into.as_object_mut() {
+        into.insert("streamingData".to_owned(), streaming_data);
+    }
 }
 
 fn take_balanced_json(input: &str) -> Option<&str> {
@@ -677,6 +741,25 @@ fn find_first_comment_continuation(value: &Value) -> Option<String> {
     }
 }
 
+fn find_next_comment_continuation(page: &Value) -> Option<String> {
+    page.get("onResponseReceivedEndpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|endpoint| endpoint.get("reloadContinuationItemsCommand"))
+        .filter_map(|command| command.get("continuationItems"))
+        .filter_map(Value::as_array)
+        .flat_map(|items| items.iter())
+        .find_map(|item| {
+            item.get("continuationItemRenderer")
+                .and_then(|value| value.get("continuationEndpoint"))
+                .and_then(|value| value.get("continuationCommand"))
+                .and_then(|value| value.get("token"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
 fn parse_comment_page(
     video_id: &str,
     page: &Value,
@@ -787,8 +870,9 @@ fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_embedded_json, parse_channel_feed, parse_channel_metadata, parse_comment_page,
-        parse_compact_count, parse_video_id_from_url, parse_video_metadata,
+        extract_embedded_json, find_next_comment_continuation, merge_streaming_data,
+        parse_channel_feed, parse_channel_metadata, parse_comment_page, parse_compact_count,
+        parse_video_id_from_url, parse_video_metadata,
     };
     use time::OffsetDateTime;
 
@@ -927,5 +1011,64 @@ mod tests {
         assert_eq!(comments[0].like_count, Some(1_200));
         assert_eq!(comments[0].reply_count, Some(3));
         assert_eq!(comments[0].published_at.as_deref(), Some("1 day ago"));
+    }
+
+    #[test]
+    fn finds_next_comment_continuation_token() {
+        let page = serde_json::json!({
+            "onResponseReceivedEndpoints": [
+                {
+                    "reloadContinuationItemsCommand": {
+                        "continuationItems": [
+                            { "commentThreadRenderer": {} },
+                            {
+                                "continuationItemRenderer": {
+                                    "continuationEndpoint": {
+                                        "continuationCommand": {
+                                            "token": "next-token"
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            find_next_comment_continuation(&page).as_deref(),
+            Some("next-token")
+        );
+    }
+
+    #[test]
+    fn merges_android_streaming_data_into_player_response() {
+        let mut player = serde_json::json!({
+            "videoDetails": { "videoId": "abc123" },
+            "streamingData": {
+                "formats": [
+                    { "itag": 18, "signatureCipher": "s=encrypted&sp=sig&url=https%3A%2F%2Fexample.invalid%2Fv" }
+                ]
+            }
+        });
+        let android = serde_json::json!({
+            "streamingData": {
+                "formats": [
+                    { "itag": 18, "url": "https://example.invalid/direct.mp4" }
+                ],
+                "adaptiveFormats": [
+                    { "itag": 140, "url": "https://example.invalid/audio.m4a" }
+                ]
+            }
+        });
+
+        merge_streaming_data(&mut player, &android);
+        let streaming = player.get("streamingData").expect("streaming data");
+        assert_eq!(
+            streaming["formats"][0]["url"].as_str(),
+            Some("https://example.invalid/direct.mp4")
+        );
+        assert_eq!(streaming["adaptiveFormats"][0]["itag"].as_i64(), Some(140));
     }
 }

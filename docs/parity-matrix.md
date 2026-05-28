@@ -30,8 +30,8 @@
 
 ## Compatibility Milestones
 
-- [ ] Deeper native YouTube comment coverage and pagination
-- [ ] Native YouTube download hardening for cipher/signature-protected media
+- [x] Deeper native YouTube comment coverage and pagination
+- [x] Native YouTube download hardening for cipher/signature-protected media
 - [ ] Additional native extractors beyond YouTube
 - [ ] Option-level CLI parity campaign
 - [ ] Plugin API and plugin management

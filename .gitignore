@@ -7,3 +7,7 @@ tmp
 *-wal
 thumbnails
 subtitles
+*.part
+*.mp4
+*.mp3
+*.webm
