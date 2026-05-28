@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true
@@ -13,3 +14,6 @@ tracing.workspace = true
 uuid.workspace = true
 vessel-core = { path = "../vessel-core" }
 vessel-ledger = { path = "../vessel-ledger" }
+
+[dev-dependencies]
+tokio.workspace = true

@@ -6,13 +6,13 @@ Persist video metadata history with idempotent snapshot semantics.
 
 ## Deliverables
 
-- [ ] `vessel video refresh <video>`
-- [ ] `vessel video history <video>`
+- [x] `vessel video refresh <video>`
+- [x] `vessel video history <video>`
 - [ ] Video snapshot diffing
-- [ ] Fetch attempt recording
+- [x] Fetch attempt recording
 
 ## Acceptance Criteria
 
-- [ ] Unchanged refreshes do not create duplicate snapshots.
+- [x] Unchanged refreshes do not create duplicate snapshots.
 - [ ] Changed metadata creates one new snapshot.
-- [ ] Failed refreshes preserve the prior latest state.
+- [x] Failed refreshes preserve the prior latest state.

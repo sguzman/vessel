@@ -2667,9 +2667,11 @@ name = "vessel-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde",
  "serde_json",
  "sqlx",
  "time",
+ "tokio",
  "tracing",
  "uuid",
  "vessel-core",

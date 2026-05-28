@@ -2,11 +2,13 @@ use std::path::Path;
 use std::process::Command;
 
 use clap::{Args, Parser, Subcommand};
+use time::OffsetDateTime;
 use vessel_core::models::{InputKind, InputRef};
 use vessel_core::{Config, Result, VesselError, load_config};
 use vessel_extractors::youtube::YoutubeExtractor;
-use vessel_extractors::{ExtractContext, ExtractRequest, ExtractorRegistry};
+use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
 use vessel_formats::FormatSelector;
+use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
 use vessel_store::init_sqlite_database;
 
 #[derive(Debug, Parser)]
@@ -137,8 +139,8 @@ async fn main() -> Result<()> {
             ChannelSubcommand::Sync(args) => stub_channel_sync(args),
         },
         Commands::Video(cmd) => match cmd.command {
-            VideoSubcommand::Refresh(args) => stub_video_refresh(args),
-            VideoSubcommand::History(args) => stub_video_history(args),
+            VideoSubcommand::Refresh(args) => video_refresh(args, &config).await,
+            VideoSubcommand::History(args) => video_history(args, &config).await,
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url).await,
         Commands::Formats(arg) => stub_formats(arg.url),
@@ -256,36 +258,8 @@ fn stub_channel_sync(args: ChannelSyncArgs) -> Result<()> {
     Ok(())
 }
 
-fn stub_video_refresh(args: VideoRefArg) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "video refresh",
-            "video": args.video
-        }))
-        .map_err(|err| VesselError::Config(err.to_string()))?
-    );
-    Ok(())
-}
-
-fn stub_video_history(args: VideoRefArg) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": "stub",
-            "command": "video history",
-            "video": args.video,
-            "next": "Query video_snapshots and render diffs."
-        }))
-        .map_err(|err| VesselError::Config(err.to_string()))?
-    );
-    Ok(())
-}
-
 async fn extract_preview(url: String, kind: InputKind) -> Result<()> {
-    let mut registry = ExtractorRegistry::default();
-    registry.register(YoutubeExtractor);
+    let registry = build_registry();
     let input = InputRef { raw: url, kind };
     let extractor = registry
         .best_for(&input)
@@ -296,6 +270,100 @@ async fn extract_preview(url: String, kind: InputKind) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&item).map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn video_refresh(args: VideoRefArg, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let registry = build_registry();
+    let input = parse_video_input(&args.video);
+    let target_id = args.video.clone();
+    let run_id = store.start_run("video refresh").await?;
+    let started_at = OffsetDateTime::now_utc();
+
+    let result = async {
+        let extractor = registry
+            .best_for(&input)
+            .ok_or_else(|| VesselError::Unsupported("no extractor matched input".to_owned()))?;
+        let item = extractor
+            .extract(ExtractRequest { input }, ExtractContext)
+            .await?;
+        let video = match item {
+            ExtractedItem::Video(video) => video,
+            _ => {
+                return Err(VesselError::Unsupported(
+                    "video refresh requires a video target".to_owned(),
+                ));
+            }
+        };
+        let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
+        let finished_at = OffsetDateTime::now_utc();
+        store
+            .record_attempt(FetchAttempt {
+                run_id,
+                target_kind: "video".to_owned(),
+                target_external_id: video.video_id.clone(),
+                status: AttemptStatus::Success,
+                started_at,
+                finished_at,
+                error_message: None,
+            })
+            .await?;
+        store.finish_run(run_id, true).await?;
+
+        Ok::<_, VesselError>(serde_json::json!({
+            "status": "refreshed",
+            "run_id": run_id,
+            "video_id": video.video_id,
+            "title": video.title,
+            "snapshot_inserted": snapshot_inserted,
+            "fetched_at": video.fetched_at.format(&time::format_description::well_known::Rfc3339)
+                .map_err(|err| VesselError::Config(err.to_string()))?,
+        }))
+    }
+    .await;
+
+    match result {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|err| VesselError::Config(err.to_string()))?
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let finished_at = OffsetDateTime::now_utc();
+            store
+                .record_attempt(FetchAttempt {
+                    run_id,
+                    target_kind: "video".to_owned(),
+                    target_external_id: target_id,
+                    status: AttemptStatus::Failed,
+                    started_at,
+                    finished_at,
+                    error_message: Some(err.to_string()),
+                })
+                .await?;
+            store.finish_run(run_id, false).await?;
+            Err(err)
+        }
+    }
+}
+
+async fn video_history(args: VideoRefArg, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let lookup = if args.video.contains("://") {
+        extract_video_id_from_input(&args.video).await?
+    } else {
+        args.video
+    };
+    let history = store.load_video_history(&lookup).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&history)
+            .map_err(|err| VesselError::Config(err.to_string()))?
     );
     Ok(())
 }
@@ -333,6 +401,41 @@ fn stub_download(args: DownloadArgs) -> Result<()> {
         .map_err(|err| VesselError::Config(err.to_string()))?
     );
     Ok(())
+}
+
+fn build_registry() -> ExtractorRegistry {
+    let mut registry = ExtractorRegistry::default();
+    registry.register(YoutubeExtractor);
+    registry
+}
+
+fn parse_video_input(raw: &str) -> InputRef {
+    let kind = if raw.contains("://") {
+        InputKind::Url
+    } else {
+        InputKind::VideoId
+    };
+    InputRef {
+        raw: raw.to_owned(),
+        kind,
+    }
+}
+
+async fn extract_video_id_from_input(raw: &str) -> Result<String> {
+    let registry = build_registry();
+    let input = parse_video_input(raw);
+    let extractor = registry
+        .best_for(&input)
+        .ok_or_else(|| VesselError::Unsupported("no extractor matched input".to_owned()))?;
+    let item = extractor
+        .extract(ExtractRequest { input }, ExtractContext)
+        .await?;
+    match item {
+        ExtractedItem::Video(video) => Ok(video.video_id),
+        _ => Err(VesselError::Unsupported(
+            "history lookup requires a video target".to_owned(),
+        )),
+    }
 }
 
 fn binary_available(name: &str) -> bool {

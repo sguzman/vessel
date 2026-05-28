@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use serde::Serialize;
+use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Executor, Pool, Sqlite};
 use time::OffsetDateTime;
@@ -23,6 +25,42 @@ pub struct SqliteStore {
     pool: Pool<Sqlite>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StoredVideoLatest {
+    pub video_id: String,
+    pub channel_id: Option<String>,
+    pub canonical_url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub upload_date: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub availability: String,
+    pub latest_snapshot_id: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoredVideoSnapshot {
+    pub snapshot_id: String,
+    pub video_id: String,
+    pub fetched_at: String,
+    pub content_hash: String,
+    pub normalized_json: serde_json::Value,
+    pub raw_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoHistory {
+    pub current: Option<StoredVideoLatest>,
+    pub snapshots: Vec<StoredVideoSnapshot>,
+    pub fetch_attempt_count: i64,
+}
+
 impl SqliteStore {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self { pool }
@@ -30,6 +68,115 @@ impl SqliteStore {
 
     pub fn pool(&self) -> &Pool<Sqlite> {
         &self.pool
+    }
+
+    pub async fn load_video_history(&self, video_ref: &str) -> Result<VideoHistory> {
+        let current = sqlx::query(
+            r#"
+SELECT
+    video_id,
+    channel_id,
+    canonical_url,
+    title,
+    description,
+    upload_date,
+    duration_seconds,
+    view_count,
+    like_count,
+    comment_count,
+    availability,
+    latest_snapshot_id,
+    first_seen_at,
+    last_seen_at,
+    updated_at
+FROM videos
+WHERE video_id = ?1 OR canonical_url = ?1
+LIMIT 1
+"#,
+        )
+        .bind(video_ref)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?
+        .map(|row| StoredVideoLatest {
+            video_id: row.get("video_id"),
+            channel_id: row.get("channel_id"),
+            canonical_url: row.get("canonical_url"),
+            title: row.get("title"),
+            description: row.get("description"),
+            upload_date: row.get("upload_date"),
+            duration_seconds: row.get("duration_seconds"),
+            view_count: row.get("view_count"),
+            like_count: row.get("like_count"),
+            comment_count: row.get("comment_count"),
+            availability: row.get("availability"),
+            latest_snapshot_id: row.get("latest_snapshot_id"),
+            first_seen_at: row.get("first_seen_at"),
+            last_seen_at: row.get("last_seen_at"),
+            updated_at: row.get("updated_at"),
+        });
+
+        let lookup_id = current
+            .as_ref()
+            .map(|video| video.video_id.clone())
+            .unwrap_or_else(|| video_ref.to_owned());
+
+        let snapshot_rows = sqlx::query(
+            r#"
+SELECT
+    id,
+    video_id,
+    fetched_at,
+    content_hash,
+    normalized_json,
+    raw_json
+FROM video_snapshots
+WHERE video_id = ?1
+ORDER BY fetched_at DESC
+"#,
+        )
+        .bind(&lookup_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        let snapshots = snapshot_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredVideoSnapshot {
+                    snapshot_id: row.get("id"),
+                    video_id: row.get("video_id"),
+                    fetched_at: row.get("fetched_at"),
+                    content_hash: row.get("content_hash"),
+                    normalized_json: serde_json::from_str::<serde_json::Value>(
+                        &row.get::<String, _>("normalized_json"),
+                    )
+                    .map_err(|err| VesselError::Database(err.to_string()))?,
+                    raw_json: serde_json::from_str::<serde_json::Value>(
+                        &row.get::<String, _>("raw_json"),
+                    )
+                    .map_err(|err| VesselError::Database(err.to_string()))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let fetch_attempt_count: i64 = sqlx::query_scalar(
+            r#"
+SELECT COUNT(*)
+FROM fetch_attempts
+WHERE target_external_id = ?1
+"#,
+        )
+        .bind(&lookup_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(VideoHistory {
+            current,
+            snapshots,
+            fetch_attempt_count,
+        })
     }
 }
 
@@ -322,8 +469,7 @@ impl Ledger for SqliteStore {
     }
 
     async fn upsert_channel_snapshot(&self, channel: &ChannelMetadata) -> Result<bool> {
-        let hash =
-            canonical_json_hash(channel).map_err(|err| VesselError::Database(err.to_string()))?;
+        let hash = channel_snapshot_hash(channel)?;
         let inserted = self
             .insert_channel_snapshot_if_changed(channel, &hash)
             .await?;
@@ -332,8 +478,7 @@ impl Ledger for SqliteStore {
     }
 
     async fn upsert_video_snapshot(&self, video: &VideoMetadata) -> Result<bool> {
-        let hash =
-            canonical_json_hash(video).map_err(|err| VesselError::Database(err.to_string()))?;
+        let hash = video_snapshot_hash(video)?;
         let inserted = self.insert_video_snapshot_if_changed(video, &hash).await?;
         self.put_video_latest(video, &hash).await?;
         Ok(inserted)
@@ -359,5 +504,114 @@ impl Ledger for SqliteStore {
             .await
             .map_err(|err| VesselError::Database(err.to_string()))?;
         Ok(())
+    }
+}
+
+fn channel_snapshot_hash(channel: &ChannelMetadata) -> Result<String> {
+    canonical_json_hash(&serde_json::json!({
+        "platform": &channel.platform,
+        "channel_id": &channel.channel_id,
+        "handle": &channel.handle,
+        "url": &channel.url,
+        "title": &channel.title,
+        "description": &channel.description,
+        "subscriber_count": channel.subscriber_count,
+        "video_count": channel.video_count,
+        "view_count": channel.view_count,
+        "avatar_url": &channel.avatar_url,
+        "banner_url": &channel.banner_url,
+    }))
+    .map_err(|err| VesselError::Database(err.to_string()))
+}
+
+fn video_snapshot_hash(video: &VideoMetadata) -> Result<String> {
+    canonical_json_hash(&serde_json::json!({
+        "platform": &video.platform,
+        "video_id": &video.video_id,
+        "channel_id": &video.channel_id,
+        "url": &video.url,
+        "title": &video.title,
+        "description": &video.description,
+        "duration_seconds": video.duration_seconds,
+        "upload_date": &video.upload_date,
+        "release_timestamp": video.release_timestamp.map(|ts| ts.unix_timestamp_nanos()),
+        "view_count": video.view_count,
+        "like_count": video.like_count,
+        "comment_count": video.comment_count,
+        "availability": &video.availability,
+        "formats": &video.formats,
+        "subtitles": &video.subtitles,
+        "thumbnails": &video.thumbnails,
+    }))
+    .map_err(|err| VesselError::Database(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+    use vessel_core::models::{Availability, Platform, VideoMetadata};
+    use vessel_ledger::Ledger;
+
+    use super::init_sqlite_database;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vessel-{name}-{}.sqlite", Uuid::now_v7()))
+    }
+
+    fn sample_video(fetched_at: OffsetDateTime) -> VideoMetadata {
+        VideoMetadata {
+            platform: Platform::YouTube,
+            video_id: "video-123".to_owned(),
+            channel_id: Some("channel-456".to_owned()),
+            url: "https://www.youtube.com/watch?v=video-123".to_owned(),
+            title: Some("Sample Title".to_owned()),
+            description: Some("Sample Description".to_owned()),
+            duration_seconds: Some(42),
+            upload_date: Some("2024-01-01".to_owned()),
+            release_timestamp: None,
+            view_count: Some(100),
+            like_count: None,
+            comment_count: None,
+            availability: Availability::Public,
+            formats: Vec::new(),
+            subtitles: Vec::new(),
+            thumbnails: Vec::new(),
+            fetched_at,
+            raw: serde_json::json!({ "sample": true }),
+        }
+    }
+
+    #[tokio::test]
+    async fn idempotent_video_snapshot_upsert_and_history() {
+        let path = temp_db_path("history");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+        let fetched_at = OffsetDateTime::now_utc();
+
+        let first = store
+            .upsert_video_snapshot(&sample_video(fetched_at))
+            .await
+            .expect("first upsert");
+        let second = store
+            .upsert_video_snapshot(&sample_video(fetched_at + time::Duration::minutes(1)))
+            .await
+            .expect("second upsert");
+        let history = store
+            .load_video_history("video-123")
+            .await
+            .expect("history");
+
+        assert!(first);
+        assert!(!second);
+        assert_eq!(history.snapshots.len(), 1);
+        assert!(history.current.is_some());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }
