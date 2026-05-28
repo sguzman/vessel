@@ -3,6 +3,7 @@ use serde::Serialize;
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Executor, Pool, Sqlite};
+use std::path::Path;
 use time::OffsetDateTime;
 use tracing::info;
 use uuid::Uuid;
@@ -566,6 +567,7 @@ ORDER BY fetched_at DESC
 
 pub async fn init_sqlite_database(target: &str) -> Result<(SqliteStore, DatabasePaths)> {
     let sqlite_url = normalize_sqlite_target(target);
+    ensure_sqlite_parent_dir(&sqlite_url)?;
     let options = sqlite_url
         .parse::<SqliteConnectOptions>()
         .map_err(|err| VesselError::Database(format!("invalid sqlite url: {err}")))?
@@ -602,6 +604,18 @@ fn normalize_sqlite_target(target: &str) -> String {
     } else {
         format!("sqlite://{target}")
     }
+}
+
+fn ensure_sqlite_parent_dir(sqlite_url: &str) -> Result<()> {
+    let path = sqlite_url
+        .strip_prefix("sqlite://")
+        .or_else(|| sqlite_url.strip_prefix("sqlite:"))
+        .unwrap_or(sqlite_url);
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 #[async_trait]

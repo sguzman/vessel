@@ -1,5 +1,18 @@
 # Storage Model
 
+## Project Layout
+
+- Default local state lives under `.cache/vessel/<project>/`.
+- Each project gets its own SQLite database at `.cache/vessel/<project>/vessel.sqlite`.
+- Default local artifact roots:
+  - `downloads/`
+  - `thumbnails/`
+  - `subtitles/`
+  - `plugins/`
+- Artifact paths stored in SQLite are project-root-relative so the dataset stays portable within the project folder.
+- SQLite remains plain on-disk SQLite, so tools such as `litecli` can open a project directly:
+  - `litecli .cache/vessel/<project>/vessel.sqlite`
+
 ## State Layers
 
 - Current tables expose the latest known state for fast queries.

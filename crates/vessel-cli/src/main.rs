@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
-use vessel_core::{Config, Result, VesselError, load_config};
+use vessel_core::{Config, Result, RuntimeLayout, VesselError, load_config, resolve_runtime_layout};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
     ChannelVideoRef, YoutubeExtractor, extract_channel, extract_comments, extract_video,
@@ -27,6 +27,8 @@ use vessel_store::{StoredTrackedChannel, init_sqlite_database};
     about = "Rust-native media extraction and metadata ledger"
 )]
 struct Cli {
+    #[arg(long = "project", global = true)]
+    project: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -195,36 +197,37 @@ enum VideoCommentsSubcommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let (config, paths, loaded_from) = load_config()?;
+    let layout = resolve_runtime_layout(&config, &paths, cli.project.as_deref())?;
     init_logging(&config)?;
 
     match cli.command {
-        Commands::Doctor => doctor(&config, &paths, &loaded_from).await,
+        Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
         Commands::Config(cmd) => match cmd.command {
-            ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from),
+            ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from, &layout),
         },
         Commands::Dataset(cmd) => match cmd.command {
-            DatasetSubcommand::Init(args) => dataset_init(args, &config).await,
+            DatasetSubcommand::Init(args) => dataset_init(args, &layout).await,
         },
         Commands::Channel(cmd) => match cmd.command {
-            ChannelSubcommand::Add(args) => channel_add(args, &config).await,
-            ChannelSubcommand::Sync(args) => channel_sync(args, &config).await,
+            ChannelSubcommand::Add(args) => channel_add(args, &layout).await,
+            ChannelSubcommand::Sync(args) => channel_sync(args, &layout).await,
         },
         Commands::Video(cmd) => match cmd.command {
-            VideoSubcommand::Refresh(args) => video_refresh(args, &config, &paths).await,
-            VideoSubcommand::History(args) => video_history(args, &config).await,
+            VideoSubcommand::Refresh(args) => video_refresh(args, &layout, &paths).await,
+            VideoSubcommand::History(args) => video_history(args, &layout).await,
             VideoSubcommand::Subtitles(cmd) => match cmd.command {
-                VideoSubtitlesSubcommand::Sync(args) => video_subtitles_sync(args, &config).await,
+                VideoSubtitlesSubcommand::Sync(args) => video_subtitles_sync(args, &layout).await,
             },
             VideoSubcommand::Comments(cmd) => match cmd.command {
-                VideoCommentsSubcommand::Sync(args) => video_comments_sync(args, &config).await,
+                VideoCommentsSubcommand::Sync(args) => video_comments_sync(args, &layout).await,
             },
         },
-        Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths).await,
+        Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
-        Commands::Download(args) => download(args, &config).await,
+        Commands::Download(args) => download(args, &layout).await,
         Commands::Plugin(cmd) => match cmd.command {
-            PluginSubcommand::List => plugin_list(&paths).await,
-            PluginSubcommand::Install(args) => plugin_install(args, &paths).await,
+            PluginSubcommand::List => plugin_list(&paths, &layout).await,
+            PluginSubcommand::Install(args) => plugin_install(args, &paths, &layout).await,
         },
     }
 }
@@ -237,11 +240,10 @@ async fn doctor(
     config: &Config,
     paths: &vessel_core::ConfigPaths,
     loaded_from: &[std::path::PathBuf],
+    layout: &RuntimeLayout,
 ) -> Result<()> {
-    let requested = config.database.url.clone();
-    let db_target = requested.strip_prefix("sqlite://").unwrap_or(&requested);
-    let db_exists = Path::new(db_target).exists();
-    let plugin_dirs = plugin_directories(paths);
+    let db_exists = layout.database_path.exists();
+    let plugin_dirs = plugin_directories(paths, layout);
     let plugins = load_plugins(&plugin_dirs);
     let report = serde_json::json!({
         "config_paths": {
@@ -250,9 +252,23 @@ async fn doctor(
             "project": paths.project,
             "loaded_from": loaded_from,
         },
+        "project": {
+            "name": layout.project_name,
+            "cache_root": layout.cache_root,
+            "root": layout.project_root,
+        },
         "database": {
             "configured_url": config.database.url,
+            "resolved_url": layout.database_url,
+            "resolved_path": layout.database_path,
             "exists": db_exists,
+        },
+        "storage": {
+            "download_output": layout.download_output,
+            "downloads_root": layout.downloads_root,
+            "thumbnails_root": layout.thumbnails_root,
+            "subtitles_root": layout.subtitles_root,
+            "plugins_root": layout.plugins_root,
         },
         "binaries": {
             "ffmpeg": binary_available("ffmpeg"),
@@ -287,9 +303,23 @@ fn show_config(
     config: &Config,
     paths: &vessel_core::ConfigPaths,
     loaded_from: &[std::path::PathBuf],
+    layout: &RuntimeLayout,
 ) -> Result<()> {
     let report = serde_json::json!({
         "config": config,
+        "resolved": {
+            "project_name": layout.project_name,
+            "cache_root": layout.cache_root,
+            "project_root": layout.project_root,
+            "database_url": layout.database_url,
+            "database_path": layout.database_path,
+            "download_output": layout.download_output,
+            "downloads_root": layout.downloads_root,
+            "thumbnails_root": layout.thumbnails_root,
+            "subtitles_root": layout.subtitles_root,
+            "plugins_root": layout.plugins_root,
+            "litecli_example": format!("litecli {}", layout.database_path.display()),
+        },
         "paths": {
             "system": paths.system,
             "user": paths.user,
@@ -306,14 +336,27 @@ fn show_config(
     Ok(())
 }
 
-async fn dataset_init(args: DatasetInitArgs, config: &Config) -> Result<()> {
-    let target = args.db.unwrap_or_else(|| config.database.url.clone());
+async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let target = args.db.unwrap_or_else(|| layout.database_url.clone());
     let (_store, paths) = init_sqlite_database(&target).await?;
     let report = serde_json::json!({
         "status": "initialized",
+        "project": {
+            "name": layout.project_name,
+            "root": layout.project_root,
+        },
         "database": {
             "requested": paths.requested,
             "sqlite_url": paths.sqlite_url,
+            "sqlite_path": layout.database_path,
+        },
+        "storage": {
+            "download_output": layout.download_output,
+            "downloads_root": layout.downloads_root,
+            "thumbnails_root": layout.thumbnails_root,
+            "subtitles_root": layout.subtitles_root,
+            "plugins_root": layout.plugins_root,
         }
     });
     println!(
@@ -328,8 +371,9 @@ async fn extract_preview(
     url: String,
     kind: InputKind,
     paths: &vessel_core::ConfigPaths,
+    layout: &RuntimeLayout,
 ) -> Result<()> {
-    let registry = build_registry(&load_runtime_plugins(paths));
+    let registry = build_registry(&load_runtime_plugins(paths, layout));
     let input = InputRef { raw: url, kind };
     let extractor = registry
         .best_for(&input)
@@ -344,8 +388,9 @@ async fn extract_preview(
     Ok(())
 }
 
-async fn channel_add(args: ChannelAddArgs, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let input = parse_channel_input(&args.channel);
     let channel = extract_channel(&input).await?;
     store.upsert_channel_snapshot(&channel).await?;
@@ -365,8 +410,9 @@ async fn channel_add(args: ChannelAddArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let tracked_channels = store.list_tracked_channels().await?;
     let run_id = store.start_run("channel sync").await?;
     let started_at = OffsetDateTime::now_utc();
@@ -392,7 +438,7 @@ async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
         });
 
         for tracked in tracked_channels {
-            match sync_one_channel(&store, &tracked, &args, run_id, started_at).await {
+            match sync_one_channel(&store, &tracked, &args, run_id, started_at, layout).await {
                 Ok(channel_report) => {
                     increment_summary(&mut summary, "channels_processed", 1);
                     increment_summary(
@@ -456,11 +502,12 @@ async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
 
 async fn video_refresh(
     args: VideoRefArg,
-    config: &Config,
+    layout: &RuntimeLayout,
     paths: &vessel_core::ConfigPaths,
 ) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
-    let registry = build_registry(&load_runtime_plugins(paths));
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
+    let registry = build_registry(&load_runtime_plugins(paths, layout));
     let input = parse_video_input(&args.video);
     let target_id = args.video.clone();
     let run_id = store.start_run("video refresh").await?;
@@ -484,7 +531,7 @@ async fn video_refresh(
         let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
         let subtitle_snapshots_inserted =
             store.sync_subtitle_tracks(&video, &video.subtitles).await?;
-        let thumbnail_artifacts = sync_video_thumbnails(&store, &video).await?;
+        let thumbnail_artifacts = sync_video_thumbnails(&store, &video, layout).await?;
         let finished_at = OffsetDateTime::now_utc();
         store
             .record_attempt(FetchAttempt {
@@ -541,10 +588,11 @@ async fn video_refresh(
     }
 }
 
-async fn video_history(args: VideoRefArg, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn video_history(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let lookup = if args.video.contains("://") {
-        extract_video_id_from_input(&args.video).await?
+        extract_video_id_from_input(&args.video, layout).await?
     } else {
         args.video
     };
@@ -557,12 +605,13 @@ async fn video_history(args: VideoRefArg, config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn video_subtitles_sync(args: VideoRefArg, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.video)).await?;
     store.upsert_video_snapshot(&video).await?;
     let subtitle_snapshots_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
-    let artifact_paths = sync_subtitle_artifacts(&store, &video).await?;
+    let artifact_paths = sync_subtitle_artifacts(&store, &video, layout).await?;
     let history = store.load_subtitle_history(&video.video_id).await?;
 
     println!(
@@ -585,8 +634,9 @@ async fn video_subtitles_sync(args: VideoRefArg, config: &Config) -> Result<()> 
     Ok(())
 }
 
-async fn video_comments_sync(args: VideoRefArg, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let input = parse_video_input(&args.video);
     let video = extract_video(&input).await?;
     store.upsert_video_snapshot(&video).await?;
@@ -628,8 +678,9 @@ async fn formats(url: String) -> Result<()> {
     Ok(())
 }
 
-async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
-    let (store, _) = init_sqlite_database(&config.database.url).await?;
+async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
+    ensure_project_layout(layout).await?;
+    let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.url)).await?;
     let archived = store.is_video_archived("youtube", &video.video_id).await?;
     if archived {
@@ -647,7 +698,7 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
 
     let selector = parse_format_selector(args.format.as_deref())?;
     let planner = BasicDownloadPlanner;
-    let plan = match planner.plan(&video, selector.clone(), &config.download.output) {
+    let plan = match planner.plan(&video, selector.clone(), &layout.download_output) {
         Ok(plan) => plan,
         Err(err) => {
             return print_unsupported_report_with_details(
@@ -687,13 +738,13 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
     };
 
     let subtitle_paths = if args.subtitles || args.convert_subs.is_some() {
-        sync_subtitle_artifacts(&store, &video).await?
+        sync_subtitle_artifacts(&store, &video, layout).await?
     } else {
         Vec::new()
     };
 
     let thumbnail_path = if args.embed_thumbnail {
-        sync_primary_thumbnail_artifact(&store, &video).await?
+        sync_primary_thumbnail_artifact(&store, &video, layout).await?
     } else {
         None
     };
@@ -730,7 +781,7 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
         .insert_artifact(
             &video.video_id,
             "video",
-            &final_output_path.to_string_lossy(),
+            &project_relative_path(layout, &final_output_path),
             &file_hash,
             byte_size,
             Some(
@@ -751,7 +802,7 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
             .insert_artifact(
                 &video.video_id,
                 &generated.kind,
-                &generated.path.to_string_lossy(),
+                &project_relative_path(layout, &generated.path),
                 &generated_hash,
                 generated_size,
                 None,
@@ -775,12 +826,19 @@ async fn download(args: DownloadArgs, config: &Config) -> Result<()> {
             "video_id": video.video_id,
             "title": video.title,
             "format_ids": result.files.iter().map(|file| file.format_id.clone()).collect::<Vec<_>>(),
-            "output_path": final_output_path,
+            "output_path": project_relative_path(layout, &final_output_path),
             "bytes_written": byte_size,
             "resumed": result.files.iter().any(|file| file.resumed),
             "artifact_id": artifact.artifact_id,
             "content_hash": artifact.content_hash,
-            "downloaded_files": result.files,
+            "downloaded_files": result.files.iter().map(|file| serde_json::json!({
+                "format_id": file.format_id,
+                "output_path": project_relative_path(layout, &file.output_path),
+                "temp_path": project_relative_path(layout, &file.temp_path),
+                "bytes_written": file.bytes_written,
+                "resumed": file.resumed,
+                "role": file.role,
+            })).collect::<Vec<_>>(),
             "postprocess_plan": postprocess_plan,
             "generated_artifacts": generated_artifacts,
         }))
@@ -812,6 +870,7 @@ async fn sync_one_channel(
     args: &ChannelSyncArgs,
     run_id: uuid::Uuid,
     started_at: OffsetDateTime,
+    layout: &RuntimeLayout,
 ) -> Result<ChannelSyncReport> {
     let input = parse_channel_input(&tracked.canonical_url);
     let channel = extract_channel(&input).await?;
@@ -851,7 +910,7 @@ async fn sync_one_channel(
     };
 
     for video_ref in videos {
-        if sync_channel_video(store, video_ref, args).await? {
+        if sync_channel_video(store, video_ref, args, layout).await? {
             report.video_snapshots_inserted += 1;
         }
     }
@@ -867,6 +926,7 @@ async fn sync_channel_video(
     store: &vessel_store::SqliteStore,
     video_ref: ChannelVideoRef,
     args: &ChannelSyncArgs,
+    layout: &RuntimeLayout,
 ) -> Result<bool> {
     let input = InputRef {
         raw: video_ref.video_id,
@@ -876,10 +936,10 @@ async fn sync_channel_video(
     let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
     if args.subtitles {
         store.sync_subtitle_tracks(&video, &video.subtitles).await?;
-        sync_subtitle_artifacts(store, &video).await?;
+        sync_subtitle_artifacts(store, &video, layout).await?;
     }
     if args.download_thumbnails {
-        sync_video_thumbnails(store, &video).await?;
+        sync_video_thumbnails(store, &video, layout).await?;
     }
     if args.comments {
         let comments = extract_comments(&input, 40).await?;
@@ -931,9 +991,9 @@ fn sanitize_component(input: &str) -> String {
         .collect()
 }
 
-async fn plugin_list(paths: &vessel_core::ConfigPaths) -> Result<()> {
-    let directories = plugin_directories(paths);
-    let plugins = load_runtime_plugins(paths);
+async fn plugin_list(paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -> Result<()> {
+    let directories = plugin_directories(paths, layout);
+    let plugins = load_runtime_plugins(paths, layout);
     let report = serde_json::json!({
         "status": "ok",
         "directories": directories,
@@ -952,11 +1012,13 @@ async fn plugin_list(paths: &vessel_core::ConfigPaths) -> Result<()> {
 async fn plugin_install(
     args: PluginInstallArgs,
     paths: &vessel_core::ConfigPaths,
+    layout: &RuntimeLayout,
 ) -> Result<()> {
+    ensure_project_layout(layout).await?;
     let target_root = args
         .dir
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_project_plugin_dir(paths));
+        .unwrap_or_else(|| default_project_plugin_dir(paths, layout));
     let plugin_id = sanitize_plugin_id(&args.name);
     let plugin_dir = target_root.join(&plugin_id);
     let fixtures_dir = plugin_dir.join("fixtures");
@@ -1007,11 +1069,11 @@ async fn plugin_install(
     Ok(())
 }
 
-fn load_runtime_plugins(paths: &vessel_core::ConfigPaths) -> PluginCatalog {
-    load_plugins(&plugin_directories(paths))
+fn load_runtime_plugins(paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -> PluginCatalog {
+    load_plugins(&plugin_directories(paths, layout))
 }
 
-fn plugin_directories(paths: &vessel_core::ConfigPaths) -> Vec<PathBuf> {
+fn plugin_directories(paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -> Vec<PathBuf> {
     let mut directories = Vec::new();
     if let Some(parent) = paths.system.parent() {
         directories.push(parent.join("plugins"));
@@ -1019,15 +1081,12 @@ fn plugin_directories(paths: &vessel_core::ConfigPaths) -> Vec<PathBuf> {
     if let Some(parent) = paths.user.parent() {
         directories.push(parent.join("plugins"));
     }
-    directories.push(default_project_plugin_dir(paths));
+    directories.push(default_project_plugin_dir(paths, layout));
     directories
 }
 
-fn default_project_plugin_dir(paths: &vessel_core::ConfigPaths) -> PathBuf {
-    paths.project
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("plugins")
+fn default_project_plugin_dir(_paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -> PathBuf {
+    layout.plugins_root.clone()
 }
 
 fn sanitize_plugin_id(name: &str) -> String {
@@ -1076,9 +1135,9 @@ fn provider_status(
     }
 }
 
-async fn extract_video_id_from_input(raw: &str) -> Result<String> {
+async fn extract_video_id_from_input(raw: &str, layout: &RuntimeLayout) -> Result<String> {
     let paths = vessel_core::ConfigPaths::discover();
-    let registry = build_registry(&load_runtime_plugins(&paths));
+    let registry = build_registry(&load_runtime_plugins(&paths, layout));
     let input = parse_video_input(raw);
     let extractor = registry
         .best_for(&input)
@@ -1111,6 +1170,25 @@ fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+async fn ensure_project_layout(layout: &RuntimeLayout) -> Result<()> {
+    for path in [
+        &layout.project_root,
+        &layout.downloads_root,
+        &layout.thumbnails_root,
+        &layout.subtitles_root,
+        &layout.plugins_root,
+    ] {
+        tokio::fs::create_dir_all(path).await?;
+    }
+    Ok(())
+}
+
+fn project_relative_path(layout: &RuntimeLayout, path: &Path) -> String {
+    path.strip_prefix(&layout.project_root)
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
+
 fn postprocess_output_path(base_output_path: &Path, args: &DownloadArgs) -> PathBuf {
     if let Some(audio_format) = args.extract_audio.then_some(args.audio_format.as_str()) {
         return base_output_path.with_extension(audio_format);
@@ -1124,6 +1202,7 @@ fn postprocess_output_path(base_output_path: &Path, args: &DownloadArgs) -> Path
 async fn sync_video_thumbnails(
     store: &vessel_store::SqliteStore,
     video: &VideoMetadata,
+    layout: &RuntimeLayout,
 ) -> Result<Vec<String>> {
     let client = http_client()?;
     let mut paths = Vec::new();
@@ -1134,21 +1213,22 @@ async fn sync_video_thumbnails(
             (Some(width), Some(height)) => format!("{width}x{height}"),
             _ => "original".to_owned(),
         };
-        let path = PathBuf::from("thumbnails")
+        let relative_path = PathBuf::from("thumbnails")
             .join(&video.video_id)
             .join(format!("{label}.{ext}"));
+        let path = layout.project_root.join(&relative_path);
         write_bytes(&path, &bytes).await?;
         store
             .insert_artifact(
                 &video.video_id,
                 "thumbnail",
-                &path.to_string_lossy(),
+                &relative_path.to_string_lossy(),
                 &hash_bytes(&bytes),
                 bytes.len() as u64,
                 None,
             )
             .await?;
-        paths.push(path.to_string_lossy().into_owned());
+        paths.push(relative_path.to_string_lossy().into_owned());
     }
     Ok(paths)
 }
@@ -1156,14 +1236,16 @@ async fn sync_video_thumbnails(
 async fn sync_primary_thumbnail_artifact(
     store: &vessel_store::SqliteStore,
     video: &VideoMetadata,
+    layout: &RuntimeLayout,
 ) -> Result<Option<PathBuf>> {
-    let paths = sync_video_thumbnails(store, video).await?;
+    let paths = sync_video_thumbnails(store, video, layout).await?;
     Ok(paths.last().map(PathBuf::from))
 }
 
 async fn sync_subtitle_artifacts(
     store: &vessel_store::SqliteStore,
     video: &VideoMetadata,
+    layout: &RuntimeLayout,
 ) -> Result<Vec<String>> {
     let client = http_client()?;
     let mut paths = Vec::new();
@@ -1173,25 +1255,26 @@ async fn sync_subtitle_artifacts(
         };
         let bytes = fetch_binary(&client, url).await?;
         let suffix = if track.is_auto_generated { ".auto" } else { "" };
-        let path = PathBuf::from("subtitles")
+        let relative_path = PathBuf::from("subtitles")
             .join(&video.video_id)
             .join(format!(
                 "{}{}.vtt",
                 sanitize_component(&track.language),
                 suffix
             ));
+        let path = layout.project_root.join(&relative_path);
         write_bytes(&path, &bytes).await?;
         store
             .insert_artifact(
                 &video.video_id,
                 "subtitle",
-                &path.to_string_lossy(),
+                &relative_path.to_string_lossy(),
                 &hash_bytes(&bytes),
                 bytes.len() as u64,
                 None,
             )
             .await?;
-        paths.push(path.to_string_lossy().into_owned());
+        paths.push(relative_path.to_string_lossy().into_owned());
     }
     Ok(paths)
 }
