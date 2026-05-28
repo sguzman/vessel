@@ -7,8 +7,8 @@
 3. Persist video snapshots and video history queries.
 4. Add tracked channels and channel sync.
 5. Add download planning and file transaction semantics.
-6. Add native subtitles and thumbnails, while keeping unsupported native gaps explicit.
-7. Implement native comments and native download hardening.
+6. Add native subtitles, thumbnails, and first-pass native comments.
+7. Implement native download hardening and deeper comment coverage.
 
 ## Definition Of Done
 

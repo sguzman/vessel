@@ -13,7 +13,7 @@
 - [x] Basic native download path
 - [x] Subtitles
 - [x] Thumbnails
-- [ ] Comments
+- [x] Comments
 
 ## Downloader And Postprocessing
 
@@ -30,7 +30,7 @@
 
 ## Compatibility Milestones
 
-- [ ] Native YouTube comment extraction
+- [ ] Deeper native YouTube comment coverage and pagination
 - [ ] Native YouTube download hardening for cipher/signature-protected media
 - [ ] Additional native extractors beyond YouTube
 - [ ] Option-level CLI parity campaign

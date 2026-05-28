@@ -8,7 +8,8 @@ use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{Config, Result, VesselError, load_config};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelVideoRef, YoutubeExtractor, extract_channel, extract_video, list_channel_videos,
+    ChannelVideoRef, YoutubeExtractor, extract_channel, extract_comments, extract_video,
+    list_channel_videos,
 };
 use vessel_extractors::{ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry};
 use vessel_formats::FormatSelector;
@@ -298,13 +299,6 @@ async fn channel_add(args: ChannelAddArgs, config: &Config) -> Result<()> {
 }
 
 async fn channel_sync(args: ChannelSyncArgs, config: &Config) -> Result<()> {
-    if args.comments {
-        return print_unsupported_report(
-            "channel.sync.comments",
-            "native YouTube comment extraction is not implemented yet",
-        );
-    }
-
     let (store, _) = init_sqlite_database(&config.database.url).await?;
     let tracked_channels = store.list_tracked_channels().await?;
     let run_id = store.start_run("channel sync").await?;
@@ -520,21 +514,32 @@ async fn video_subtitles_sync(args: VideoRefArg, config: &Config) -> Result<()> 
     Ok(())
 }
 
-async fn video_comments_sync(args: VideoRefArg, _config: &Config) -> Result<()> {
-    let lookup = if args.video.contains("://") {
-        extract_video_id_from_input(&args.video).await.ok()
-    } else {
-        Some(args.video)
-    };
-    let details = serde_json::json!({
-        "video": lookup,
-        "native_todo": "youtube comment extraction",
-    });
-    print_unsupported_report_with_details(
-        "video.comments.sync",
-        "native YouTube comment extraction is not implemented yet",
-        details,
-    )
+async fn video_comments_sync(args: VideoRefArg, config: &Config) -> Result<()> {
+    let (store, _) = init_sqlite_database(&config.database.url).await?;
+    let input = parse_video_input(&args.video);
+    let video = extract_video(&input).await?;
+    store.upsert_video_snapshot(&video).await?;
+    let comments = extract_comments(&input, 20).await?;
+    let comment_snapshots_inserted = store.sync_comments(&comments).await?;
+    let history = store.load_comment_history(&video.video_id).await?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "synced",
+            "video_id": video.video_id,
+            "title": video.title,
+            "comments_fetched": comments.len(),
+            "comment_snapshots_inserted": comment_snapshots_inserted,
+            "history_counts": {
+                "comments": history.comments.len(),
+                "snapshots": history.snapshots.len(),
+            },
+            "native_only": true,
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
 }
 
 async fn formats(url: String) -> Result<()> {
@@ -722,10 +727,10 @@ async fn sync_channel_video(
     if args.download_thumbnails {
         sync_video_thumbnails(store, &video).await?;
     }
-    debug_assert!(
-        !args.comments,
-        "comment sync should be rejected before execution"
-    );
+    if args.comments {
+        let comments = extract_comments(&input, 20).await?;
+        store.sync_comments(&comments).await?;
+    }
     Ok(snapshot_inserted)
 }
 
@@ -921,10 +926,6 @@ fn thumbnail_extension(url: &str) -> &'static str {
     } else {
         "jpg"
     }
-}
-
-fn print_unsupported_report(feature: &str, message: &str) -> Result<()> {
-    print_unsupported_report_with_details(feature, message, serde_json::json!({}))
 }
 
 fn print_unsupported_report_with_details(

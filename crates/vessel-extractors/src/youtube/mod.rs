@@ -9,8 +9,8 @@ use url::Url;
 use vessel_core::Result;
 use vessel_core::VesselError;
 use vessel_core::models::{
-    Availability, ChannelMetadata, InputKind, InputRef, MediaFormat, Platform, SubtitleTrack,
-    Thumbnail, VideoMetadata,
+    Availability, ChannelMetadata, CommentMetadata, InputKind, InputRef, MediaFormat, Platform,
+    SubtitleTrack, Thumbnail, VideoMetadata,
 };
 
 use crate::traits::{ExtractContext, ExtractRequest, ExtractedItem, Extractor, SupportLevel};
@@ -74,6 +74,38 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
             )
         })?;
     parse_video_metadata(&player_response, &url, OffsetDateTime::now_utc())
+}
+
+pub async fn extract_comments(
+    input: &InputRef,
+    max_comments: usize,
+) -> Result<Vec<CommentMetadata>> {
+    let video_id = canonical_video_id(input)?;
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let html = fetch_text(&url).await?;
+    let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
+        .or_else(|| extract_embedded_json(&html, "ytInitialData = "))
+        .ok_or_else(|| {
+            VesselError::Extractor("failed to locate ytInitialData in watch page".to_owned())
+        })?;
+    let api_key = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing INNERTUBE_API_KEY".to_owned()))?;
+    let client_version = extract_config_string(&html, "\"INNERTUBE_CLIENT_VERSION\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing INNERTUBE_CLIENT_VERSION".to_owned()))?;
+    let visitor_data = extract_config_string(&html, "\"visitorData\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing visitorData".to_owned()))?;
+    let continuation = find_first_comment_continuation(&initial_data).ok_or_else(|| {
+        VesselError::Unsupported(
+            "youtube watch page did not expose a comment continuation".to_owned(),
+        )
+    })?;
+    let page = fetch_comment_page(&api_key, &client_version, &visitor_data, &continuation).await?;
+    Ok(parse_comment_page(
+        &video_id,
+        &page,
+        OffsetDateTime::now_utc(),
+        max_comments,
+    ))
 }
 
 pub async fn extract_channel(input: &InputRef) -> Result<ChannelMetadata> {
@@ -209,6 +241,13 @@ fn extract_embedded_json(html: &str, marker: &str) -> Option<Value> {
     let object_start = slice.find('{')?;
     let json_text = take_balanced_json(&slice[object_start..])?;
     serde_json::from_str(json_text).ok()
+}
+
+fn extract_config_string(input: &str, marker: &str) -> Option<String> {
+    let start = input.find(marker)? + marker.len();
+    let rest = &input[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
 }
 
 fn take_balanced_json(input: &str) -> Option<&str> {
@@ -585,6 +624,146 @@ fn parse_subtitles(raw: &Value) -> Vec<SubtitleTrack> {
         .unwrap_or_default()
 }
 
+async fn fetch_comment_page(
+    api_key: &str,
+    client_version: &str,
+    visitor_data: &str,
+    continuation: &str,
+) -> Result<Value> {
+    let client = http_client()?;
+    let response = client
+        .post(format!(
+            "https://www.youtube.com/youtubei/v1/next?key={api_key}"
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": client_version,
+                    "visitorData": visitor_data,
+                }
+            },
+            "continuation": continuation,
+        }))
+        .send()
+        .await
+        .map_err(|err| VesselError::Extractor(format!("youtube comment request failed: {err}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(VesselError::Extractor(format!(
+            "youtube comment request returned http status {status}"
+        )));
+    }
+    response.json::<Value>().await.map_err(|err| {
+        VesselError::Extractor(format!("youtube comment response decode failed: {err}"))
+    })
+}
+
+fn find_first_comment_continuation(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(command) = map.get("continuationCommand") {
+                let request = command.get("request").and_then(Value::as_str);
+                let token = command.get("token").and_then(Value::as_str);
+                if request == Some("CONTINUATION_REQUEST_TYPE_WATCH_NEXT") {
+                    return token.map(ToOwned::to_owned);
+                }
+            }
+            map.values().find_map(find_first_comment_continuation)
+        }
+        Value::Array(items) => items.iter().find_map(find_first_comment_continuation),
+        _ => None,
+    }
+}
+
+fn parse_comment_page(
+    video_id: &str,
+    page: &Value,
+    fetched_at: OffsetDateTime,
+    max_comments: usize,
+) -> Vec<CommentMetadata> {
+    page.get("frameworkUpdates")
+        .and_then(|value| value.get("entityBatchUpdate"))
+        .and_then(|value| value.get("mutations"))
+        .and_then(Value::as_array)
+        .map(|mutations| {
+            mutations
+                .iter()
+                .filter_map(|mutation| parse_comment_mutation(video_id, mutation, fetched_at))
+                .take(max_comments)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_comment_mutation(
+    video_id: &str,
+    mutation: &Value,
+    fetched_at: OffsetDateTime,
+) -> Option<CommentMetadata> {
+    let payload = mutation.get("payload")?.get("commentEntityPayload")?;
+    let properties = payload.get("properties")?;
+    let author = payload.get("author")?;
+    let toolbar = payload.get("toolbar");
+
+    Some(CommentMetadata {
+        platform: Platform::YouTube,
+        comment_id: properties.get("commentId")?.as_str()?.to_owned(),
+        video_id: video_id.to_owned(),
+        author_channel_id: author
+            .get("channelId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        author_name: author
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        text: properties
+            .get("content")
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        like_count: toolbar
+            .and_then(|value| value.get("likeCountLiked"))
+            .and_then(Value::as_str)
+            .and_then(parse_compact_count),
+        reply_count: toolbar
+            .and_then(|value| value.get("replyCount"))
+            .and_then(Value::as_str)
+            .and_then(parse_compact_count),
+        published_at: properties
+            .get("publishedTime")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        fetched_at,
+        raw: payload.clone(),
+    })
+}
+
+fn parse_compact_count(input: &str) -> Option<u64> {
+    let normalized = input.trim().replace(',', "");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let last = normalized.chars().last()?;
+    let multiplier = match last {
+        'K' | 'k' => 1_000f64,
+        'M' | 'm' => 1_000_000f64,
+        'B' | 'b' => 1_000_000_000f64,
+        _ if last.is_ascii_digit() => 1f64,
+        _ => return None,
+    };
+    let number = if multiplier == 1f64 {
+        normalized.parse::<f64>().ok()?
+    } else {
+        normalized[..normalized.len() - 1].parse::<f64>().ok()?
+    };
+    Some((number * multiplier).round() as u64)
+}
+
 fn find_object_with_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     match value {
         Value::Object(map) => {
@@ -608,8 +787,8 @@ fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_embedded_json, parse_channel_feed, parse_channel_metadata, parse_video_id_from_url,
-        parse_video_metadata,
+        extract_embedded_json, parse_channel_feed, parse_channel_metadata, parse_comment_page,
+        parse_compact_count, parse_video_id_from_url, parse_video_metadata,
     };
     use time::OffsetDateTime;
 
@@ -699,5 +878,54 @@ mod tests {
         assert_eq!(videos.len(), 2);
         assert_eq!(videos[0].video_id, "abc123");
         assert_eq!(videos[1].title.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn parses_compact_counts() {
+        assert_eq!(parse_compact_count("246K"), Some(246_000));
+        assert_eq!(parse_compact_count("1.7M"), Some(1_700_000));
+        assert_eq!(parse_compact_count("42"), Some(42));
+    }
+
+    #[test]
+    fn parses_comment_entities_from_framework_updates() {
+        let page = serde_json::json!({
+            "frameworkUpdates": {
+                "entityBatchUpdate": {
+                    "mutations": [
+                        {
+                            "payload": {
+                                "commentEntityPayload": {
+                                    "properties": {
+                                        "commentId": "comment-1",
+                                        "content": { "content": "Hello world" },
+                                        "publishedTime": "1 day ago"
+                                    },
+                                    "author": {
+                                        "channelId": "author-1",
+                                        "displayName": "@author"
+                                    },
+                                    "toolbar": {
+                                        "likeCountLiked": "1.2K",
+                                        "replyCount": "3"
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let comments = parse_comment_page("video-1", &page, OffsetDateTime::UNIX_EPOCH, 20);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].comment_id, "comment-1");
+        assert_eq!(comments[0].video_id, "video-1");
+        assert_eq!(comments[0].author_channel_id.as_deref(), Some("author-1"));
+        assert_eq!(comments[0].author_name.as_deref(), Some("@author"));
+        assert_eq!(comments[0].text, "Hello world");
+        assert_eq!(comments[0].like_count, Some(1_200));
+        assert_eq!(comments[0].reply_count, Some(3));
+        assert_eq!(comments[0].published_at.as_deref(), Some("1 day ago"));
     }
 }

@@ -2,18 +2,17 @@
 
 ## Goal
 
-Expand native metadata and artifact coverage for subtitles and thumbnails, while keeping comment support explicitly native-only and not yet implemented.
+Expand native metadata and artifact coverage for subtitles, thumbnails, and comments.
 
 ## Deliverables
 
 - [x] `vessel video subtitles sync <video>`
-- [ ] Native `vessel video comments sync <video>`
+- [x] Native `vessel video comments sync <video>`
 - [x] Thumbnail fetch and persistence
-- [x] Optional channel sync integration flags for native subtitle and thumbnail flows
-- [x] Explicit unsupported response for native comment sync
+- [x] Optional channel sync integration flags for native subtitle, thumbnail, and comment flows
 
 ## Acceptance Criteria
 
-- [x] `vessel video comments sync <video>` fails explicitly with a native-only unsupported response.
+- [x] Comments can be fetched and stored historically without external tools.
 - [x] Subtitle tracks are normalized and persisted.
 - [x] Thumbnail records are linked to the related video.

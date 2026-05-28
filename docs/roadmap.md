@@ -21,7 +21,7 @@
 | [02](milestones/02-dataset-ledger.md) | Dataset Ledger | Completed |
 | [03](milestones/03-channel-tracking.md) | Channel Tracking | Completed |
 | [04](milestones/04-basic-download.md) | Basic Download | Completed |
-| [05](milestones/05-subs-thumbs-comments.md) | Subtitles, Thumbnails, Comments | In Progress |
+| [05](milestones/05-subs-thumbs-comments.md) | Subtitles, Thumbnails, Comments | Completed |
 | [06](milestones/06-native-parity.md) | Native Parity | Planned |
 | [07](milestones/07-format-selector-parity.md) | Format Selector Parity | Planned |
 | [08](milestones/08-postprocessing.md) | Postprocessing | Planned |
@@ -30,7 +30,7 @@
 ## Parity Tiers
 
 - Tier 1: native YouTube metadata, `info`, `formats`, `download`, subtitles, archive semantics.
-- Tier 2: stronger YouTube completeness, native comments, automatic captions, livestream handling, PO token plumbing.
+- Tier 2: stronger YouTube completeness, automatic captions, livestream handling, PO token plumbing, and deeper native comment coverage.
 - Tier 3: native support for more sites and generic extraction.
 - Tier 4: option-level parity, plugin system, external downloader parity, postprocessor parity.
 
