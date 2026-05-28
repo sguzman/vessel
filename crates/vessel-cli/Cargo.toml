@@ -1,0 +1,22 @@
+[package]
+name = "vessel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vessel"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+vessel-core = { path = "../vessel-core" }
+vessel-download = { path = "../vessel-download" }
+vessel-extractors = { path = "../vessel-extractors" }
+vessel-formats = { path = "../vessel-formats" }
+vessel-ledger = { path = "../vessel-ledger" }
+vessel-logging = { path = "../vessel-logging" }
+vessel-store = { path = "../vessel-store" }
