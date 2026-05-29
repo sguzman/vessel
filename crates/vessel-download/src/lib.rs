@@ -558,8 +558,12 @@ mod tests {
             duration_seconds: Some(10),
             upload_date: Some("20260101".to_owned()),
             release_timestamp: None,
+            tags: Vec::new(),
+            categories: Vec::new(),
+            primary_category: None,
             view_count: None,
             like_count: None,
+            dislike_count: None,
             comment_count: None,
             availability: Availability::Public,
             formats: vec![

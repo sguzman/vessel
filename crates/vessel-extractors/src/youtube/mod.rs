@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use quick_xml::Reader;
-use quick_xml::events::Event;
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use time::OffsetDateTime;
 use url::Url;
 
@@ -21,9 +20,45 @@ pub struct YoutubeExtractor;
 #[derive(Debug, Clone)]
 pub struct ChannelVideoRef {
     pub video_id: String,
+    pub tab_name: String,
     pub title: Option<String>,
     pub published_at: Option<String>,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct ChannelTabCursor {
+    pub tab_name: String,
+    pub continuation_token: Option<String>,
+    pub visitor_data: Option<String>,
+    pub delegated_session_id: Option<String>,
+    pub last_seen_published_at: Option<String>,
+    pub backfill_complete: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChannelVideoCrawlReport {
+    pub videos: Vec<ChannelVideoRef>,
+    pub cursors: Vec<ChannelTabCursor>,
+    pub videos_per_tab: BTreeMap<String, usize>,
+    pub tabs_visited: Vec<String>,
+    pub tabs_completed: Vec<String>,
+    pub tabs_resumed_from_checkpoint: Vec<String>,
+}
+
+pub trait DislikeProvider: Send + Sync {
+    fn fetch_dislike_count(
+        &self,
+        _video_id: &str,
+        _video: &VideoMetadata,
+    ) -> Result<Option<u64>> {
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopDislikeProvider;
+
+impl DislikeProvider for NoopDislikeProvider {}
 
 #[async_trait]
 impl Extractor for YoutubeExtractor {
@@ -63,9 +98,18 @@ impl Extractor for YoutubeExtractor {
 }
 
 pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
+    extract_video_with_dislikes(input, &NoopDislikeProvider).await
+}
+
+pub async fn extract_video_with_dislikes(
+    input: &InputRef,
+    dislike_provider: &dyn DislikeProvider,
+) -> Result<VideoMetadata> {
     let video_id = canonical_video_id(input)?;
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let html = fetch_text(&url).await?;
+    let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
+        .or_else(|| extract_embedded_json(&html, "ytInitialData = "));
     let mut player_response = extract_embedded_json(&html, "var ytInitialPlayerResponse = ")
         .or_else(|| extract_embedded_json(&html, "ytInitialPlayerResponse = "))
         .ok_or_else(|| {
@@ -80,7 +124,30 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
             merge_streaming_data(&mut player_response, &android_response);
         }
     }
-    parse_video_metadata(&player_response, &url, OffsetDateTime::now_utc())
+    let mut video = parse_video_metadata(
+        &player_response,
+        initial_data.as_ref(),
+        &html,
+        &url,
+        OffsetDateTime::now_utc(),
+    )?;
+    if video.dislike_count.is_some() {
+        if let Some(raw) = video.raw.as_object_mut() {
+            raw.insert(
+                "dislike_count_source".to_owned(),
+                Value::String("youtube_native".to_owned()),
+            );
+        }
+    } else if let Some(dislike_count) = dislike_provider.fetch_dislike_count(&video_id, &video)? {
+        video.dislike_count = Some(dislike_count);
+        if let Some(raw) = video.raw.as_object_mut() {
+            raw.insert(
+                "dislike_count_source".to_owned(),
+                Value::String("external_enricher".to_owned()),
+            );
+        }
+    }
+    Ok(video)
 }
 
 pub async fn extract_comments(
@@ -131,23 +198,55 @@ pub async fn extract_channel(input: &InputRef) -> Result<ChannelMetadata> {
     let canonical_url = canonical_channel_url(input)?;
     let html = fetch_text(&canonical_url).await?;
     let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
-        .or_else(|| extract_embedded_json(&html, "ytInitialData = "));
-    let metadata = extract_embedded_json(&html, "var ytInitialData = ")
-        .or_else(|| extract_embedded_json(&html, "ytInitialData = "));
-    let raw = metadata.or(initial_data).ok_or_else(|| {
+        .or_else(|| extract_embedded_json(&html, "ytInitialData = "))
+        .ok_or_else(|| {
         VesselError::Extractor("failed to locate ytInitialData in channel page".to_owned())
     })?;
-    parse_channel_metadata(&raw, &canonical_url, OffsetDateTime::now_utc())
+    let api_key = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"");
+    let client_version = extract_config_string(&html, "\"INNERTUBE_CLIENT_VERSION\":\"");
+    let visitor_data = extract_config_string(&html, "\"visitorData\":\"");
+    let about_data = if let (Some(api_key), Some(client_version), Some(visitor_data)) =
+        (api_key.as_deref(), client_version.as_deref(), visitor_data.as_deref())
+    {
+        fetch_channel_tab(&initial_data, api_key, client_version, visitor_data, "about")
+            .await
+            .ok()
+    } else {
+        None
+    };
+    parse_channel_metadata(
+        &initial_data,
+        about_data.as_ref(),
+        &canonical_url,
+        OffsetDateTime::now_utc(),
+    )
 }
 
-pub async fn list_channel_videos(input: &InputRef) -> Result<Vec<ChannelVideoRef>> {
-    let channel = extract_channel(input).await?;
-    let feed_url = format!(
-        "https://www.youtube.com/feeds/videos.xml?channel_id={}",
-        channel.channel_id
-    );
-    let xml = fetch_text(&feed_url).await?;
-    parse_channel_feed(&xml)
+pub async fn crawl_channel_videos(
+    input: &InputRef,
+    existing_cursors: &[ChannelTabCursor],
+) -> Result<ChannelVideoCrawlReport> {
+    let canonical_url = canonical_channel_url(input)?;
+    let html = fetch_text(&canonical_url).await?;
+    let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
+        .or_else(|| extract_embedded_json(&html, "ytInitialData = "))
+        .ok_or_else(|| {
+            VesselError::Extractor("failed to locate ytInitialData in channel page".to_owned())
+        })?;
+    let api_key = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing INNERTUBE_API_KEY".to_owned()))?;
+    let client_version = extract_config_string(&html, "\"INNERTUBE_CLIENT_VERSION\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing INNERTUBE_CLIENT_VERSION".to_owned()))?;
+    let visitor_data = extract_config_string(&html, "\"visitorData\":\"")
+        .ok_or_else(|| VesselError::Extractor("missing visitorData".to_owned()))?;
+    crawl_channel_tabs(
+        &initial_data,
+        &api_key,
+        &client_version,
+        &visitor_data,
+        existing_cursors,
+    )
+    .await
 }
 
 fn is_channel_input(input: &InputRef) -> bool {
@@ -351,6 +450,7 @@ fn take_balanced_json(input: &str) -> Option<&str> {
 
 fn parse_channel_metadata(
     raw: &Value,
+    about: Option<&Value>,
     url: &str,
     fetched_at: OffsetDateTime,
 ) -> Result<ChannelMetadata> {
@@ -374,6 +474,27 @@ fn parse_channel_metadata(
         .and_then(|item| item.get("url"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let title = metadata
+        .get("title")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let description = metadata
+        .get("description")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let subscriber_count = about
+        .and_then(|value| find_page_header_metadata_count(value, &["subscribers", "suscriptores"]))
+        .or_else(|| find_page_header_metadata_count(raw, &["subscribers", "suscriptores"]))
+        .or_else(|| about.and_then(|value| find_count_in_metadata_rows(value, &["subscribers", "suscriptores"])));
+    let video_count = about
+        .and_then(|value| find_page_header_metadata_count(value, &["videos", "video"]))
+        .or_else(|| find_page_header_metadata_count(raw, &["videos", "video"]))
+        .or_else(|| about.and_then(|value| find_count_in_about_renderer(value, "videoCountText")))
+        .or_else(|| about.and_then(|value| find_count_in_metadata_rows(value, &["videos", "video"])));
+    let view_count = about
+        .and_then(|value| find_count_in_about_renderer(value, "viewCountText"))
+        .or_else(|| about.and_then(|value| find_count_in_metadata_rows(value, &["views", "vistas"])));
+    let banner_url = find_banner_url(raw).or_else(|| about.and_then(find_banner_url));
 
     Ok(ChannelMetadata {
         platform: Platform::YouTube,
@@ -384,26 +505,22 @@ fn parse_channel_metadata(
             .and_then(Value::as_str)
             .unwrap_or(url)
             .to_owned(),
-        title: metadata
-            .get("title")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        description: metadata
-            .get("description")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        subscriber_count: None,
-        video_count: None,
-        view_count: None,
+        title,
+        description,
+        subscriber_count,
+        video_count,
+        view_count,
         avatar_url,
-        banner_url: None,
+        banner_url,
         fetched_at,
-        raw: raw.clone(),
+        raw: merge_raw_payloads(raw, about),
     })
 }
 
 fn parse_video_metadata(
     raw: &Value,
+    initial_data: Option<&Value>,
+    html: &str,
     url: &str,
     fetched_at: OffsetDateTime,
 ) -> Result<VideoMetadata> {
@@ -438,6 +555,20 @@ fn parse_video_metadata(
 
     let formats = streaming_data.map(parse_formats).unwrap_or_default();
     let subtitles = parse_subtitles(raw);
+    let tags = parse_video_tags(details, html);
+    let categories = parse_video_categories(microformat, html);
+    let primary_category = categories.first().cloned();
+    let like_count = string_field(details, "likeCount")
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            microformat
+                .and_then(|value| value.get("likeCount"))
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse().ok())
+        })
+        .or_else(|| initial_data.and_then(parse_like_count_from_initial_data));
+    let dislike_count = initial_data.and_then(parse_dislike_count_from_initial_data);
+    let comment_count = initial_data.and_then(parse_comment_count_from_initial_data);
 
     Ok(VideoMetadata {
         platform: Platform::YouTube,
@@ -453,9 +584,13 @@ fn parse_video_metadata(
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         release_timestamp: None,
+        tags,
+        categories,
+        primary_category,
         view_count: string_field(details, "viewCount").and_then(|value| value.parse().ok()),
-        like_count: None,
-        comment_count: None,
+        like_count,
+        dislike_count,
+        comment_count,
         availability: parse_availability(raw, details),
         formats,
         subtitles,
@@ -539,82 +674,709 @@ fn parse_formats(streaming_data: &Value) -> Vec<MediaFormat> {
     formats
 }
 
-fn parse_channel_feed(xml: &str) -> Result<Vec<ChannelVideoRef>> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+async fn fetch_channel_tab(
+    initial_data: &Value,
+    api_key: &str,
+    client_version: &str,
+    visitor_data: &str,
+    tab_name: &str,
+) -> Result<Value> {
+    let (browse_id, params) = find_tab_browse_endpoint(initial_data, tab_name).ok_or_else(|| {
+        VesselError::Unsupported(format!("youtube channel did not expose a {tab_name} tab"))
+    })?;
+    fetch_browse_page(
+        api_key,
+        client_version,
+        visitor_data,
+        Some(&browse_id),
+        params.as_deref(),
+        None,
+    )
+    .await
+}
 
-    let mut videos = Vec::new();
-    let mut current_video_id: Option<String> = None;
-    let mut current_title: Option<String> = None;
-    let mut current_published: Option<String> = None;
-    let mut in_entry = false;
+async fn crawl_channel_tabs(
+    initial_data: &Value,
+    api_key: &str,
+    client_version: &str,
+    visitor_data: &str,
+    existing_cursors: &[ChannelTabCursor],
+) -> Result<ChannelVideoCrawlReport> {
+    let tabs = ["videos", "shorts", "streams"];
+    let mut videos_by_id = BTreeMap::<String, ChannelVideoRef>::new();
+    let mut cursors_out = Vec::new();
+    let mut videos_per_tab = BTreeMap::new();
+    let mut tabs_visited = Vec::new();
+    let mut tabs_completed = Vec::new();
+    let mut tabs_resumed_from_checkpoint = Vec::new();
+    let existing_map = existing_cursors
+        .iter()
+        .map(|cursor| (cursor.tab_name.clone(), cursor.clone()))
+        .collect::<HashMap<_, _>>();
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref event)) => match event.name().as_ref() {
-                b"entry" => {
-                    in_entry = true;
-                    current_video_id = None;
-                    current_title = None;
-                    current_published = None;
-                }
-                b"yt:videoId" if in_entry => {
-                    current_video_id = Some(
-                        reader
-                            .read_text(event.name())
-                            .map_err(|err| {
-                                VesselError::Extractor(format!(
-                                    "failed to parse feed video id: {err}"
-                                ))
-                            })?
-                            .into_owned(),
-                    );
-                }
-                b"title" if in_entry => {
-                    current_title = Some(
-                        reader
-                            .read_text(event.name())
-                            .map_err(|err| {
-                                VesselError::Extractor(format!("failed to parse feed title: {err}"))
-                            })?
-                            .into_owned(),
-                    );
-                }
-                b"published" if in_entry => {
-                    current_published = Some(
-                        reader
-                            .read_text(event.name())
-                            .map_err(|err| {
-                                VesselError::Extractor(format!(
-                                    "failed to parse feed publish date: {err}"
-                                ))
-                            })?
-                            .into_owned(),
-                    );
-                }
-                _ => {}
-            },
-            Ok(Event::End(ref event)) if event.name().as_ref() == b"entry" => {
-                if let Some(video_id) = current_video_id.take() {
-                    videos.push(ChannelVideoRef {
-                        video_id,
-                        title: current_title.take(),
-                        published_at: current_published.take(),
-                    });
-                }
-                in_entry = false;
-            }
-            Ok(Event::Eof) => break,
-            Err(err) => {
-                return Err(VesselError::Extractor(format!(
-                    "failed to parse channel feed xml: {err}"
-                )));
-            }
-            _ => {}
+    for tab_name in tabs {
+        let existing = existing_map.get(tab_name).cloned().unwrap_or_default();
+        let mut seen_continuations = HashSet::new();
+        let mut tab_videos = Vec::new();
+        let mut last_seen_published_at = existing.last_seen_published_at.clone();
+        let mut current_visitor_data = existing
+            .visitor_data
+            .clone()
+            .unwrap_or_else(|| visitor_data.to_owned());
+        let initial_tab_data = match fetch_channel_tab(
+            initial_data,
+            api_key,
+            client_version,
+            visitor_data,
+            tab_name,
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(VesselError::Unsupported(_)) => continue,
+            Err(err) => return Err(err),
+        };
+        tabs_visited.push(tab_name.to_owned());
+        collect_channel_video_refs(&initial_tab_data, tab_name, &mut tab_videos);
+        if let Some(max_published) = tab_videos
+            .iter()
+            .filter_map(|video| video.published_at.clone())
+            .max()
+        {
+            last_seen_published_at = Some(max_published);
         }
+
+        let mut next_continuation = if existing.backfill_complete {
+            None
+        } else {
+            existing
+                .continuation_token
+                .clone()
+                .or_else(|| find_continuation_token(&initial_tab_data))
+        };
+        if existing.continuation_token.is_some() {
+            tabs_resumed_from_checkpoint.push(tab_name.to_owned());
+        }
+
+        while let Some(token) = next_continuation.take() {
+            if !seen_continuations.insert(token.clone()) {
+                break;
+            }
+            let page = fetch_browse_page(
+                api_key,
+                client_version,
+                &current_visitor_data,
+                None,
+                None,
+                Some(&token),
+            )
+            .await?;
+            if let Some(next_visitor_data) = find_string_value(&page, "visitorData") {
+                current_visitor_data = next_visitor_data;
+            }
+            collect_channel_video_refs(&page, tab_name, &mut tab_videos);
+            if let Some(max_published) = tab_videos
+                .iter()
+                .filter_map(|video| video.published_at.clone())
+                .max()
+            {
+                last_seen_published_at = Some(max_published);
+            }
+            next_continuation = find_continuation_token(&page);
+            if existing.backfill_complete {
+                break;
+            }
+        }
+
+        let mut unique_for_tab = 0usize;
+        for video in tab_videos {
+            if videos_by_id.insert(video.video_id.clone(), video).is_none() {
+                unique_for_tab += 1;
+            }
+        }
+        videos_per_tab.insert(tab_name.to_owned(), unique_for_tab);
+        let backfill_complete = next_continuation.is_none();
+        if backfill_complete {
+            tabs_completed.push(tab_name.to_owned());
+        }
+        cursors_out.push(ChannelTabCursor {
+            tab_name: tab_name.to_owned(),
+            continuation_token: next_continuation,
+            visitor_data: Some(current_visitor_data),
+            delegated_session_id: existing.delegated_session_id,
+            last_seen_published_at,
+            backfill_complete,
+        });
     }
 
-    Ok(videos)
+    Ok(ChannelVideoCrawlReport {
+        videos: videos_by_id.into_values().collect(),
+        cursors: cursors_out,
+        videos_per_tab,
+        tabs_visited,
+        tabs_completed,
+        tabs_resumed_from_checkpoint,
+    })
+}
+
+async fn fetch_browse_page(
+    api_key: &str,
+    client_version: &str,
+    visitor_data: &str,
+    browse_id: Option<&str>,
+    params: Option<&str>,
+    continuation: Option<&str>,
+) -> Result<Value> {
+    let client = http_client()?;
+    let mut body = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": client_version,
+                "visitorData": visitor_data,
+            }
+        }
+    });
+    if let Some(browse_id) = browse_id {
+        body["browseId"] = Value::String(browse_id.to_owned());
+    }
+    if let Some(params) = params {
+        body["params"] = Value::String(params.to_owned());
+    }
+    if let Some(continuation) = continuation {
+        body["continuation"] = Value::String(continuation.to_owned());
+    }
+
+    let response = client
+        .post(format!(
+            "https://www.youtube.com/youtubei/v1/browse?key={api_key}"
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| VesselError::Extractor(format!("youtube browse request failed: {err}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(VesselError::Extractor(format!(
+            "youtube browse request returned http status {status}"
+        )));
+    }
+    response.json::<Value>().await.map_err(|err| {
+        VesselError::Extractor(format!("youtube browse response decode failed: {err}"))
+    })
+}
+
+fn find_tab_browse_endpoint(value: &Value, target_tab: &str) -> Option<(String, Option<String>)> {
+    let tabs = value
+        .get("contents")
+        .and_then(|value| value.get("twoColumnBrowseResultsRenderer"))
+        .and_then(|value| value.get("tabs"))
+        .and_then(Value::as_array)?;
+    tabs.iter().find_map(|tab| {
+        let tab_renderer = tab.get("tabRenderer").or_else(|| tab.get("expandableTabRenderer"))?;
+        let title = tab_renderer.get("title").and_then(Value::as_str)?.to_ascii_lowercase();
+        if title != target_tab {
+            return None;
+        }
+        let endpoint = tab_renderer.get("endpoint")?.get("browseEndpoint")?;
+        let browse_id = endpoint.get("browseId")?.as_str()?.to_owned();
+        let params = endpoint
+            .get("params")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        Some((browse_id, params))
+    })
+}
+
+fn collect_channel_video_refs(value: &Value, tab_name: &str, output: &mut Vec<ChannelVideoRef>) {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "videoRenderer",
+                "gridVideoRenderer",
+                "playlistVideoRenderer",
+                "reelItemRenderer",
+                "shortsLockupViewModel",
+                "lockupViewModel",
+            ] {
+                if let Some(renderer) = map.get(key) {
+                    if let Some(video) = parse_channel_video_renderer(renderer, key, tab_name) {
+                        output.push(video);
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_channel_video_refs(child, tab_name, output);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_channel_video_refs(child, tab_name, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_channel_video_renderer(
+    renderer: &Value,
+    renderer_key: &str,
+    tab_name: &str,
+) -> Option<ChannelVideoRef> {
+    let video_id = match renderer_key {
+        "reelItemRenderer" => renderer
+            .get("videoId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                renderer
+                    .get("navigationEndpoint")
+                    .and_then(|value| value.get("reelWatchEndpoint"))
+                    .and_then(|value| value.get("videoId"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })?,
+        "shortsLockupViewModel" => renderer
+            .get("onTap")
+            .and_then(|value| value.get("innertubeCommand"))
+            .and_then(|value| value.get("reelWatchEndpoint"))
+            .and_then(|value| value.get("videoId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                renderer
+                    .get("entityId")
+                    .and_then(Value::as_str)
+                    .and_then(extract_video_id_from_entity_id)
+            })?,
+        "lockupViewModel" => {
+            if renderer
+                .get("contentType")
+                .and_then(Value::as_str)
+                .filter(|content_type| *content_type == "LOCKUP_CONTENT_TYPE_VIDEO")
+                .is_none()
+            {
+                return None;
+            }
+            renderer
+                .get("contentId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)?
+        }
+        _ => renderer
+            .get("videoId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+    };
+    Some(ChannelVideoRef {
+        video_id,
+        tab_name: tab_name.to_owned(),
+        title: renderer_title(renderer),
+        published_at: renderer_published_text(renderer),
+    })
+}
+
+fn renderer_title(renderer: &Value) -> Option<String> {
+    find_text_at_path(renderer, &["title"])
+        .or_else(|| find_text_at_path(renderer, &["metadata", "lockupMetadataViewModel", "title"]))
+        .or_else(|| find_text_at_path(renderer, &["headline"]))
+        .or_else(|| find_text_at_path(renderer, &["accessibilityText"]))
+}
+
+fn renderer_published_text(renderer: &Value) -> Option<String> {
+    find_text_at_path(renderer, &["publishedTimeText"])
+        .or_else(|| {
+            renderer
+                .get("metadata")
+                .and_then(|value| value.get("lockupMetadataViewModel"))
+                .and_then(|value| value.get("metadata"))
+                .and_then(|value| value.get("contentMetadataViewModel"))
+                .and_then(text_from_value)
+        })
+        .or_else(|| find_text_at_path(renderer, &["videoInfo"]))
+        .or_else(|| find_text_at_path(renderer, &["timestampText"]))
+}
+
+fn find_continuation_token(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(command) = map.get("continuationCommand") {
+                if let Some(token) = command.get("token").and_then(Value::as_str) {
+                    return Some(token.to_owned());
+                }
+            }
+            map.values().find_map(find_continuation_token)
+        }
+        Value::Array(items) => items.iter().find_map(find_continuation_token),
+        _ => None,
+    }
+}
+
+fn extract_video_id_from_entity_id(entity_id: &str) -> Option<String> {
+    entity_id
+        .rsplit_once(':')
+        .map(|(_, suffix)| suffix.to_owned())
+        .filter(|suffix| !suffix.is_empty())
+}
+
+fn merge_raw_payloads(primary: &Value, secondary: Option<&Value>) -> Value {
+    if let Some(secondary) = secondary {
+        serde_json::json!({
+            "primary": primary,
+            "secondary": secondary,
+        })
+    } else {
+        primary.clone()
+    }
+}
+
+fn find_banner_url(value: &Value) -> Option<String> {
+    find_thumbnail_url(value, "banner")
+        .or_else(|| find_thumbnail_url(value, "mobileBanner"))
+        .or_else(|| find_thumbnail_url(value, "tvBanner"))
+        .or_else(|| {
+            value.get("header")
+                .and_then(|header| header.get("pageHeaderRenderer"))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.get("pageHeaderViewModel"))
+                .and_then(|value| value.get("banner"))
+                .and_then(|value| value.get("imageBannerViewModel"))
+                .and_then(|value| value.get("image"))
+                .and_then(|value| value.get("sources"))
+                .and_then(Value::as_array)
+                .and_then(|items| items.last())
+                .and_then(|item| item.get("url"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .map(|url| uncrop_youtube_image(&url))
+}
+
+fn find_thumbnail_url(value: &Value, key: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(thumbnails) = map
+                .get(key)
+                .and_then(|value| value.get("thumbnails").or_else(|| value.get("sources")))
+                .and_then(Value::as_array)
+            {
+                if let Some(url) = thumbnails
+                    .last()
+                    .and_then(|item| item.get("url"))
+                    .and_then(Value::as_str)
+                {
+                    return Some(url.to_owned());
+                }
+            }
+            map.values().find_map(|child| find_thumbnail_url(child, key))
+        }
+        Value::Array(items) => items.iter().find_map(|child| find_thumbnail_url(child, key)),
+        _ => None,
+    }
+}
+
+fn uncrop_youtube_image(url: &str) -> String {
+    let base = url.split('=').next().unwrap_or(url);
+    format!("{base}=s0")
+}
+
+fn find_count_in_about_renderer(value: &Value, key: &str) -> Option<u64> {
+    find_object_with_key(value, "channelAboutFullMetadataRenderer")
+        .and_then(|renderer| renderer.get(key))
+        .and_then(text_from_value)
+        .and_then(|text| parse_count_from_text(&text))
+}
+
+fn find_count_in_metadata_rows(value: &Value, needles: &[&str]) -> Option<u64> {
+    let rows = find_object_with_key(value, "metadataRows")
+        .and_then(Value::as_array)
+        .or_else(|| {
+            find_object_with_key(value, "metadataRows")
+                .and_then(|rows| rows.get("metadataRows"))
+                .and_then(Value::as_array)
+        })?;
+    rows.iter().find_map(|row| {
+        let text = text_from_value(row)?;
+        let lower = text.to_ascii_lowercase();
+        if needles.iter().any(|needle| lower.contains(needle)) {
+            parse_count_from_text(&text)
+        } else {
+            None
+        }
+    })
+}
+
+fn find_page_header_metadata_count(value: &Value, needles: &[&str]) -> Option<u64> {
+    value
+        .get("header")
+        .and_then(|header| header.get("pageHeaderRenderer"))
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.get("pageHeaderViewModel"))
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("contentMetadataViewModel"))
+        .and_then(|value| value.get("metadataRows"))
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter().find_map(|row| {
+                row.get("metadataParts")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|part| {
+                        let text = text_from_value(part)?;
+                        let lower = text.to_ascii_lowercase();
+                        if needles.iter().any(|needle| lower.contains(needle)) {
+                            parse_count_from_text(&text)
+                        } else {
+                            None
+                        }
+                    })
+            })
+        })
+}
+
+fn parse_video_tags(details: &serde_json::Map<String, Value>, html: &str) -> Vec<String> {
+    if let Some(tags) = details.get("keywords").and_then(Value::as_array) {
+        let parsed = tags
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    extract_meta_values(html, "og:video:tag")
+}
+
+fn parse_video_categories(microformat: Option<&Value>, html: &str) -> Vec<String> {
+    if let Some(category) = microformat
+        .and_then(|value| value.get("category"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        return vec![category.to_owned()];
+    }
+    extract_meta_values(html, "genre")
+}
+
+fn extract_meta_values(html: &str, property: &str) -> Vec<String> {
+    let needle = format!("property=\"{property}\" content=\"");
+    let mut values = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find(&needle) {
+        let slice = &rest[start + needle.len()..];
+        if let Some(end) = slice.find('"') {
+            values.push(slice[..end].to_owned());
+            rest = &slice[end..];
+        } else {
+            break;
+        }
+    }
+    if values.is_empty() {
+        let needle = format!("name=\"{property}\" content=\"");
+        let mut rest = html;
+        while let Some(start) = rest.find(&needle) {
+            let slice = &rest[start + needle.len()..];
+            if let Some(end) = slice.find('"') {
+                values.push(slice[..end].to_owned());
+                rest = &slice[end..];
+            } else {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn parse_comment_count_from_initial_data(value: &Value) -> Option<u64> {
+    let comments_section_ids = [
+        "comment-item-section",
+        "engagement-panel-comments-section",
+    ];
+    find_first_by_key(value, "commentsEntryPointHeaderRenderer")
+        .and_then(|renderer| renderer.get("commentCount"))
+        .and_then(text_from_value)
+        .and_then(|text| parse_count_from_text(&text))
+        .or_else(|| {
+            find_array_entry_by_panel_id(value, &comments_section_ids)
+                .and_then(|panel| panel.get("engagementPanelSectionListRenderer"))
+                .and_then(|renderer| renderer.get("header"))
+                .and_then(|header| header.get("engagementPanelTitleHeaderRenderer"))
+                .and_then(|renderer| renderer.get("contextualInfo"))
+                .and_then(text_from_value)
+                .and_then(|text| parse_count_from_text(&text))
+        })
+}
+
+fn parse_like_count_from_initial_data(value: &Value) -> Option<u64> {
+    parse_reaction_counts_from_initial_data(value)
+        .0
+        .or_else(|| find_string_value(value, "likeCount").and_then(|text| parse_count_from_text(&text)))
+}
+
+fn parse_dislike_count_from_initial_data(value: &Value) -> Option<u64> {
+    parse_reaction_counts_from_initial_data(value)
+        .1
+        .or_else(|| find_string_value(value, "dislikeCount").and_then(|text| parse_count_from_text(&text)))
+}
+
+fn parse_reaction_counts_from_initial_data(value: &Value) -> (Option<u64>, Option<u64>) {
+    let mut like_count = None;
+    let mut dislike_count = None;
+    if let Some(renderer) = find_first_by_key(value, "videoPrimaryInfoRenderer") {
+        for label in find_accessibility_labels(renderer) {
+            let lower = label.to_ascii_lowercase();
+            if like_count.is_none() && lower.contains("like") && !lower.contains("dislike") {
+                like_count = parse_count_from_text(&label);
+            }
+            if dislike_count.is_none() && lower.contains("dislike") {
+                dislike_count = parse_count_from_text(&label);
+            }
+        }
+    }
+    (like_count, dislike_count)
+}
+
+fn find_accessibility_labels(value: &Value) -> Vec<String> {
+    let mut labels = Vec::new();
+    collect_accessibility_labels(value, &mut labels);
+    labels
+}
+
+fn collect_accessibility_labels(value: &Value, labels: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(label) = map
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|label| label.to_ascii_lowercase().contains("like"))
+            {
+                labels.push(label.to_owned());
+            }
+            if let Some(text) = map
+                .get("accessibilityText")
+                .and_then(Value::as_str)
+                .filter(|label| label.to_ascii_lowercase().contains("like"))
+            {
+                labels.push(text.to_owned());
+            }
+            for child in map.values() {
+                collect_accessibility_labels(child, labels);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_accessibility_labels(child, labels);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_count_from_text(input: &str) -> Option<u64> {
+    let normalized = input.replace('\u{a0}', " ");
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let index = tokens
+        .iter()
+        .position(|part| part.chars().any(|ch| ch.is_ascii_digit()))?;
+    let token = tokens[index].trim_matches(|ch: char| ch == ',' || ch == '.');
+    let compact = if let Some(next) = tokens.get(index + 1) {
+        let unit = next.trim_matches(|ch: char| ch == ',' || ch == '.').to_ascii_lowercase();
+        if matches!(unit.as_str(), "k" | "m" | "b") {
+            Some(format!("{token}{unit}"))
+        } else if unit == "mil" {
+            Some(format!("{token}k"))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    compact
+        .as_deref()
+        .and_then(parse_compact_count)
+        .or_else(|| parse_compact_count(token))
+        .or_else(|| {
+        let digits = token
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        digits.parse().ok()
+    })
+}
+
+fn text_from_value(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    if let Some(simple) = value.get("simpleText").and_then(Value::as_str) {
+        return Some(simple.to_owned());
+    }
+    if let Some(runs) = value.get("runs").and_then(Value::as_array) {
+        let joined = runs
+            .iter()
+            .filter_map(|run| run.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("");
+        if !joined.is_empty() {
+            return Some(joined);
+        }
+    }
+    match value {
+        Value::Object(map) => map.values().find_map(text_from_value),
+        Value::Array(items) => items.iter().find_map(text_from_value),
+        _ => None,
+    }
+}
+
+fn find_text_at_path(value: &Value, keys: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in keys {
+        current = current.get(*key)?;
+    }
+    text_from_value(current)
+}
+
+fn find_first_by_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(found) = map.get(key) {
+                return Some(found);
+            }
+            map.values().find_map(|child| find_first_by_key(child, key))
+        }
+        Value::Array(items) => items.iter().find_map(|child| find_first_by_key(child, key)),
+        _ => None,
+    }
+}
+
+fn find_array_entry_by_panel_id<'a>(value: &'a Value, ids: &[&str]) -> Option<&'a Value> {
+    match value {
+        Value::Array(items) => items.iter().find(|item| {
+            item.get("engagementPanelSectionListRenderer")
+                .and_then(|renderer| renderer.get("panelIdentifier"))
+                .and_then(Value::as_str)
+                .map(|panel_id| ids.iter().any(|candidate| candidate == &panel_id))
+                .unwrap_or(false)
+        }),
+        Value::Object(map) => map.values().find_map(|child| find_array_entry_by_panel_id(child, ids)),
+        _ => None,
+    }
+}
+
+fn find_string_value(value: &Value, key: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(found) = map.get(key).and_then(Value::as_str) {
+                return Some(found.to_owned());
+            }
+            map.values().find_map(|child| find_string_value(child, key))
+        }
+        Value::Array(items) => items.iter().find_map(|child| find_string_value(child, key)),
+        _ => None,
+    }
 }
 
 fn mime_to_extension(mime: &str) -> &str {
@@ -870,8 +1632,8 @@ fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_embedded_json, find_next_comment_continuation, merge_streaming_data,
-        parse_channel_feed, parse_channel_metadata, parse_comment_page, parse_compact_count,
+        collect_channel_video_refs, extract_embedded_json, find_next_comment_continuation,
+        merge_streaming_data, parse_channel_metadata, parse_comment_page, parse_compact_count,
         parse_video_id_from_url, parse_video_metadata,
     };
     use time::OffsetDateTime;
@@ -899,6 +1661,8 @@ mod tests {
         let json = extract_embedded_json(html, "var ytInitialPlayerResponse = ").expect("json");
         let video = parse_video_metadata(
             &json,
+            None,
+            html,
             "https://www.youtube.com/watch?v=abc123",
             OffsetDateTime::UNIX_EPOCH,
         )
@@ -933,6 +1697,7 @@ mod tests {
         });
         let channel = parse_channel_metadata(
             &raw,
+            None,
             "https://www.youtube.com/@example",
             OffsetDateTime::UNIX_EPOCH,
         )
@@ -943,24 +1708,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_channel_feed_entries() {
-        let xml = r#"
-        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
-          <entry>
-            <yt:videoId>abc123</yt:videoId>
-            <title>First</title>
-            <published>2024-01-01T00:00:00+00:00</published>
-          </entry>
-          <entry>
-            <yt:videoId>def456</yt:videoId>
-            <title>Second</title>
-            <published>2024-01-02T00:00:00+00:00</published>
-          </entry>
-        </feed>
-        "#;
-        let videos = parse_channel_feed(xml).expect("feed parse");
+    fn collects_channel_videos_from_renderer_tree() {
+        let page = serde_json::json!({
+            "contents": [{
+                "videoRenderer": {
+                    "videoId": "abc123",
+                    "title": { "runs": [{ "text": "First" }] },
+                    "publishedTimeText": { "simpleText": "1 day ago" }
+                }
+            }, {
+                "gridVideoRenderer": {
+                    "videoId": "def456",
+                    "title": { "simpleText": "Second" }
+                }
+            }]
+        });
+        let mut videos = Vec::new();
+        collect_channel_video_refs(&page, "videos", &mut videos);
         assert_eq!(videos.len(), 2);
         assert_eq!(videos[0].video_id, "abc123");
+        assert_eq!(videos[0].tab_name, "videos");
         assert_eq!(videos[1].title.as_deref(), Some("Second"));
     }
 

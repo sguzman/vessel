@@ -108,8 +108,14 @@ pub struct VideoMetadata {
     pub upload_date: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub release_timestamp: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    pub primary_category: Option<String>,
     pub view_count: Option<u64>,
     pub like_count: Option<u64>,
+    pub dislike_count: Option<u64>,
     pub comment_count: Option<u64>,
     pub availability: Availability,
     pub formats: Vec<MediaFormat>,

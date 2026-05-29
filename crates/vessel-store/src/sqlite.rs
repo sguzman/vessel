@@ -37,8 +37,11 @@ pub struct StoredVideoLatest {
     pub description: Option<String>,
     pub upload_date: Option<String>,
     pub duration_seconds: Option<i64>,
+    pub primary_category: Option<String>,
+    pub tags: Vec<String>,
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
+    pub dislike_count: Option<i64>,
     pub comment_count: Option<i64>,
     pub availability: String,
     pub latest_snapshot_id: Option<String>,
@@ -55,6 +58,18 @@ pub struct StoredTrackedChannel {
     pub title: Option<String>,
     pub added_at: String,
     pub last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoredChannelTabCursor {
+    pub channel_id: String,
+    pub tab_name: String,
+    pub continuation_token: Option<String>,
+    pub visitor_data: Option<String>,
+    pub delegated_session_id: Option<String>,
+    pub last_seen_published_at: Option<String>,
+    pub backfill_complete: bool,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +236,127 @@ ORDER BY added_at ASC
         Ok(())
     }
 
+    pub async fn load_channel_tab_cursors(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<StoredChannelTabCursor>> {
+        let rows = sqlx::query(
+            r#"
+SELECT
+    channel_id,
+    tab_name,
+    continuation_token,
+    visitor_data,
+    delegated_session_id,
+    last_seen_published_at,
+    backfill_complete,
+    updated_at
+FROM channel_tab_cursors
+WHERE channel_id = ?1
+ORDER BY tab_name ASC
+"#,
+        )
+        .bind(channel_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| StoredChannelTabCursor {
+                channel_id: row.get("channel_id"),
+                tab_name: row.get("tab_name"),
+                continuation_token: row.get("continuation_token"),
+                visitor_data: row.get("visitor_data"),
+                delegated_session_id: row.get("delegated_session_id"),
+                last_seen_published_at: row.get("last_seen_published_at"),
+                backfill_complete: row.get::<i64, _>("backfill_complete") != 0,
+                updated_at: row.get("updated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn save_channel_tab_cursor(
+        &self,
+        channel_id: &str,
+        tab_name: &str,
+        continuation_token: Option<&str>,
+        visitor_data: Option<&str>,
+        delegated_session_id: Option<&str>,
+        last_seen_published_at: Option<&str>,
+        backfill_complete: bool,
+    ) -> Result<()> {
+        let updated_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT INTO channel_tab_cursors (
+    channel_id, tab_name, continuation_token, visitor_data, delegated_session_id,
+    last_seen_published_at, backfill_complete, updated_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(channel_id, tab_name) DO UPDATE SET
+    continuation_token = excluded.continuation_token,
+    visitor_data = excluded.visitor_data,
+    delegated_session_id = excluded.delegated_session_id,
+    last_seen_published_at = excluded.last_seen_published_at,
+    backfill_complete = excluded.backfill_complete,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(channel_id)
+        .bind(tab_name)
+        .bind(continuation_token)
+        .bind(visitor_data)
+        .bind(delegated_session_id)
+        .bind(last_seen_published_at)
+        .bind(i64::from(backfill_complete))
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn record_channel_video_membership(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+        discovered_from_tab: &str,
+    ) -> Result<()> {
+        let discovered_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT OR IGNORE INTO channel_video_membership (
+    channel_id, video_id, discovered_from_tab, discovered_at
+)
+VALUES (?1, ?2, ?3, ?4)
+"#,
+        )
+        .bind(channel_id)
+        .bind(video_id)
+        .bind(discovered_from_tab)
+        .bind(discovered_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn aggregate_channel_video_view_count(&self, channel_id: &str) -> Result<Option<u64>> {
+        let total = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT SUM(view_count) FROM videos WHERE channel_id = ?1",
+        )
+        .bind(channel_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(total.map(|value| value.max(0) as u64))
+    }
+
     pub async fn is_video_archived(&self, platform: &str, external_id: &str) -> Result<bool> {
         let archive_key = format!("{platform}:{external_id}");
         let exists = sqlx::query_scalar::<_, i64>(
@@ -320,8 +456,11 @@ SELECT
     description,
     upload_date,
     duration_seconds,
+    primary_category,
+    tags_json,
     view_count,
     like_count,
+    dislike_count,
     comment_count,
     availability,
     latest_snapshot_id,
@@ -337,23 +476,30 @@ LIMIT 1
         .fetch_optional(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?
-        .map(|row| StoredVideoLatest {
-            video_id: row.get("video_id"),
-            channel_id: row.get("channel_id"),
-            canonical_url: row.get("canonical_url"),
-            title: row.get("title"),
-            description: row.get("description"),
-            upload_date: row.get("upload_date"),
-            duration_seconds: row.get("duration_seconds"),
-            view_count: row.get("view_count"),
-            like_count: row.get("like_count"),
-            comment_count: row.get("comment_count"),
-            availability: row.get("availability"),
-            latest_snapshot_id: row.get("latest_snapshot_id"),
-            first_seen_at: row.get("first_seen_at"),
-            last_seen_at: row.get("last_seen_at"),
-            updated_at: row.get("updated_at"),
-        });
+        .map(|row| -> Result<StoredVideoLatest> {
+            Ok(StoredVideoLatest {
+                video_id: row.get("video_id"),
+                channel_id: row.get("channel_id"),
+                canonical_url: row.get("canonical_url"),
+                title: row.get("title"),
+                description: row.get("description"),
+                upload_date: row.get("upload_date"),
+                duration_seconds: row.get("duration_seconds"),
+                primary_category: row.get("primary_category"),
+                tags: serde_json::from_str(&row.get::<String, _>("tags_json"))
+                    .map_err(|err| VesselError::Database(err.to_string()))?,
+                view_count: row.get("view_count"),
+                like_count: row.get("like_count"),
+                dislike_count: row.get("dislike_count"),
+                comment_count: row.get("comment_count"),
+                availability: row.get("availability"),
+                latest_snapshot_id: row.get("latest_snapshot_id"),
+                first_seen_at: row.get("first_seen_at"),
+                last_seen_at: row.get("last_seen_at"),
+                updated_at: row.get("updated_at"),
+            })
+        })
+        .transpose()?;
 
         let lookup_id = current
             .as_ref()
@@ -590,8 +736,46 @@ pub async fn init_sqlite_database(target: &str) -> Result<(SqliteStore, Database
 }
 
 async fn apply_migrations(pool: &Pool<Sqlite>) -> Result<()> {
-    for (_, sql) in MIGRATIONS {
-        pool.execute(*sql)
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+)
+"#,
+    )
+    .await
+    .map_err(|err| VesselError::Database(err.to_string()))?;
+
+    for (name, sql) in MIGRATIONS {
+        let already_applied = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schema_migrations WHERE name = ?1",
+        )
+        .bind(*name)
+        .fetch_one(pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        if already_applied > 0 {
+            continue;
+        }
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        tx.execute(*sql)
+            .await
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        let applied_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query("INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)")
+            .bind(*name)
+            .bind(applied_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        tx.commit()
             .await
             .map_err(|err| VesselError::Database(err.to_string()))?;
     }
@@ -682,9 +866,10 @@ ON CONFLICT(channel_id) DO UPDATE SET
             r#"
 INSERT INTO videos (
     id, platform, video_id, channel_id, canonical_url, title, description, upload_date, duration_seconds,
-    view_count, like_count, comment_count, availability, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+    primary_category, tags_json, view_count, like_count, dislike_count, comment_count,
+    availability, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
 ON CONFLICT(video_id) DO UPDATE SET
     channel_id = excluded.channel_id,
     canonical_url = excluded.canonical_url,
@@ -692,8 +877,11 @@ ON CONFLICT(video_id) DO UPDATE SET
     description = excluded.description,
     upload_date = excluded.upload_date,
     duration_seconds = excluded.duration_seconds,
+    primary_category = excluded.primary_category,
+    tags_json = excluded.tags_json,
     view_count = excluded.view_count,
     like_count = excluded.like_count,
+    dislike_count = excluded.dislike_count,
     comment_count = excluded.comment_count,
     availability = excluded.availability,
     latest_snapshot_id = excluded.latest_snapshot_id,
@@ -710,8 +898,14 @@ ON CONFLICT(video_id) DO UPDATE SET
         .bind(video.description.clone())
         .bind(video.upload_date.clone())
         .bind(video.duration_seconds.map(|v| v as i64))
+        .bind(video.primary_category.clone())
+        .bind(
+            serde_json::to_string(&video.tags)
+                .map_err(|err| VesselError::Database(err.to_string()))?,
+        )
         .bind(video.view_count.map(|v| v as i64))
         .bind(video.like_count.map(|v| v as i64))
+        .bind(video.dislike_count.map(|v| v as i64))
         .bind(video.comment_count.map(|v| v as i64))
         .bind(format!("{:?}", video.availability))
         .bind(content_hash.to_owned())
@@ -743,9 +937,10 @@ impl SnapshotStore for SqliteStore {
         let result = sqlx::query(
             r#"
 INSERT OR IGNORE INTO channel_snapshots (
-    id, channel_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json
+    id, channel_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json,
+    title, description, subscriber_count, video_count, view_count, avatar_url, banner_url
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 "#,
         )
         .bind(Uuid::now_v7().to_string())
@@ -755,6 +950,13 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         .bind(normalized_json)
         .bind(raw_json)
         .bind("{}")
+        .bind(channel.title.clone())
+        .bind(channel.description.clone())
+        .bind(channel.subscriber_count.map(|v| v as i64))
+        .bind(channel.video_count.map(|v| v as i64))
+        .bind(channel.view_count.map(|v| v as i64))
+        .bind(channel.avatar_url.clone())
+        .bind(channel.banner_url.clone())
         .execute(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
@@ -787,9 +989,10 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         let result = sqlx::query(
             r#"
 INSERT OR IGNORE INTO video_snapshots (
-    id, video_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json
+    id, video_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json,
+    title, primary_category, tags_json, view_count, like_count, dislike_count, comment_count
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 "#,
         )
         .bind(Uuid::now_v7().to_string())
@@ -799,6 +1002,16 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         .bind(normalized_json)
         .bind(raw_json)
         .bind(changed_fields_json)
+        .bind(video.title.clone())
+        .bind(video.primary_category.clone())
+        .bind(
+            serde_json::to_string(&video.tags)
+                .map_err(|err| VesselError::Database(err.to_string()))?,
+        )
+        .bind(video.view_count.map(|v| v as i64))
+        .bind(video.like_count.map(|v| v as i64))
+        .bind(video.dislike_count.map(|v| v as i64))
+        .bind(video.comment_count.map(|v| v as i64))
         .execute(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
@@ -1212,8 +1425,12 @@ fn video_snapshot_projection(video: &VideoMetadata) -> serde_json::Value {
         "duration_seconds": video.duration_seconds,
         "upload_date": &video.upload_date,
         "release_timestamp": video.release_timestamp.map(|ts| ts.unix_timestamp_nanos()),
+        "tags": &video.tags,
+        "categories": &video.categories,
+        "primary_category": &video.primary_category,
         "view_count": video.view_count,
         "like_count": video.like_count,
+        "dislike_count": video.dislike_count,
         "comment_count": video.comment_count,
         "availability": &video.availability,
         "formats": &video.formats,
@@ -1233,8 +1450,12 @@ fn video_snapshot_projection_from_value(value: &serde_json::Value) -> serde_json
         "duration_seconds": value.get("duration_seconds"),
         "upload_date": value.get("upload_date"),
         "release_timestamp": value.get("release_timestamp"),
+        "tags": value.get("tags"),
+        "categories": value.get("categories"),
+        "primary_category": value.get("primary_category"),
         "view_count": value.get("view_count"),
         "like_count": value.get("like_count"),
+        "dislike_count": value.get("dislike_count"),
         "comment_count": value.get("comment_count"),
         "availability": value.get("availability"),
         "formats": value.get("formats"),
@@ -1359,8 +1580,12 @@ mod tests {
             duration_seconds: Some(42),
             upload_date: Some("2024-01-01".to_owned()),
             release_timestamp: None,
+            tags: vec!["tag-a".to_owned()],
+            categories: vec!["Education".to_owned()],
+            primary_category: Some("Education".to_owned()),
             view_count: Some(100),
             like_count: None,
+            dislike_count: None,
             comment_count: None,
             availability: Availability::Public,
             formats: Vec::new(),

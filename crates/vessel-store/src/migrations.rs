@@ -1,4 +1,5 @@
-pub const MIGRATIONS: &[(&str, &str)] = &[(
+pub const MIGRATIONS: &[(&str, &str)] = &[
+(
     "0001_initial_schema",
     r#"
 CREATE TABLE IF NOT EXISTS channels (
@@ -169,4 +170,93 @@ CREATE TABLE IF NOT EXISTS download_archive (
     artifact_id TEXT
 );
 "#,
-)];
+),
+(
+    "0002_native_parity_schema",
+    r#"
+ALTER TABLE videos ADD COLUMN primary_category TEXT;
+ALTER TABLE videos ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE videos ADD COLUMN dislike_count INTEGER;
+
+ALTER TABLE video_snapshots ADD COLUMN title TEXT;
+ALTER TABLE video_snapshots ADD COLUMN primary_category TEXT;
+ALTER TABLE video_snapshots ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE video_snapshots ADD COLUMN view_count INTEGER;
+ALTER TABLE video_snapshots ADD COLUMN like_count INTEGER;
+ALTER TABLE video_snapshots ADD COLUMN dislike_count INTEGER;
+ALTER TABLE video_snapshots ADD COLUMN comment_count INTEGER;
+
+ALTER TABLE channel_snapshots ADD COLUMN title TEXT;
+ALTER TABLE channel_snapshots ADD COLUMN description TEXT;
+ALTER TABLE channel_snapshots ADD COLUMN subscriber_count INTEGER;
+ALTER TABLE channel_snapshots ADD COLUMN video_count INTEGER;
+ALTER TABLE channel_snapshots ADD COLUMN view_count INTEGER;
+ALTER TABLE channel_snapshots ADD COLUMN avatar_url TEXT;
+ALTER TABLE channel_snapshots ADD COLUMN banner_url TEXT;
+
+CREATE TABLE IF NOT EXISTS channel_tab_cursors (
+    channel_id TEXT NOT NULL,
+    tab_name TEXT NOT NULL,
+    continuation_token TEXT,
+    visitor_data TEXT,
+    delegated_session_id TEXT,
+    last_seen_published_at TEXT,
+    backfill_complete INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (channel_id, tab_name)
+);
+
+CREATE TABLE IF NOT EXISTS channel_video_membership (
+    channel_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    discovered_from_tab TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    PRIMARY KEY (channel_id, video_id, discovered_from_tab)
+);
+
+UPDATE videos
+SET
+    primary_category = (
+        SELECT json_extract(video_snapshots.normalized_json, '$.primary_category')
+        FROM video_snapshots
+        WHERE video_snapshots.video_id = videos.video_id
+        ORDER BY video_snapshots.fetched_at DESC
+        LIMIT 1
+    ),
+    tags_json = COALESCE((
+        SELECT json_extract(video_snapshots.normalized_json, '$.tags')
+        FROM video_snapshots
+        WHERE video_snapshots.video_id = videos.video_id
+        ORDER BY video_snapshots.fetched_at DESC
+        LIMIT 1
+    ), '[]'),
+    dislike_count = (
+        SELECT json_extract(video_snapshots.normalized_json, '$.dislike_count')
+        FROM video_snapshots
+        WHERE video_snapshots.video_id = videos.video_id
+        ORDER BY video_snapshots.fetched_at DESC
+        LIMIT 1
+    );
+
+UPDATE video_snapshots
+SET
+    title = json_extract(normalized_json, '$.title'),
+    primary_category = json_extract(normalized_json, '$.primary_category'),
+    tags_json = COALESCE(json_extract(normalized_json, '$.tags'), '[]'),
+    view_count = json_extract(normalized_json, '$.view_count'),
+    like_count = json_extract(normalized_json, '$.like_count'),
+    dislike_count = json_extract(normalized_json, '$.dislike_count'),
+    comment_count = json_extract(normalized_json, '$.comment_count');
+
+UPDATE channel_snapshots
+SET
+    title = json_extract(normalized_json, '$.title'),
+    description = json_extract(normalized_json, '$.description'),
+    subscriber_count = json_extract(normalized_json, '$.subscriber_count'),
+    video_count = json_extract(normalized_json, '$.video_count'),
+    view_count = json_extract(normalized_json, '$.view_count'),
+    avatar_url = json_extract(normalized_json, '$.avatar_url'),
+    banner_url = json_extract(normalized_json, '$.banner_url');
+"#,
+),
+];

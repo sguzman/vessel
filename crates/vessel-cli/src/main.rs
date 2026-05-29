@@ -8,8 +8,8 @@ use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{Config, Result, RuntimeLayout, VesselError, load_config, resolve_runtime_layout};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelVideoRef, YoutubeExtractor, extract_channel, extract_comments, extract_video,
-    list_channel_videos,
+    ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, crawl_channel_videos, extract_channel,
+    extract_comments, extract_video,
 };
 use vessel_extractors::{
     ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog,
@@ -440,8 +440,14 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "channels_processed": 0usize,
             "channel_snapshots_inserted": 0usize,
             "videos_discovered": 0usize,
+            "unique_videos_discovered": 0usize,
             "video_snapshots_inserted": 0usize,
+            "videos_refreshed": 0usize,
             "video_refreshes_skipped_by_since": 0usize,
+            "tabs_visited": Vec::<String>::new(),
+            "tabs_completed": Vec::<String>::new(),
+            "tabs_resumed_from_checkpoint": Vec::<String>::new(),
+            "videos_discovered_per_tab": serde_json::Map::<String, serde_json::Value>::new(),
             "errors": 0usize,
             "options": {
                 "comments": args.comments,
@@ -468,13 +474,43 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     );
                     increment_summary(
                         &mut summary,
+                        "unique_videos_discovered",
+                        channel_report.unique_videos_discovered,
+                    );
+                    increment_summary(
+                        &mut summary,
                         "video_snapshots_inserted",
                         channel_report.video_snapshots_inserted,
                     );
                     increment_summary(
                         &mut summary,
+                        "videos_refreshed",
+                        channel_report.videos_refreshed,
+                    );
+                    increment_summary(
+                        &mut summary,
                         "video_refreshes_skipped_by_since",
                         channel_report.skipped_by_since,
+                    );
+                    extend_summary_array(
+                        &mut summary,
+                        "tabs_visited",
+                        &channel_report.tabs_visited,
+                    );
+                    extend_summary_array(
+                        &mut summary,
+                        "tabs_completed",
+                        &channel_report.tabs_completed,
+                    );
+                    extend_summary_array(
+                        &mut summary,
+                        "tabs_resumed_from_checkpoint",
+                        &channel_report.tabs_resumed_from_checkpoint,
+                    );
+                    merge_summary_tab_counts(
+                        &mut summary,
+                        "videos_discovered_per_tab",
+                        &channel_report.videos_discovered_per_tab,
                     );
                 }
                 Err(err) => {
@@ -875,8 +911,14 @@ fn build_registry(plugins: &PluginCatalog) -> ExtractorRegistry {
 struct ChannelSyncReport {
     channel_snapshot_inserted: bool,
     videos_discovered: usize,
+    unique_videos_discovered: usize,
     video_snapshots_inserted: usize,
+    videos_refreshed: usize,
     skipped_by_since: usize,
+    tabs_visited: Vec<String>,
+    tabs_completed: Vec<String>,
+    tabs_resumed_from_checkpoint: Vec<String>,
+    videos_discovered_per_tab: std::collections::BTreeMap<String, usize>,
 }
 
 async fn sync_one_channel(
@@ -888,22 +930,29 @@ async fn sync_one_channel(
     layout: &RuntimeLayout,
 ) -> Result<ChannelSyncReport> {
     let input = parse_channel_input(&tracked.canonical_url);
-    let channel = extract_channel(&input).await?;
-    let channel_snapshot_inserted = store.upsert_channel_snapshot(&channel).await?;
-    store
-        .record_attempt(FetchAttempt {
-            run_id,
-            target_kind: "channel".to_owned(),
-            target_external_id: channel.channel_id.clone(),
-            status: AttemptStatus::Success,
-            started_at,
-            finished_at: OffsetDateTime::now_utc(),
-            error_message: None,
-        })
-        .await?;
+    let mut channel = extract_channel(&input).await?;
 
-    let mut videos = list_channel_videos(&input).await?;
-    let discovered_count = videos.len();
+    let existing_cursors = store
+        .load_channel_tab_cursors(&channel.channel_id)
+        .await?
+        .into_iter()
+        .map(|cursor| ChannelTabCursor {
+            tab_name: cursor.tab_name,
+            continuation_token: cursor.continuation_token,
+            visitor_data: cursor.visitor_data,
+            delegated_session_id: cursor.delegated_session_id,
+            last_seen_published_at: cursor.last_seen_published_at,
+            backfill_complete: cursor.backfill_complete,
+        })
+        .collect::<Vec<_>>();
+    let crawl = crawl_channel_videos(&input, &existing_cursors).await?;
+    let discovered_count = crawl.videos.len();
+    for video_ref in &crawl.videos {
+        store
+            .record_channel_video_membership(&channel.channel_id, &video_ref.video_id, &video_ref.tab_name)
+            .await?;
+    }
+    let mut videos = crawl.videos;
     if let Some(since) = &args.since {
         videos.retain(|video| {
             video
@@ -919,8 +968,12 @@ async fn sync_one_channel(
     }
 
     let mut report = ChannelSyncReport {
-        channel_snapshot_inserted,
         videos_discovered: discovered_count,
+        unique_videos_discovered: discovered_count,
+        tabs_visited: crawl.tabs_visited.clone(),
+        tabs_completed: crawl.tabs_completed.clone(),
+        tabs_resumed_from_checkpoint: crawl.tabs_resumed_from_checkpoint.clone(),
+        videos_discovered_per_tab: crawl.videos_per_tab.clone(),
         ..ChannelSyncReport::default()
     };
 
@@ -928,9 +981,42 @@ async fn sync_one_channel(
         if sync_channel_video(store, video_ref, args, layout).await? {
             report.video_snapshots_inserted += 1;
         }
+        report.videos_refreshed += 1;
     }
 
+    if channel.video_count.is_none() {
+        channel.video_count = Some(discovered_count as u64);
+    }
+    if channel.view_count.is_none() {
+        channel.view_count = store.aggregate_channel_video_view_count(&channel.channel_id).await?;
+    }
+    report.channel_snapshot_inserted = store.upsert_channel_snapshot(&channel).await?;
+    store
+        .record_attempt(FetchAttempt {
+            run_id,
+            target_kind: "channel".to_owned(),
+            target_external_id: channel.channel_id.clone(),
+            status: AttemptStatus::Success,
+            started_at,
+            finished_at: OffsetDateTime::now_utc(),
+            error_message: None,
+        })
+        .await?;
+
     report.skipped_by_since = skipped_by_since;
+    for cursor in crawl.cursors {
+        store
+            .save_channel_tab_cursor(
+                &channel.channel_id,
+                &cursor.tab_name,
+                cursor.continuation_token.as_deref(),
+                cursor.visitor_data.as_deref(),
+                cursor.delegated_session_id.as_deref(),
+                cursor.last_seen_published_at.as_deref(),
+                cursor.backfill_complete,
+            )
+            .await?;
+    }
     store
         .mark_tracked_channel_synced(&channel.channel_id)
         .await?;
@@ -1225,6 +1311,31 @@ fn increment_summary(summary: &mut serde_json::Value, key: &str, delta: usize) {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     summary[key] = serde_json::Value::from(current + delta as u64);
+}
+
+fn extend_summary_array(summary: &mut serde_json::Value, key: &str, values: &[String]) {
+    let array = summary[key]
+        .as_array_mut()
+        .expect("summary key should be an array");
+    for value in values {
+        if !array.iter().any(|item| item.as_str() == Some(value.as_str())) {
+            array.push(serde_json::Value::String(value.clone()));
+        }
+    }
+}
+
+fn merge_summary_tab_counts(
+    summary: &mut serde_json::Value,
+    key: &str,
+    values: &std::collections::BTreeMap<String, usize>,
+) {
+    let object = summary[key]
+        .as_object_mut()
+        .expect("summary key should be an object");
+    for (tab, count) in values {
+        let current = object.get(tab).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        object.insert(tab.clone(), serde_json::Value::from(current + *count as u64));
+    }
 }
 
 async fn hash_file(path: &std::path::Path) -> Result<String> {
