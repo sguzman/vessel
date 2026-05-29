@@ -41,7 +41,6 @@ pub struct StoredVideoLatest {
     pub tags: Vec<String>,
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
-    pub dislike_count: Option<i64>,
     pub comment_count: Option<i64>,
     pub availability: String,
     pub latest_snapshot_id: Option<String>,
@@ -85,21 +84,26 @@ pub struct ArtifactRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StoredVideoSnapshot {
-    pub snapshot_id: String,
+pub struct VideoMetricSample {
     pub video_id: String,
     pub fetched_at: String,
-    pub content_hash: String,
-    pub changed_fields: Vec<String>,
-    pub normalized_json: serde_json::Value,
-    pub raw_json: serde_json::Value,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct VideoHistory {
-    pub current: Option<StoredVideoLatest>,
-    pub snapshots: Vec<StoredVideoSnapshot>,
-    pub fetch_attempt_count: i64,
+pub struct VideoRevision {
+    pub revision_id: String,
+    pub video_id: String,
+    pub recorded_at: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub primary_category: Option<String>,
+    pub tags: Vec<String>,
+    pub availability: String,
+    pub content_hash: String,
+    pub changed_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,20 +118,21 @@ pub struct StoredSubtitleTrack {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StoredSubtitleSnapshot {
-    pub snapshot_id: String,
+pub struct SubtitleRevision {
+    pub revision_id: String,
+    pub video_id: String,
     pub language: String,
     pub is_auto_generated: bool,
-    pub fetched_at: String,
+    pub recorded_at: String,
+    pub url: Option<String>,
     pub content_hash: String,
     pub changed_fields: Vec<String>,
-    pub normalized_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SubtitleHistory {
     pub tracks: Vec<StoredSubtitleTrack>,
-    pub snapshots: Vec<StoredSubtitleSnapshot>,
+    pub revisions: Vec<SubtitleRevision>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,19 +150,62 @@ pub struct StoredComment {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StoredCommentSnapshot {
-    pub snapshot_id: String,
+pub struct CommentRevision {
+    pub revision_id: String,
     pub comment_id: String,
-    pub fetched_at: String,
+    pub video_id: String,
+    pub recorded_at: String,
+    pub author_channel_id: Option<String>,
+    pub author_name: Option<String>,
+    pub text: String,
+    pub like_count: Option<i64>,
+    pub reply_count: Option<i64>,
+    pub published_at: Option<String>,
     pub content_hash: String,
     pub changed_fields: Vec<String>,
-    pub normalized_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CommentHistory {
     pub comments: Vec<StoredComment>,
-    pub snapshots: Vec<StoredCommentSnapshot>,
+    pub revisions: Vec<CommentRevision>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelMetricSample {
+    pub channel_id: String,
+    pub fetched_at: String,
+    pub subscriber_count: Option<i64>,
+    pub video_count: Option<i64>,
+    pub view_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelRevision {
+    pub revision_id: String,
+    pub channel_id: String,
+    pub recorded_at: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub avatar_url: Option<String>,
+    pub banner_url: Option<String>,
+    pub handle: Option<String>,
+    pub content_hash: String,
+    pub changed_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoHistory {
+    pub current: Option<StoredVideoLatest>,
+    pub metrics: Vec<VideoMetricSample>,
+    pub revisions: Vec<VideoRevision>,
+    pub fetch_attempt_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelHistory {
+    pub metrics: Vec<ChannelMetricSample>,
+    pub revisions: Vec<ChannelRevision>,
 }
 
 impl SqliteStore {
@@ -460,7 +508,6 @@ SELECT
     tags_json,
     view_count,
     like_count,
-    dislike_count,
     comment_count,
     availability,
     latest_snapshot_id,
@@ -490,7 +537,6 @@ LIMIT 1
                     .map_err(|err| VesselError::Database(err.to_string()))?,
                 view_count: row.get("view_count"),
                 like_count: row.get("like_count"),
-                dislike_count: row.get("dislike_count"),
                 comment_count: row.get("comment_count"),
                 availability: row.get("availability"),
                 latest_snapshot_id: row.get("latest_snapshot_id"),
@@ -506,17 +552,15 @@ LIMIT 1
             .map(|video| video.video_id.clone())
             .unwrap_or_else(|| video_ref.to_owned());
 
-        let snapshot_rows = sqlx::query(
+        let metric_rows = sqlx::query(
             r#"
 SELECT
-    id,
     video_id,
     fetched_at,
-    content_hash,
-    changed_fields_json,
-    normalized_json,
-    raw_json
-FROM video_snapshots
+    view_count,
+    like_count,
+    comment_count
+FROM video_metric_samples
 WHERE video_id = ?1
 ORDER BY fetched_at DESC
 "#,
@@ -526,26 +570,58 @@ ORDER BY fetched_at DESC
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
 
-        let snapshots = snapshot_rows
+        let metrics = metric_rows
             .into_iter()
-            .map(|row| {
-                Ok(StoredVideoSnapshot {
-                    snapshot_id: row.get("id"),
+            .map(|row| VideoMetricSample {
                     video_id: row.get("video_id"),
                     fetched_at: row.get("fetched_at"),
+                    view_count: row.get("view_count"),
+                    like_count: row.get("like_count"),
+                    comment_count: row.get("comment_count"),
+                })
+            .collect::<Vec<_>>();
+
+        let revision_rows = sqlx::query(
+            r#"
+SELECT
+    id,
+    video_id,
+    recorded_at,
+    title,
+    description,
+    primary_category,
+    tags_json,
+    availability,
+    content_hash,
+    changed_fields_json
+FROM video_revisions
+WHERE video_id = ?1
+ORDER BY recorded_at DESC
+"#,
+        )
+        .bind(&lookup_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        let revisions = revision_rows
+            .into_iter()
+            .map(|row| -> Result<VideoRevision> {
+                Ok(VideoRevision {
+                    revision_id: row.get("id"),
+                    video_id: row.get("video_id"),
+                    recorded_at: row.get("recorded_at"),
+                    title: row.get("title"),
+                    description: row.get("description"),
+                    primary_category: row.get("primary_category"),
+                    tags: serde_json::from_str(&row.get::<String, _>("tags_json"))
+                        .map_err(|err| VesselError::Database(err.to_string()))?,
+                    availability: row.get("availability"),
                     content_hash: row.get("content_hash"),
                     changed_fields: serde_json::from_str::<Vec<String>>(
                         &row.get::<String, _>("changed_fields_json"),
                     )
-                    .map_err(|err| VesselError::Database(err.to_string()))?,
-                    normalized_json: serde_json::from_str::<serde_json::Value>(
-                        &row.get::<String, _>("normalized_json"),
-                    )
-                    .map_err(|err| VesselError::Database(err.to_string()))?,
-                    raw_json: serde_json::from_str::<serde_json::Value>(
-                        &row.get::<String, _>("raw_json"),
-                    )
-                    .map_err(|err| VesselError::Database(err.to_string()))?,
+                    .map_err(|err| VesselError::Database(err.to_string()))?
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -564,7 +640,8 @@ WHERE target_external_id = ?1
 
         Ok(VideoHistory {
             current,
-            snapshots,
+            metrics,
+            revisions,
             fetch_attempt_count,
         })
     }
@@ -608,12 +685,12 @@ ORDER BY language ASC
         })
         .collect();
 
-        let snapshots = sqlx::query(
+        let revisions = sqlx::query(
             r#"
-SELECT id, language, is_auto_generated, fetched_at, content_hash, changed_fields_json, normalized_json
-FROM subtitle_snapshots
+SELECT id, video_id, language, is_auto_generated, recorded_at, url, content_hash, changed_fields_json
+FROM subtitle_revisions
 WHERE video_id = ?1
-ORDER BY fetched_at DESC
+ORDER BY recorded_at DESC
 "#,
         )
         .bind(video_id)
@@ -621,22 +698,22 @@ ORDER BY fetched_at DESC
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?
         .into_iter()
-        .map(|row| -> Result<StoredSubtitleSnapshot> {
-            Ok(StoredSubtitleSnapshot {
-                snapshot_id: row.get("id"),
+        .map(|row| -> Result<SubtitleRevision> {
+            Ok(SubtitleRevision {
+                revision_id: row.get("id"),
+                video_id: row.get("video_id"),
                 language: row.get("language"),
                 is_auto_generated: row.get::<i64, _>("is_auto_generated") != 0,
-                fetched_at: row.get("fetched_at"),
+                recorded_at: row.get("recorded_at"),
+                url: row.get("url"),
                 content_hash: row.get("content_hash"),
                 changed_fields: serde_json::from_str(&row.get::<String, _>("changed_fields_json"))
-                    .map_err(|err| VesselError::Database(err.to_string()))?,
-                normalized_json: serde_json::from_str(&row.get::<String, _>("normalized_json"))
                     .map_err(|err| VesselError::Database(err.to_string()))?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
-        Ok(SubtitleHistory { tracks, snapshots })
+        Ok(SubtitleHistory { tracks, revisions })
     }
 
     pub async fn sync_comments(&self, comments: &[CommentMetadata]) -> Result<usize> {
@@ -677,12 +754,13 @@ ORDER BY updated_at DESC
         })
         .collect();
 
-        let snapshots = sqlx::query(
+        let revisions = sqlx::query(
             r#"
-SELECT id, comment_id, fetched_at, content_hash, changed_fields_json, normalized_json
-FROM comment_snapshots
+SELECT id, comment_id, video_id, recorded_at, author_channel_id, author_name, text, like_count,
+       reply_count, published_at, content_hash, changed_fields_json
+FROM comment_revisions
 WHERE video_id = ?1
-ORDER BY fetched_at DESC
+ORDER BY recorded_at DESC
 "#,
         )
         .bind(video_id)
@@ -690,15 +768,20 @@ ORDER BY fetched_at DESC
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?
         .into_iter()
-        .map(|row| -> Result<StoredCommentSnapshot> {
-            Ok(StoredCommentSnapshot {
-                snapshot_id: row.get("id"),
+        .map(|row| -> Result<CommentRevision> {
+            Ok(CommentRevision {
+                revision_id: row.get("id"),
                 comment_id: row.get("comment_id"),
-                fetched_at: row.get("fetched_at"),
+                video_id: row.get("video_id"),
+                recorded_at: row.get("recorded_at"),
+                author_channel_id: row.get("author_channel_id"),
+                author_name: row.get("author_name"),
+                text: row.get("text"),
+                like_count: row.get("like_count"),
+                reply_count: row.get("reply_count"),
+                published_at: row.get("published_at"),
                 content_hash: row.get("content_hash"),
                 changed_fields: serde_json::from_str(&row.get::<String, _>("changed_fields_json"))
-                    .map_err(|err| VesselError::Database(err.to_string()))?,
-                normalized_json: serde_json::from_str(&row.get::<String, _>("normalized_json"))
                     .map_err(|err| VesselError::Database(err.to_string()))?,
             })
         })
@@ -706,7 +789,7 @@ ORDER BY fetched_at DESC
 
         Ok(CommentHistory {
             comments,
-            snapshots,
+            revisions,
         })
     }
 }
@@ -866,10 +949,10 @@ ON CONFLICT(channel_id) DO UPDATE SET
             r#"
 INSERT INTO videos (
     id, platform, video_id, channel_id, canonical_url, title, description, upload_date, duration_seconds,
-    primary_category, tags_json, view_count, like_count, dislike_count, comment_count,
-    availability, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+    primary_category, tags_json, view_count, like_count, comment_count, availability,
+    latest_snapshot_id, first_seen_at, last_seen_at, updated_at
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
 ON CONFLICT(video_id) DO UPDATE SET
     channel_id = excluded.channel_id,
     canonical_url = excluded.canonical_url,
@@ -881,7 +964,6 @@ ON CONFLICT(video_id) DO UPDATE SET
     tags_json = excluded.tags_json,
     view_count = excluded.view_count,
     like_count = excluded.like_count,
-    dislike_count = excluded.dislike_count,
     comment_count = excluded.comment_count,
     availability = excluded.availability,
     latest_snapshot_id = excluded.latest_snapshot_id,
@@ -905,7 +987,6 @@ ON CONFLICT(video_id) DO UPDATE SET
         )
         .bind(video.view_count.map(|v| v as i64))
         .bind(video.like_count.map(|v| v as i64))
-        .bind(video.dislike_count.map(|v| v as i64))
         .bind(video.comment_count.map(|v| v as i64))
         .bind(format!("{:?}", video.availability))
         .bind(content_hash.to_owned())
@@ -926,37 +1007,56 @@ impl SnapshotStore for SqliteStore {
         channel: &ChannelMetadata,
         content_hash: &str,
     ) -> Result<bool> {
-        let normalized_json =
-            serde_json::to_string(channel).map_err(|err| VesselError::Database(err.to_string()))?;
         let raw_json = serde_json::to_string(&channel.raw)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        let _ = raw_json;
+        let next_projection = channel_snapshot_projection(channel);
+        let previous_projection = self.latest_channel_revision_projection(&channel.channel_id).await?;
+        let changed_fields = previous_projection
+            .as_ref()
+            .map(|previous| diff_paths(previous, &next_projection))
+            .unwrap_or_default();
+        let changed_fields_json = serde_json::to_string(&changed_fields)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let fetched_at = channel
             .fetched_at
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT OR IGNORE INTO channel_metric_samples (
+    channel_id, fetched_at, subscriber_count, video_count, view_count
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+        )
+        .bind(channel.channel_id.clone())
+        .bind(fetched_at.clone())
+        .bind(channel.subscriber_count.map(|v| v as i64))
+        .bind(channel.video_count.map(|v| v as i64))
+        .bind(channel.view_count.map(|v| v as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO channel_snapshots (
-    id, channel_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json,
-    title, description, subscriber_count, video_count, view_count, avatar_url, banner_url
+INSERT OR IGNORE INTO channel_revisions (
+    id, channel_id, recorded_at, title, description, avatar_url, banner_url, handle,
+    content_hash, changed_fields_json
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
 "#,
         )
         .bind(Uuid::now_v7().to_string())
         .bind(channel.channel_id.clone())
         .bind(fetched_at)
-        .bind(content_hash.to_owned())
-        .bind(normalized_json)
-        .bind(raw_json)
-        .bind("{}")
         .bind(channel.title.clone())
         .bind(channel.description.clone())
-        .bind(channel.subscriber_count.map(|v| v as i64))
-        .bind(channel.video_count.map(|v| v as i64))
-        .bind(channel.view_count.map(|v| v as i64))
         .bind(channel.avatar_url.clone())
         .bind(channel.banner_url.clone())
+        .bind(channel.handle.clone())
+        .bind(content_hash.to_owned())
+        .bind(changed_fields_json)
         .execute(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
@@ -970,48 +1070,59 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
     ) -> Result<bool> {
         let next_projection = video_snapshot_projection(video);
         let previous_projection = self
-            .latest_video_snapshot_projection(&video.video_id)
+            .latest_video_revision_projection(&video.video_id)
             .await?;
         let changed_fields = previous_projection
             .as_ref()
             .map(|previous| diff_paths(previous, &next_projection))
             .unwrap_or_default();
-        let normalized_json =
-            serde_json::to_string(video).map_err(|err| VesselError::Database(err.to_string()))?;
         let raw_json = serde_json::to_string(&video.raw)
             .map_err(|err| VesselError::Database(err.to_string()))?;
+        let _ = raw_json;
         let changed_fields_json = serde_json::to_string(&changed_fields)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let fetched_at = video
             .fetched_at
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT OR IGNORE INTO video_metric_samples (
+    video_id, fetched_at, view_count, like_count, comment_count
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+        )
+        .bind(video.video_id.clone())
+        .bind(fetched_at.clone())
+        .bind(video.view_count.map(|v| v as i64))
+        .bind(video.like_count.map(|v| v as i64))
+        .bind(video.comment_count.map(|v| v as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO video_snapshots (
-    id, video_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json,
-    title, primary_category, tags_json, view_count, like_count, dislike_count, comment_count
+INSERT OR IGNORE INTO video_revisions (
+    id, video_id, recorded_at, title, description, primary_category, tags_json, availability,
+    content_hash, changed_fields_json
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
 "#,
         )
         .bind(Uuid::now_v7().to_string())
         .bind(video.video_id.clone())
         .bind(fetched_at)
-        .bind(content_hash.to_owned())
-        .bind(normalized_json)
-        .bind(raw_json)
-        .bind(changed_fields_json)
         .bind(video.title.clone())
+        .bind(video.description.clone())
         .bind(video.primary_category.clone())
         .bind(
             serde_json::to_string(&video.tags)
                 .map_err(|err| VesselError::Database(err.to_string()))?,
         )
-        .bind(video.view_count.map(|v| v as i64))
-        .bind(video.like_count.map(|v| v as i64))
-        .bind(video.dislike_count.map(|v| v as i64))
-        .bind(video.comment_count.map(|v| v as i64))
+        .bind(format!("{:?}", video.availability))
+        .bind(content_hash.to_owned())
+        .bind(changed_fields_json)
         .execute(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
@@ -1144,9 +1255,6 @@ impl SqliteStore {
             .as_ref()
             .map(|previous| diff_paths(previous, &projection))
             .unwrap_or_default();
-        let normalized_json =
-            serde_json::to_string(track).map_err(|err| VesselError::Database(err.to_string()))?;
-        let raw_json = normalized_json.clone();
         let changed_fields_json = serde_json::to_string(&changed_fields)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let fetched_at = video
@@ -1156,10 +1264,10 @@ impl SqliteStore {
         let snapshot_id = Uuid::now_v7().to_string();
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO subtitle_snapshots (
-    id, video_id, language, is_auto_generated, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json
+INSERT OR IGNORE INTO subtitle_revisions (
+    id, video_id, language, is_auto_generated, recorded_at, url, content_hash, changed_fields_json
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 "#,
         )
         .bind(&snapshot_id)
@@ -1167,9 +1275,8 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         .bind(&track.language)
         .bind(i64::from(track.is_auto_generated))
         .bind(&fetched_at)
+        .bind(&track.url)
         .bind(&content_hash)
-        .bind(&normalized_json)
-        .bind(&raw_json)
         .bind(&changed_fields_json)
         .execute(&self.pool)
         .await
@@ -1178,7 +1285,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             Some(snapshot_id)
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM subtitle_snapshots WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3 AND content_hash = ?4 LIMIT 1",
+                "SELECT id FROM subtitle_revisions WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3 AND content_hash = ?4 LIMIT 1",
             )
             .bind(&video.video_id)
             .bind(&track.language)
@@ -1225,10 +1332,10 @@ ON CONFLICT(video_id, language, is_auto_generated) DO UPDATE SET
     ) -> Result<Option<serde_json::Value>> {
         let row = sqlx::query(
             r#"
-SELECT normalized_json
-FROM subtitle_snapshots
+SELECT url
+FROM subtitle_revisions
 WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3
-ORDER BY fetched_at DESC
+ORDER BY recorded_at DESC
 LIMIT 1
 "#,
         )
@@ -1238,13 +1345,13 @@ LIMIT 1
         .fetch_optional(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
-        row.map(|row| {
-            let json =
-                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("normalized_json"))
-                    .map_err(|err| VesselError::Database(err.to_string()))?;
-            Ok(subtitle_track_projection_from_value(&json))
-        })
-        .transpose()
+        Ok(row.map(|row| {
+            serde_json::json!({
+                "language": language,
+                "url": row.get::<Option<String>, _>("url"),
+                "is_auto_generated": is_auto_generated,
+            })
+        }))
     }
 
     async fn upsert_comment(&self, comment: &CommentMetadata) -> Result<bool> {
@@ -1256,10 +1363,6 @@ LIMIT 1
             .as_ref()
             .map(|previous| diff_paths(previous, &projection))
             .unwrap_or_default();
-        let normalized_json =
-            serde_json::to_string(comment).map_err(|err| VesselError::Database(err.to_string()))?;
-        let raw_json = serde_json::to_string(&comment.raw)
-            .map_err(|err| VesselError::Database(err.to_string()))?;
         let changed_fields_json = serde_json::to_string(&changed_fields)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let fetched_at = comment
@@ -1269,19 +1372,24 @@ LIMIT 1
         let snapshot_id = Uuid::now_v7().to_string();
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO comment_snapshots (
-    id, comment_id, video_id, fetched_at, content_hash, normalized_json, raw_json, changed_fields_json
+INSERT OR IGNORE INTO comment_revisions (
+    id, comment_id, video_id, recorded_at, author_channel_id, author_name, text, like_count,
+    reply_count, published_at, content_hash, changed_fields_json
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 "#,
         )
         .bind(&snapshot_id)
         .bind(&comment.comment_id)
         .bind(&comment.video_id)
         .bind(&fetched_at)
+        .bind(&comment.author_channel_id)
+        .bind(&comment.author_name)
+        .bind(&comment.text)
+        .bind(comment.like_count.map(|v| v as i64))
+        .bind(comment.reply_count.map(|v| v as i64))
+        .bind(&comment.published_at)
         .bind(&content_hash)
-        .bind(&normalized_json)
-        .bind(&raw_json)
         .bind(&changed_fields_json)
         .execute(&self.pool)
         .await
@@ -1290,7 +1398,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             Some(snapshot_id)
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM comment_snapshots WHERE comment_id = ?1 AND content_hash = ?2 LIMIT 1",
+                "SELECT id FROM comment_revisions WHERE comment_id = ?1 AND content_hash = ?2 LIMIT 1",
             )
             .bind(&comment.comment_id)
             .bind(&content_hash)
@@ -1339,10 +1447,10 @@ ON CONFLICT(comment_id) DO UPDATE SET
     ) -> Result<Option<serde_json::Value>> {
         let row = sqlx::query(
             r#"
-SELECT normalized_json
-FROM comment_snapshots
+SELECT author_channel_id, author_name, text, like_count, reply_count, published_at
+FROM comment_revisions
 WHERE comment_id = ?1
-ORDER BY fetched_at DESC
+ORDER BY recorded_at DESC
 LIMIT 1
 "#,
         )
@@ -1350,26 +1458,28 @@ LIMIT 1
         .fetch_optional(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
-
-        row.map(|row| {
-            let json =
-                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("normalized_json"))
-                    .map_err(|err| VesselError::Database(err.to_string()))?;
-            Ok(comment_projection_from_value(&json))
-        })
-        .transpose()
+        Ok(row.map(|row| {
+            serde_json::json!({
+                "author_channel_id": row.get::<Option<String>, _>("author_channel_id"),
+                "author_name": row.get::<Option<String>, _>("author_name"),
+                "text": row.get::<String, _>("text"),
+                "like_count": row.get::<Option<i64>, _>("like_count"),
+                "reply_count": row.get::<Option<i64>, _>("reply_count"),
+                "published_at": row.get::<Option<String>, _>("published_at"),
+            })
+        }))
     }
 
-    async fn latest_video_snapshot_projection(
+    async fn latest_video_revision_projection(
         &self,
         video_id: &str,
     ) -> Result<Option<serde_json::Value>> {
         let row = sqlx::query(
             r#"
-SELECT normalized_json
-FROM video_snapshots
+SELECT title, description, primary_category, tags_json, availability
+FROM video_revisions
 WHERE video_id = ?1
-ORDER BY fetched_at DESC
+ORDER BY recorded_at DESC
 LIMIT 1
 "#,
         )
@@ -1377,14 +1487,44 @@ LIMIT 1
         .fetch_optional(&self.pool)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(row.map(|row| {
+            serde_json::json!({
+                "title": row.get::<Option<String>, _>("title"),
+                "description": row.get::<Option<String>, _>("description"),
+                "primary_category": row.get::<Option<String>, _>("primary_category"),
+                "tags": serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("tags_json")).unwrap_or_else(|_| serde_json::json!([])),
+                "availability": row.get::<String, _>("availability"),
+            })
+        }))
+    }
 
-        row.map(|row| {
-            let json =
-                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("normalized_json"))
-                    .map_err(|err| VesselError::Database(err.to_string()))?;
-            Ok(video_snapshot_projection_from_value(&json))
-        })
-        .transpose()
+    async fn latest_channel_revision_projection(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let row = sqlx::query(
+            r#"
+SELECT title, description, avatar_url, banner_url, handle
+FROM channel_revisions
+WHERE channel_id = ?1
+ORDER BY recorded_at DESC
+LIMIT 1
+"#,
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(row.map(|row| {
+            serde_json::json!({
+                "title": row.get::<Option<String>, _>("title"),
+                "description": row.get::<Option<String>, _>("description"),
+                "avatar_url": row.get::<Option<String>, _>("avatar_url"),
+                "banner_url": row.get::<Option<String>, _>("banner_url"),
+                "handle": row.get::<Option<String>, _>("handle"),
+            })
+        }))
     }
 }
 
@@ -1395,15 +1535,9 @@ fn channel_snapshot_hash(channel: &ChannelMetadata) -> Result<String> {
 
 fn channel_snapshot_projection(channel: &ChannelMetadata) -> serde_json::Value {
     serde_json::json!({
-        "platform": &channel.platform,
-        "channel_id": &channel.channel_id,
         "handle": &channel.handle,
-        "url": &channel.url,
         "title": &channel.title,
         "description": &channel.description,
-        "subscriber_count": channel.subscriber_count,
-        "video_count": channel.video_count,
-        "view_count": channel.view_count,
         "avatar_url": &channel.avatar_url,
         "banner_url": &channel.banner_url,
     })
@@ -1416,51 +1550,11 @@ fn video_snapshot_hash(video: &VideoMetadata) -> Result<String> {
 
 fn video_snapshot_projection(video: &VideoMetadata) -> serde_json::Value {
     serde_json::json!({
-        "platform": &video.platform,
-        "video_id": &video.video_id,
-        "channel_id": &video.channel_id,
-        "url": &video.url,
         "title": &video.title,
         "description": &video.description,
-        "duration_seconds": video.duration_seconds,
-        "upload_date": &video.upload_date,
-        "release_timestamp": video.release_timestamp.map(|ts| ts.unix_timestamp_nanos()),
         "tags": &video.tags,
-        "categories": &video.categories,
         "primary_category": &video.primary_category,
-        "view_count": video.view_count,
-        "like_count": video.like_count,
-        "dislike_count": video.dislike_count,
-        "comment_count": video.comment_count,
         "availability": &video.availability,
-        "formats": &video.formats,
-        "subtitles": &video.subtitles,
-        "thumbnails": &video.thumbnails,
-    })
-}
-
-fn video_snapshot_projection_from_value(value: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "platform": value.get("platform"),
-        "video_id": value.get("video_id"),
-        "channel_id": value.get("channel_id"),
-        "url": value.get("url"),
-        "title": value.get("title"),
-        "description": value.get("description"),
-        "duration_seconds": value.get("duration_seconds"),
-        "upload_date": value.get("upload_date"),
-        "release_timestamp": value.get("release_timestamp"),
-        "tags": value.get("tags"),
-        "categories": value.get("categories"),
-        "primary_category": value.get("primary_category"),
-        "view_count": value.get("view_count"),
-        "like_count": value.get("like_count"),
-        "dislike_count": value.get("dislike_count"),
-        "comment_count": value.get("comment_count"),
-        "availability": value.get("availability"),
-        "formats": value.get("formats"),
-        "subtitles": value.get("subtitles"),
-        "thumbnails": value.get("thumbnails"),
     })
 }
 
@@ -1472,39 +1566,14 @@ fn subtitle_track_projection(track: &SubtitleTrack) -> serde_json::Value {
     })
 }
 
-fn subtitle_track_projection_from_value(value: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "language": value.get("language"),
-        "url": value.get("url"),
-        "is_auto_generated": value.get("is_auto_generated"),
-    })
-}
-
 fn comment_projection(comment: &CommentMetadata) -> serde_json::Value {
     serde_json::json!({
-        "platform": &comment.platform,
-        "comment_id": &comment.comment_id,
-        "video_id": &comment.video_id,
         "author_channel_id": &comment.author_channel_id,
         "author_name": &comment.author_name,
         "text": &comment.text,
         "like_count": comment.like_count,
         "reply_count": comment.reply_count,
         "published_at": &comment.published_at,
-    })
-}
-
-fn comment_projection_from_value(value: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "platform": value.get("platform"),
-        "comment_id": value.get("comment_id"),
-        "video_id": value.get("video_id"),
-        "author_channel_id": value.get("author_channel_id"),
-        "author_name": value.get("author_name"),
-        "text": value.get("text"),
-        "like_count": value.get("like_count"),
-        "reply_count": value.get("reply_count"),
-        "published_at": value.get("published_at"),
     })
 }
 
@@ -1585,7 +1654,6 @@ mod tests {
             primary_category: Some("Education".to_owned()),
             view_count: Some(100),
             like_count: None,
-            dislike_count: None,
             comment_count: None,
             availability: Availability::Public,
             formats: Vec::new(),
@@ -1642,7 +1710,8 @@ mod tests {
 
         assert!(first);
         assert!(!second);
-        assert_eq!(history.snapshots.len(), 1);
+        assert_eq!(history.revisions.len(), 1);
+        assert_eq!(history.metrics.len(), 2);
         assert!(history.current.is_some());
 
         let _ = fs::remove_file(&path);
@@ -1681,10 +1750,11 @@ mod tests {
         assert!(first);
         assert!(second);
         assert!(!third);
-        assert_eq!(history.snapshots.len(), 2);
+        assert_eq!(history.revisions.len(), 2);
+        assert_eq!(history.metrics.len(), 2);
         assert_eq!(
-            history.snapshots[0].changed_fields,
-            vec!["title".to_owned(), "view_count".to_owned()]
+            history.revisions[0].changed_fields,
+            vec!["title".to_owned()]
         );
 
         let _ = fs::remove_file(&path);
@@ -1757,7 +1827,7 @@ mod tests {
         assert_eq!(first, 2);
         assert_eq!(second, 0);
         assert_eq!(history.tracks.len(), 2);
-        assert_eq!(history.snapshots.len(), 2);
+        assert_eq!(history.revisions.len(), 2);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
@@ -1798,8 +1868,8 @@ mod tests {
         assert_eq!(second, 0);
         assert_eq!(third, 1);
         assert_eq!(history.comments.len(), 1);
-        assert_eq!(history.snapshots.len(), 2);
-        assert_eq!(history.snapshots[0].changed_fields, vec!["text".to_owned()]);
+        assert_eq!(history.revisions.len(), 2);
+        assert_eq!(history.revisions[0].changed_fields, vec!["text".to_owned()]);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));

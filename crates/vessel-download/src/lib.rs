@@ -563,7 +563,6 @@ mod tests {
             primary_category: None,
             view_count: None,
             like_count: None,
-            dislike_count: None,
             comment_count: None,
             availability: Availability::Public,
             formats: vec![

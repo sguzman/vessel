@@ -153,6 +153,8 @@ struct ChannelAddArgs {
 #[derive(Debug, Args)]
 struct ChannelSyncArgs {
     #[arg(long)]
+    full: bool,
+    #[arg(long)]
     comments: bool,
     #[arg(long)]
     subtitles: bool,
@@ -432,6 +434,10 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
     let run_id = store.start_run("channel sync").await?;
     let started_at = OffsetDateTime::now_utc();
 
+    let sync_comments = args.full || args.comments;
+    let sync_subtitles = args.full || args.subtitles;
+    let sync_thumbnails = args.full || args.download_thumbnails;
+
     let result = async {
         let mut summary = serde_json::json!({
             "status": "synced",
@@ -450,9 +456,10 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "videos_discovered_per_tab": serde_json::Map::<String, serde_json::Value>::new(),
             "errors": 0usize,
             "options": {
-                "comments": args.comments,
-                "subtitles": args.subtitles,
-                "download_thumbnails": args.download_thumbnails,
+                "full": args.full,
+                "comments": sync_comments,
+                "subtitles": sync_subtitles,
+                "download_thumbnails": sync_thumbnails,
                 "since": args.since,
                 "max_videos": args.max_videos,
             }
@@ -580,9 +587,6 @@ async fn video_refresh(
             }
         };
         let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
-        let subtitle_snapshots_inserted =
-            store.sync_subtitle_tracks(&video, &video.subtitles).await?;
-        let thumbnail_artifacts = sync_video_thumbnails(&store, &video, layout).await?;
         let finished_at = OffsetDateTime::now_utc();
         store
             .record_attempt(FetchAttempt {
@@ -603,8 +607,6 @@ async fn video_refresh(
             "video_id": video.video_id,
             "title": video.title,
             "snapshot_inserted": snapshot_inserted,
-            "subtitle_snapshots_inserted": subtitle_snapshots_inserted,
-            "thumbnail_artifacts": thumbnail_artifacts,
             "fetched_at": video.fetched_at.format(&time::format_description::well_known::Rfc3339)
                 .map_err(|err| VesselError::Config(err.to_string()))?,
         }))
@@ -661,7 +663,7 @@ async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resu
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.video)).await?;
     store.upsert_video_snapshot(&video).await?;
-    let subtitle_snapshots_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+    let subtitle_revisions_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
     let artifact_paths = sync_subtitle_artifacts(&store, &video, layout).await?;
     let history = store.load_subtitle_history(&video.video_id).await?;
 
@@ -672,12 +674,12 @@ async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resu
             "video_id": video.video_id,
             "title": video.title,
             "tracks": video.subtitles.len(),
-            "subtitle_snapshots_inserted": subtitle_snapshots_inserted,
+            "subtitle_revisions_inserted": subtitle_revisions_inserted,
             "artifacts_written": artifact_paths.len(),
             "artifact_paths": artifact_paths,
             "history_counts": {
                 "tracks": history.tracks.len(),
-                "snapshots": history.snapshots.len(),
+                "revisions": history.revisions.len(),
             },
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
@@ -692,7 +694,7 @@ async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resul
     let video = extract_video(&input).await?;
     store.upsert_video_snapshot(&video).await?;
     let comments = extract_comments(&input, 100).await?;
-    let comment_snapshots_inserted = store.sync_comments(&comments).await?;
+    let comment_revisions_inserted = store.sync_comments(&comments).await?;
     let history = store.load_comment_history(&video.video_id).await?;
 
     println!(
@@ -702,10 +704,10 @@ async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resul
             "video_id": video.video_id,
             "title": video.title,
             "comments_fetched": comments.len(),
-            "comment_snapshots_inserted": comment_snapshots_inserted,
+            "comment_revisions_inserted": comment_revisions_inserted,
             "history_counts": {
                 "comments": history.comments.len(),
-                "snapshots": history.snapshots.len(),
+                "revisions": history.revisions.len(),
             },
             "native_only": true,
         }))
@@ -1029,20 +1031,23 @@ async fn sync_channel_video(
     args: &ChannelSyncArgs,
     layout: &RuntimeLayout,
 ) -> Result<bool> {
+    let sync_comments = args.full || args.comments;
+    let sync_subtitles = args.full || args.subtitles;
+    let sync_thumbnails = args.full || args.download_thumbnails;
     let input = InputRef {
         raw: video_ref.video_id,
         kind: InputKind::VideoId,
     };
     let video = extract_video(&input).await?;
     let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
-    if args.subtitles {
+    if sync_subtitles {
         store.sync_subtitle_tracks(&video, &video.subtitles).await?;
         sync_subtitle_artifacts(store, &video, layout).await?;
     }
-    if args.download_thumbnails {
+    if sync_thumbnails {
         sync_video_thumbnails(store, &video, layout).await?;
     }
-    if args.comments {
+    if sync_comments {
         let comments = extract_comments(&input, 40).await?;
         store.sync_comments(&comments).await?;
     }

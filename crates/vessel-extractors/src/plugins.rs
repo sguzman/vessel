@@ -516,7 +516,6 @@ value = "token123"
             primary_category: None,
             view_count: Some(1),
             like_count: None,
-            dislike_count: None,
             comment_count: None,
             availability: Availability::Public,
             formats: Vec::new(),

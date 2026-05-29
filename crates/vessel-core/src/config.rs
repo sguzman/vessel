@@ -49,7 +49,6 @@ pub struct DownloadConfig {
 pub struct DatasetConfig {
     pub project: Option<String>,
     pub root: Option<String>,
-    pub snapshot_raw_json: bool,
     pub snapshot_unchanged: bool,
 }
 
@@ -115,7 +114,6 @@ impl Default for DatasetConfig {
         Self {
             project: None,
             root: None,
-            snapshot_raw_json: true,
             snapshot_unchanged: false,
         }
     }

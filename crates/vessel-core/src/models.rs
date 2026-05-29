@@ -115,7 +115,6 @@ pub struct VideoMetadata {
     pub primary_category: Option<String>,
     pub view_count: Option<u64>,
     pub like_count: Option<u64>,
-    pub dislike_count: Option<u64>,
     pub comment_count: Option<u64>,
     pub availability: Availability,
     pub formats: Vec<MediaFormat>,

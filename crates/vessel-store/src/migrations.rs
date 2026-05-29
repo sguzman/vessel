@@ -259,4 +259,216 @@ SET
     banner_url = json_extract(normalized_json, '$.banner_url');
 "#,
 ),
+(
+    "0003_queryable_timeseries",
+    r#"
+CREATE TABLE IF NOT EXISTS video_metric_samples (
+    video_id TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER,
+    PRIMARY KEY (video_id, fetched_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_metric_samples_video_id_fetched_at
+ON video_metric_samples (video_id, fetched_at);
+
+CREATE TABLE IF NOT EXISTS channel_metric_samples (
+    channel_id TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    subscriber_count INTEGER,
+    video_count INTEGER,
+    view_count INTEGER,
+    PRIMARY KEY (channel_id, fetched_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_metric_samples_channel_id_fetched_at
+ON channel_metric_samples (channel_id, fetched_at);
+
+CREATE TABLE IF NOT EXISTS video_revisions (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    title TEXT,
+    description TEXT,
+    primary_category TEXT,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    availability TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(video_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_revisions_video_id_recorded_at
+ON video_revisions (video_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS channel_revisions (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    title TEXT,
+    description TEXT,
+    avatar_url TEXT,
+    banner_url TEXT,
+    handle TEXT,
+    content_hash TEXT NOT NULL,
+    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(channel_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_revisions_channel_id_recorded_at
+ON channel_revisions (channel_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS subtitle_revisions (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    is_auto_generated INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL,
+    url TEXT,
+    content_hash TEXT NOT NULL,
+    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(video_id, language, is_auto_generated, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subtitle_revisions_video_id_recorded_at
+ON subtitle_revisions (video_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS comment_revisions (
+    id TEXT PRIMARY KEY,
+    comment_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    author_channel_id TEXT,
+    author_name TEXT,
+    text TEXT NOT NULL,
+    like_count INTEGER,
+    reply_count INTEGER,
+    published_at TEXT,
+    content_hash TEXT NOT NULL,
+    changed_fields_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(comment_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_comment_revisions_video_id_recorded_at
+ON comment_revisions (video_id, recorded_at);
+
+INSERT OR IGNORE INTO video_metric_samples (
+    video_id, fetched_at, view_count, like_count, comment_count
+)
+SELECT video_id, fetched_at, view_count, like_count, comment_count
+FROM video_snapshots;
+
+INSERT OR IGNORE INTO channel_metric_samples (
+    channel_id, fetched_at, subscriber_count, video_count, view_count
+)
+SELECT channel_id, fetched_at, subscriber_count, video_count, view_count
+FROM channel_snapshots;
+
+INSERT OR IGNORE INTO video_revisions (
+    id, video_id, recorded_at, title, description, primary_category, tags_json, availability,
+    content_hash, changed_fields_json
+)
+SELECT
+    id,
+    video_id,
+    fetched_at,
+    title,
+    json_extract(normalized_json, '$.description'),
+    primary_category,
+    COALESCE(tags_json, '[]'),
+    COALESCE(json_extract(normalized_json, '$.availability'), 'Unknown'),
+    content_hash,
+    COALESCE(changed_fields_json, '[]')
+FROM video_snapshots;
+
+INSERT OR IGNORE INTO channel_revisions (
+    id, channel_id, recorded_at, title, description, avatar_url, banner_url, handle,
+    content_hash, changed_fields_json
+)
+SELECT
+    id,
+    channel_id,
+    fetched_at,
+    title,
+    description,
+    avatar_url,
+    banner_url,
+    json_extract(normalized_json, '$.handle'),
+    content_hash,
+    COALESCE(changed_fields_json, '[]')
+FROM channel_snapshots;
+
+INSERT OR IGNORE INTO subtitle_revisions (
+    id, video_id, language, is_auto_generated, recorded_at, url, content_hash, changed_fields_json
+)
+SELECT
+    id,
+    video_id,
+    language,
+    is_auto_generated,
+    fetched_at,
+    json_extract(normalized_json, '$.url'),
+    content_hash,
+    COALESCE(changed_fields_json, '[]')
+FROM subtitle_snapshots;
+
+INSERT OR IGNORE INTO comment_revisions (
+    id, comment_id, video_id, recorded_at, author_channel_id, author_name, text, like_count,
+    reply_count, published_at, content_hash, changed_fields_json
+)
+SELECT
+    id,
+    comment_id,
+    video_id,
+    fetched_at,
+    json_extract(normalized_json, '$.author_channel_id'),
+    json_extract(normalized_json, '$.author_name'),
+    COALESCE(json_extract(normalized_json, '$.text'), ''),
+    json_extract(normalized_json, '$.like_count'),
+    json_extract(normalized_json, '$.reply_count'),
+    json_extract(normalized_json, '$.published_at'),
+    content_hash,
+    COALESCE(changed_fields_json, '[]')
+FROM comment_snapshots;
+
+ALTER TABLE videos RENAME TO videos_legacy_0003;
+
+CREATE TABLE videos (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    video_id TEXT NOT NULL UNIQUE,
+    channel_id TEXT,
+    canonical_url TEXT NOT NULL,
+    title TEXT,
+    description TEXT,
+    upload_date TEXT,
+    duration_seconds INTEGER,
+    primary_category TEXT,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER,
+    availability TEXT NOT NULL,
+    latest_snapshot_id TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+INSERT INTO videos (
+    id, platform, video_id, channel_id, canonical_url, title, description, upload_date,
+    duration_seconds, primary_category, tags_json, view_count, like_count, comment_count,
+    availability, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+)
+SELECT
+    id, platform, video_id, channel_id, canonical_url, title, description, upload_date,
+    duration_seconds, primary_category, COALESCE(tags_json, '[]'), view_count, like_count,
+    comment_count, availability, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+FROM videos_legacy_0003;
+
+CREATE INDEX IF NOT EXISTS idx_videos_channel_id ON videos (channel_id);
+"#,
+),
 ];

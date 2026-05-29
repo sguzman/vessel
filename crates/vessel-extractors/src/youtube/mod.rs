@@ -45,21 +45,6 @@ pub struct ChannelVideoCrawlReport {
     pub tabs_resumed_from_checkpoint: Vec<String>,
 }
 
-pub trait DislikeProvider: Send + Sync {
-    fn fetch_dislike_count(
-        &self,
-        _video_id: &str,
-        _video: &VideoMetadata,
-    ) -> Result<Option<u64>> {
-        Ok(None)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct NoopDislikeProvider;
-
-impl DislikeProvider for NoopDislikeProvider {}
-
 #[async_trait]
 impl Extractor for YoutubeExtractor {
     fn name(&self) -> &str {
@@ -98,13 +83,6 @@ impl Extractor for YoutubeExtractor {
 }
 
 pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
-    extract_video_with_dislikes(input, &NoopDislikeProvider).await
-}
-
-pub async fn extract_video_with_dislikes(
-    input: &InputRef,
-    dislike_provider: &dyn DislikeProvider,
-) -> Result<VideoMetadata> {
     let video_id = canonical_video_id(input)?;
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let html = fetch_text(&url).await?;
@@ -124,29 +102,13 @@ pub async fn extract_video_with_dislikes(
             merge_streaming_data(&mut player_response, &android_response);
         }
     }
-    let mut video = parse_video_metadata(
+    let video = parse_video_metadata(
         &player_response,
         initial_data.as_ref(),
         &html,
         &url,
         OffsetDateTime::now_utc(),
     )?;
-    if video.dislike_count.is_some() {
-        if let Some(raw) = video.raw.as_object_mut() {
-            raw.insert(
-                "dislike_count_source".to_owned(),
-                Value::String("youtube_native".to_owned()),
-            );
-        }
-    } else if let Some(dislike_count) = dislike_provider.fetch_dislike_count(&video_id, &video)? {
-        video.dislike_count = Some(dislike_count);
-        if let Some(raw) = video.raw.as_object_mut() {
-            raw.insert(
-                "dislike_count_source".to_owned(),
-                Value::String("external_enricher".to_owned()),
-            );
-        }
-    }
     Ok(video)
 }
 
@@ -567,7 +529,6 @@ fn parse_video_metadata(
                 .and_then(|value| value.parse().ok())
         })
         .or_else(|| initial_data.and_then(parse_like_count_from_initial_data));
-    let dislike_count = initial_data.and_then(parse_dislike_count_from_initial_data);
     let comment_count = initial_data.and_then(parse_comment_count_from_initial_data);
 
     Ok(VideoMetadata {
@@ -589,7 +550,6 @@ fn parse_video_metadata(
         primary_category,
         view_count: string_field(details, "viewCount").and_then(|value| value.parse().ok()),
         like_count,
-        dislike_count,
         comment_count,
         availability: parse_availability(raw, details),
         formats,
@@ -1211,32 +1171,21 @@ fn parse_comment_count_from_initial_data(value: &Value) -> Option<u64> {
 }
 
 fn parse_like_count_from_initial_data(value: &Value) -> Option<u64> {
-    parse_reaction_counts_from_initial_data(value)
-        .0
+    parse_like_count_accessibility(value)
         .or_else(|| find_string_value(value, "likeCount").and_then(|text| parse_count_from_text(&text)))
 }
 
-fn parse_dislike_count_from_initial_data(value: &Value) -> Option<u64> {
-    parse_reaction_counts_from_initial_data(value)
-        .1
-        .or_else(|| find_string_value(value, "dislikeCount").and_then(|text| parse_count_from_text(&text)))
-}
-
-fn parse_reaction_counts_from_initial_data(value: &Value) -> (Option<u64>, Option<u64>) {
+fn parse_like_count_accessibility(value: &Value) -> Option<u64> {
     let mut like_count = None;
-    let mut dislike_count = None;
     if let Some(renderer) = find_first_by_key(value, "videoPrimaryInfoRenderer") {
         for label in find_accessibility_labels(renderer) {
             let lower = label.to_ascii_lowercase();
             if like_count.is_none() && lower.contains("like") && !lower.contains("dislike") {
                 like_count = parse_count_from_text(&label);
             }
-            if dislike_count.is_none() && lower.contains("dislike") {
-                dislike_count = parse_count_from_text(&label);
-            }
         }
     }
-    (like_count, dislike_count)
+    like_count
 }
 
 fn find_accessibility_labels(value: &Value) -> Vec<String> {
