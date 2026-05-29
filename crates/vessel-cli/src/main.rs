@@ -444,10 +444,10 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "run_id": run_id,
             "tracked_channels": tracked_channels.len(),
             "channels_processed": 0usize,
-            "channel_snapshots_inserted": 0usize,
+            "channel_revisions_inserted": 0usize,
             "videos_discovered": 0usize,
             "unique_videos_discovered": 0usize,
-            "video_snapshots_inserted": 0usize,
+            "video_revisions_inserted": 0usize,
             "videos_refreshed": 0usize,
             "video_refreshes_skipped_by_since": 0usize,
             "tabs_visited": Vec::<String>::new(),
@@ -471,7 +471,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     increment_summary(&mut summary, "channels_processed", 1);
                     increment_summary(
                         &mut summary,
-                        "channel_snapshots_inserted",
+                        "channel_revisions_inserted",
                         usize::from(channel_report.channel_snapshot_inserted),
                     );
                     increment_summary(
@@ -486,7 +486,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     );
                     increment_summary(
                         &mut summary,
-                        "video_snapshots_inserted",
+                        "video_revisions_inserted",
                         channel_report.video_snapshots_inserted,
                     );
                     increment_summary(
@@ -606,7 +606,7 @@ async fn video_refresh(
             "run_id": run_id,
             "video_id": video.video_id,
             "title": video.title,
-            "snapshot_inserted": snapshot_inserted,
+            "revision_inserted": snapshot_inserted,
             "fetched_at": video.fetched_at.format(&time::format_description::well_known::Rfc3339)
                 .map_err(|err| VesselError::Config(err.to_string()))?,
         }))
