@@ -9,6 +9,7 @@
   - `thumbnails/`
   - `subtitles/`
   - `plugins/`
+- `vessel project list` enumerates known project folders under `.cache/vessel/`.
 - Artifact paths stored in SQLite are project-root-relative so the dataset stays portable within the project folder.
 - SQLite remains plain on-disk SQLite, so tools such as `litecli` can open a project directly:
   - `litecli .cache/vessel/<project>/vessel.sqlite`

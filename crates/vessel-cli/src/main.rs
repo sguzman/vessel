@@ -40,6 +40,7 @@ enum Commands {
     Dataset(DatasetCommand),
     Channel(ChannelCommand),
     Video(VideoCommand),
+    Project(ProjectCommand),
     Info(UrlArg),
     Formats(UrlArg),
     Download(DownloadArgs),
@@ -49,6 +50,17 @@ enum Commands {
 #[derive(Debug, Args)]
 struct UrlArg {
     url: String,
+}
+
+#[derive(Debug, Args)]
+struct ProjectCommand {
+    #[command(subcommand)]
+    command: ProjectSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectSubcommand {
+    List,
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +233,9 @@ async fn main() -> Result<()> {
             VideoSubcommand::Comments(cmd) => match cmd.command {
                 VideoCommentsSubcommand::Sync(args) => video_comments_sync(args, &layout).await,
             },
+        },
+        Commands::Project(cmd) => match cmd.command {
+            ProjectSubcommand::List => project_list(&layout).await,
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
@@ -1000,6 +1015,57 @@ async fn plugin_list(paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -
         "plugins": plugins.plugins(),
         "errors": plugins.errors(),
         "providers": plugins.providers(),
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn project_list(layout: &RuntimeLayout) -> Result<()> {
+    tokio::fs::create_dir_all(&layout.cache_root).await?;
+    let mut entries = tokio::fs::read_dir(&layout.cache_root).await?;
+    let mut projects = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let project_name = entry.file_name().to_string_lossy().into_owned();
+        let database_path = path.join("vessel.sqlite");
+        let plugins_root = path.join("plugins");
+        let tracked = if database_path.exists() {
+            match init_sqlite_database(&format!("sqlite://{}", database_path.display())).await {
+                Ok((store, _)) => store.list_tracked_channels().await.unwrap_or_default().len(),
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
+        projects.push(serde_json::json!({
+            "name": project_name,
+            "root": path,
+            "database_path": database_path,
+            "database_exists": database_path.exists(),
+            "plugins_root": plugins_root,
+            "tracked_channels": tracked,
+        }));
+    }
+
+    projects.sort_by(|left, right| {
+        left.get("name")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&right.get("name").and_then(serde_json::Value::as_str))
+    });
+
+    let report = serde_json::json!({
+        "status": "ok",
+        "cache_root": layout.cache_root,
+        "selected_project": layout.project_name,
+        "projects": projects,
     });
     println!(
         "{}",

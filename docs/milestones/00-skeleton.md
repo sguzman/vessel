@@ -20,4 +20,4 @@ Create a serious Rust workspace with the base CLI, config, logging, and SQLite s
 - [x] `vessel --help`
 - [x] `vessel doctor`
 - [x] `vessel config show`
-- [x] `vessel dataset init --db ./vessel.sqlite`
+- [x] `vessel dataset init`
