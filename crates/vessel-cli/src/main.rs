@@ -125,12 +125,23 @@ struct DatasetCommand {
 #[derive(Debug, Subcommand)]
 enum DatasetSubcommand {
     Init(DatasetInitArgs),
+    Destroy(DatasetDestroyArgs),
 }
 
 #[derive(Debug, Args)]
 struct DatasetInitArgs {
     #[arg(long = "db")]
     db: Option<String>,
+    #[arg(long = "recreate")]
+    recreate: bool,
+}
+
+#[derive(Debug, Args)]
+struct DatasetDestroyArgs {
+    #[arg(long = "db")]
+    db: Option<String>,
+    #[arg(long = "yes")]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +232,7 @@ async fn main() -> Result<()> {
         },
         Commands::Dataset(cmd) => match cmd.command {
             DatasetSubcommand::Init(args) => dataset_init(args, &layout).await,
+            DatasetSubcommand::Destroy(args) => dataset_destroy(args, &layout).await,
         },
         Commands::Channel(cmd) => match cmd.command {
             ChannelSubcommand::Add(args) => channel_add(args, &layout).await,
@@ -356,6 +368,9 @@ fn show_config(
 async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<()> {
     ensure_project_layout(layout).await?;
     let target = args.db.unwrap_or_else(|| layout.database_url.clone());
+    if args.recreate {
+        remove_sqlite_files(&target)?;
+    }
     let (_store, paths) = init_sqlite_database(&target).await?;
     let report = serde_json::json!({
         "status": "initialized",
@@ -366,7 +381,8 @@ async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<(
         "database": {
             "requested": paths.requested,
             "sqlite_url": paths.sqlite_url,
-            "sqlite_path": layout.database_path,
+            "sqlite_path": sqlite_target_path(&target)?,
+            "recreated": args.recreate,
         },
         "storage": {
             "download_output": layout.download_output,
@@ -374,6 +390,37 @@ async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<(
             "thumbnails_root": layout.thumbnails_root,
             "subtitles_root": layout.subtitles_root,
             "plugins_root": layout.plugins_root,
+        }
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+async fn dataset_destroy(args: DatasetDestroyArgs, layout: &RuntimeLayout) -> Result<()> {
+    if !args.yes {
+        return Err(VesselError::Unsupported(
+            "dataset destroy is destructive; rerun with --yes".to_owned(),
+        ));
+    }
+
+    ensure_project_layout(layout).await?;
+    let target = args.db.unwrap_or_else(|| layout.database_url.clone());
+    let database_path = sqlite_target_path(&target)?;
+    let removed_files = remove_sqlite_files(&target)?;
+    let report = serde_json::json!({
+        "status": "destroyed",
+        "project": {
+            "name": layout.project_name,
+            "root": layout.project_root,
+        },
+        "database": {
+            "requested": target,
+            "sqlite_path": database_path,
+            "removed_files": removed_files,
         }
     });
     println!(
@@ -1084,6 +1131,35 @@ fn parse_format_selector(raw: Option<&str>) -> Result<FormatSelector> {
         Some(value) => parse_selector(value)
             .map_err(|err| VesselError::Unsupported(format!("invalid format selector: {err}"))),
     }
+}
+
+fn sqlite_target_path(target: &str) -> Result<PathBuf> {
+    let normalized = if target.starts_with("sqlite:") {
+        target.to_owned()
+    } else {
+        format!("sqlite://{target}")
+    };
+    let path = normalized
+        .strip_prefix("sqlite://")
+        .or_else(|| normalized.strip_prefix("sqlite:"))
+        .ok_or_else(|| VesselError::Config("invalid sqlite target".to_owned()))?;
+    Ok(PathBuf::from(path))
+}
+
+fn remove_sqlite_files(target: &str) -> Result<Vec<String>> {
+    let db_path = sqlite_target_path(target)?;
+    let mut removed = Vec::new();
+    for path in [
+        db_path.clone(),
+        PathBuf::from(format!("{}-wal", db_path.display())),
+        PathBuf::from(format!("{}-shm", db_path.display())),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            removed.push(path.display().to_string());
+        }
+    }
+    Ok(removed)
 }
 
 fn sanitize_component(input: &str) -> String {
