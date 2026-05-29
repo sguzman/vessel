@@ -14,7 +14,7 @@ use vessel_core::models::{
 use vessel_core::{Result, VesselError};
 use vessel_ledger::{FetchAttempt, Ledger, RefreshDecision, SyncOptions};
 
-use crate::migrations::MIGRATIONS;
+use crate::migrations::SCHEMA;
 use crate::traits::{CurrentStateStore, SnapshotStore};
 
 #[derive(Debug, Clone)]
@@ -807,7 +807,7 @@ pub async fn init_sqlite_database(target: &str) -> Result<(SqliteStore, Database
         .connect_with(options)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
-    apply_migrations(&pool).await?;
+    apply_schema(&pool).await?;
     info!(database = %sqlite_url, "sqlite initialized");
     Ok((
         SqliteStore::new(pool),
@@ -818,50 +818,10 @@ pub async fn init_sqlite_database(target: &str) -> Result<(SqliteStore, Database
     ))
 }
 
-async fn apply_migrations(pool: &Pool<Sqlite>) -> Result<()> {
-    pool.execute(
-        r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    name TEXT PRIMARY KEY,
-    applied_at TEXT NOT NULL
-)
-"#,
-    )
-    .await
-    .map_err(|err| VesselError::Database(err.to_string()))?;
-
-    for (name, sql) in MIGRATIONS {
-        let already_applied = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM schema_migrations WHERE name = ?1",
-        )
-        .bind(*name)
-        .fetch_one(pool)
+async fn apply_schema(pool: &Pool<Sqlite>) -> Result<()> {
+    pool.execute(SCHEMA)
         .await
         .map_err(|err| VesselError::Database(err.to_string()))?;
-        if already_applied > 0 {
-            continue;
-        }
-
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|err| VesselError::Database(err.to_string()))?;
-        tx.execute(*sql)
-            .await
-            .map_err(|err| VesselError::Database(err.to_string()))?;
-        let applied_at = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|err| VesselError::Database(err.to_string()))?;
-        sqlx::query("INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)")
-            .bind(*name)
-            .bind(applied_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(|err| VesselError::Database(err.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|err| VesselError::Database(err.to_string()))?;
-    }
     Ok(())
 }
 
