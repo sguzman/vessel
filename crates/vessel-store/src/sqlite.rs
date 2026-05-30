@@ -960,6 +960,131 @@ ON CONFLICT(video_id) DO UPDATE SET
     }
 }
 
+impl SqliteStore {
+    pub async fn record_channel_metrics_only(&self, channel: &ChannelMetadata) -> Result<()> {
+        let fetched_at = channel
+            .fetched_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT OR IGNORE INTO channel_metrics (
+    channel_id, fetched_at, subscriber_count, video_count, view_count
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+        )
+        .bind(channel.channel_id.clone())
+        .bind(fetched_at.clone())
+        .bind(channel.subscriber_count.map(|v| v as i64))
+        .bind(channel.video_count.map(|v| v as i64))
+        .bind(channel.view_count.map(|v| v as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        sqlx::query(
+            r#"
+INSERT INTO channels (
+    id, platform, channel_id, handle, canonical_url, title, description, subscriber_count,
+    video_count, view_count, avatar_url, banner_url, latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14, ?15)
+ON CONFLICT(channel_id) DO UPDATE SET
+    subscriber_count = excluded.subscriber_count,
+    video_count = excluded.video_count,
+    view_count = excluded.view_count,
+    last_seen_at = excluded.last_seen_at,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(channel.channel_id.clone())
+        .bind(format!("{:?}", channel.platform))
+        .bind(channel.channel_id.clone())
+        .bind(channel.handle.clone())
+        .bind(channel.url.clone())
+        .bind(channel.title.clone())
+        .bind(channel.description.clone())
+        .bind(channel.subscriber_count.map(|v| v as i64))
+        .bind(channel.video_count.map(|v| v as i64))
+        .bind(channel.view_count.map(|v| v as i64))
+        .bind(channel.avatar_url.clone())
+        .bind(channel.banner_url.clone())
+        .bind(fetched_at.clone())
+        .bind(fetched_at.clone())
+        .bind(fetched_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn record_video_metrics_only(&self, video: &VideoMetadata) -> Result<()> {
+        let fetched_at = video
+            .fetched_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT OR IGNORE INTO video_metrics (
+    video_id, fetched_at, view_count, like_count, comment_count
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+        )
+        .bind(video.video_id.clone())
+        .bind(fetched_at.clone())
+        .bind(video.view_count.map(|v| v as i64))
+        .bind(video.like_count.map(|v| v as i64))
+        .bind(video.comment_count.map(|v| v as i64))
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        sqlx::query(
+            r#"
+INSERT INTO videos (
+    id, platform, video_id, channel_id, canonical_url, title, description, upload_date, duration_seconds,
+    primary_category, tags_json, view_count, like_count, comment_count, availability,
+    latest_snapshot_id, first_seen_at, last_seen_at, updated_at
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, ?16, ?17, ?18)
+ON CONFLICT(video_id) DO UPDATE SET
+    view_count = excluded.view_count,
+    like_count = excluded.like_count,
+    comment_count = excluded.comment_count,
+    last_seen_at = excluded.last_seen_at,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(video.video_id.clone())
+        .bind(format!("{:?}", video.platform))
+        .bind(video.video_id.clone())
+        .bind(video.channel_id.clone())
+        .bind(video.url.clone())
+        .bind(video.title.clone())
+        .bind(video.description.clone())
+        .bind(video.upload_date.clone())
+        .bind(video.duration_seconds.map(|v| v as i64))
+        .bind(video.primary_category.clone())
+        .bind(
+            serde_json::to_string(&video.tags)
+                .map_err(|err| VesselError::Database(err.to_string()))?,
+        )
+        .bind(video.view_count.map(|v| v as i64))
+        .bind(video.like_count.map(|v| v as i64))
+        .bind(video.comment_count.map(|v| v as i64))
+        .bind(format!("{:?}", video.availability))
+        .bind(fetched_at.clone())
+        .bind(fetched_at.clone())
+        .bind(fetched_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl SnapshotStore for SqliteStore {
     async fn insert_channel_snapshot_if_changed(

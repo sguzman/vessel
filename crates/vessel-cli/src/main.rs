@@ -172,6 +172,8 @@ struct ChannelAddArgs {
 struct ChannelSyncArgs {
     #[arg(long)]
     full: bool,
+    #[arg(long = "metrics-only")]
+    metrics_only: bool,
     #[arg(long)]
     comments: bool,
     #[arg(long)]
@@ -192,7 +194,7 @@ struct VideoCommand {
 
 #[derive(Debug, Subcommand)]
 enum VideoSubcommand {
-    Refresh(VideoRefArg),
+    Refresh(VideoRefreshArgs),
     History(VideoRefArg),
     Subtitles(VideoSubtitlesCommand),
     Comments(VideoCommentsCommand),
@@ -201,6 +203,13 @@ enum VideoSubcommand {
 #[derive(Debug, Args)]
 struct VideoRefArg {
     video: String,
+}
+
+#[derive(Debug, Args)]
+struct VideoRefreshArgs {
+    video: String,
+    #[arg(long = "metrics-only")]
+    metrics_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -521,7 +530,7 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
 }
 
 async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<()> {
-    info!(target: "info", project = %layout.project_name, full = args.full, "channel sync started");
+    info!(target: "info", project = %layout.project_name, full = args.full, metrics_only = args.metrics_only, "channel sync started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let tracked_channels = store.list_tracked_channels().await?;
@@ -535,9 +544,9 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
     let run_id = store.start_run("channel sync").await?;
     let started_at = OffsetDateTime::now_utc();
 
-    let sync_comments = args.full || args.comments;
-    let sync_subtitles = args.full || args.subtitles;
-    let sync_thumbnails = args.full || args.download_thumbnails;
+    let sync_comments = !args.metrics_only && (args.full || args.comments);
+    let sync_subtitles = !args.metrics_only && (args.full || args.subtitles);
+    let sync_thumbnails = !args.metrics_only && (args.full || args.download_thumbnails);
 
     let result = async {
         let mut summary = serde_json::json!({
@@ -546,9 +555,11 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "tracked_channels": tracked_channels.len(),
             "channels_processed": 0usize,
             "channel_history_inserted": 0usize,
+            "channel_metrics_inserted": 0usize,
             "videos_discovered": 0usize,
             "unique_videos_discovered": 0usize,
             "video_history_inserted": 0usize,
+            "video_metrics_inserted": 0usize,
             "videos_refreshed": 0usize,
             "video_refreshes_skipped_by_since": 0usize,
             "tabs_visited": Vec::<String>::new(),
@@ -558,6 +569,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "errors": 0usize,
             "options": {
                 "full": args.full,
+                "metrics_only": args.metrics_only,
                 "comments": sync_comments,
                 "subtitles": sync_subtitles,
                 "download_thumbnails": sync_thumbnails,
@@ -573,7 +585,12 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     increment_summary(
                         &mut summary,
                         "channel_history_inserted",
-                        usize::from(channel_report.channel_snapshot_inserted),
+                        usize::from(channel_report.channel_history_inserted),
+                    );
+                    increment_summary(
+                        &mut summary,
+                        "channel_metrics_inserted",
+                        channel_report.channel_metrics_inserted,
                     );
                     increment_summary(
                         &mut summary,
@@ -588,7 +605,12 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     increment_summary(
                         &mut summary,
                         "video_history_inserted",
-                        channel_report.video_snapshots_inserted,
+                        channel_report.video_history_inserted,
+                    );
+                    increment_summary(
+                        &mut summary,
+                        "video_metrics_inserted",
+                        channel_report.video_metrics_inserted,
                     );
                     increment_summary(
                         &mut summary,
@@ -661,11 +683,11 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
 }
 
 async fn video_refresh(
-    args: VideoRefArg,
+    args: VideoRefreshArgs,
     layout: &RuntimeLayout,
     paths: &vessel_core::ConfigPaths,
 ) -> Result<()> {
-    info!(target: "info", video = %args.video, "video refresh started");
+    info!(target: "info", video = %args.video, metrics_only = args.metrics_only, "video refresh started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let registry = build_registry(&load_runtime_plugins(paths, layout));
@@ -698,12 +720,22 @@ async fn video_refresh(
                 video.title.clone().unwrap_or_default()
             ),
         );
-        let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
-        if snapshot_inserted {
-            vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+        let history_inserted = if args.metrics_only {
+            store.record_video_metrics_only(&video).await?;
+            vessel_logging::progress(
+                "db",
+                format!("video_history skipped for {} (metrics-only)", video.video_id),
+            );
+            false
         } else {
-            vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
-        }
+            let inserted = store.upsert_video_snapshot(&video).await?;
+            if inserted {
+                vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+            } else {
+                vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
+            }
+            inserted
+        };
         vessel_logging::progress("db", format!("video_metrics inserted for {}", video.video_id));
         let finished_at = OffsetDateTime::now_utc();
         store
@@ -724,7 +756,8 @@ async fn video_refresh(
             "run_id": run_id,
             "video_id": video.video_id,
             "title": video.title,
-            "revision_inserted": snapshot_inserted,
+            "metrics_only": args.metrics_only,
+            "history_inserted": history_inserted,
             "fetched_at": video.fetched_at.format(&time::format_description::well_known::Rfc3339)
                 .map_err(|err| VesselError::Config(err.to_string()))?,
         }))
@@ -1053,10 +1086,12 @@ fn build_registry(plugins: &PluginCatalog) -> ExtractorRegistry {
 
 #[derive(Debug, Default)]
 struct ChannelSyncReport {
-    channel_snapshot_inserted: bool,
+    channel_history_inserted: bool,
     videos_discovered: usize,
     unique_videos_discovered: usize,
-    video_snapshots_inserted: usize,
+    video_history_inserted: usize,
+    video_metrics_inserted: usize,
+    channel_metrics_inserted: usize,
     videos_refreshed: usize,
     skipped_by_since: usize,
     tabs_visited: Vec<String>,
@@ -1158,8 +1193,9 @@ async fn sync_one_channel(
     let total = videos.len();
     for (index, video_ref) in videos.into_iter().enumerate() {
         if sync_channel_video(store, video_ref, args, layout, index + 1, total).await? {
-            report.video_snapshots_inserted += 1;
+            report.video_history_inserted += 1;
         }
+        report.video_metrics_inserted += 1;
         report.videos_refreshed += 1;
     }
 
@@ -1169,12 +1205,23 @@ async fn sync_one_channel(
     if channel.view_count.is_none() {
         channel.view_count = store.aggregate_channel_video_view_count(&channel.channel_id).await?;
     }
-    report.channel_snapshot_inserted = store.upsert_channel_snapshot(&channel).await?;
-    if report.channel_snapshot_inserted {
-        vessel_logging::progress("db", format!("channel_history inserted for {}", channel.channel_id));
+    report.channel_metrics_inserted += 1;
+    report.channel_history_inserted = if args.metrics_only {
+        store.record_channel_metrics_only(&channel).await?;
+        vessel_logging::progress(
+            "db",
+            format!("channel_history skipped for {} (metrics-only)", channel.channel_id),
+        );
+        false
     } else {
-        vessel_logging::progress("db", format!("channel_history unchanged for {}", channel.channel_id));
-    }
+        let inserted = store.upsert_channel_snapshot(&channel).await?;
+        if inserted {
+            vessel_logging::progress("db", format!("channel_history inserted for {}", channel.channel_id));
+        } else {
+            vessel_logging::progress("db", format!("channel_history unchanged for {}", channel.channel_id));
+        }
+        inserted
+    };
     vessel_logging::progress("db", format!("channel_metrics inserted for {}", channel.channel_id));
     store
         .record_attempt(FetchAttempt {
@@ -1227,9 +1274,9 @@ async fn sync_channel_video(
     index: usize,
     total: usize,
 ) -> Result<bool> {
-    let sync_comments = args.full || args.comments;
-    let sync_subtitles = args.full || args.subtitles;
-    let sync_thumbnails = args.full || args.download_thumbnails;
+    let sync_comments = !args.metrics_only && (args.full || args.comments);
+    let sync_subtitles = !args.metrics_only && (args.full || args.subtitles);
+    let sync_thumbnails = !args.metrics_only && (args.full || args.download_thumbnails);
     let input = InputRef {
         raw: video_ref.video_id,
         kind: InputKind::VideoId,
@@ -1243,12 +1290,22 @@ async fn sync_channel_video(
         ),
     );
     let video = extract_video(&input).await?;
-    let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
-    if snapshot_inserted {
-        vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+    let history_inserted = if args.metrics_only {
+        store.record_video_metrics_only(&video).await?;
+        vessel_logging::progress(
+            "db",
+            format!("video_history skipped for {} (metrics-only)", video.video_id),
+        );
+        false
     } else {
-        vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
-    }
+        let inserted = store.upsert_video_snapshot(&video).await?;
+        if inserted {
+            vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+        } else {
+            vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
+        }
+        inserted
+    };
     vessel_logging::progress("db", format!("video_metrics inserted for {}", video.video_id));
     if sync_subtitles {
         let inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
@@ -1273,7 +1330,7 @@ async fn sync_channel_video(
             ),
         );
     }
-    Ok(snapshot_inserted)
+    Ok(history_inserted)
 }
 
 fn parse_video_input(raw: &str) -> InputRef {
