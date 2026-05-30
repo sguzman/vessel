@@ -491,10 +491,10 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             "run_id": run_id,
             "tracked_channels": tracked_channels.len(),
             "channels_processed": 0usize,
-            "channel_revisions_inserted": 0usize,
+            "channel_history_inserted": 0usize,
             "videos_discovered": 0usize,
             "unique_videos_discovered": 0usize,
-            "video_revisions_inserted": 0usize,
+            "video_history_inserted": 0usize,
             "videos_refreshed": 0usize,
             "video_refreshes_skipped_by_since": 0usize,
             "tabs_visited": Vec::<String>::new(),
@@ -518,7 +518,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     increment_summary(&mut summary, "channels_processed", 1);
                     increment_summary(
                         &mut summary,
-                        "channel_revisions_inserted",
+                        "channel_history_inserted",
                         usize::from(channel_report.channel_snapshot_inserted),
                     );
                     increment_summary(
@@ -533,7 +533,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                     );
                     increment_summary(
                         &mut summary,
-                        "video_revisions_inserted",
+                        "video_history_inserted",
                         channel_report.video_snapshots_inserted,
                     );
                     increment_summary(
@@ -710,7 +710,7 @@ async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resu
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.video)).await?;
     store.upsert_video_snapshot(&video).await?;
-    let subtitle_revisions_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+    let subtitle_history_inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
     let artifact_paths = sync_subtitle_artifacts(&store, &video, layout).await?;
     let history = store.load_subtitle_history(&video.video_id).await?;
 
@@ -721,12 +721,12 @@ async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resu
             "video_id": video.video_id,
             "title": video.title,
             "tracks": video.subtitles.len(),
-            "subtitle_revisions_inserted": subtitle_revisions_inserted,
+            "subtitle_history_inserted": subtitle_history_inserted,
             "artifacts_written": artifact_paths.len(),
             "artifact_paths": artifact_paths,
             "history_counts": {
                 "tracks": history.tracks.len(),
-                "revisions": history.revisions.len(),
+                "history": history.revisions.len(),
             },
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
@@ -741,7 +741,7 @@ async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resul
     let video = extract_video(&input).await?;
     store.upsert_video_snapshot(&video).await?;
     let comments = extract_comments(&input, 100).await?;
-    let comment_revisions_inserted = store.sync_comments(&comments).await?;
+    let comment_history_inserted = store.sync_comments(&comments).await?;
     let history = store.load_comment_history(&video.video_id).await?;
 
     println!(
@@ -751,10 +751,10 @@ async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resul
             "video_id": video.video_id,
             "title": video.title,
             "comments_fetched": comments.len(),
-            "comment_revisions_inserted": comment_revisions_inserted,
+            "comment_history_inserted": comment_history_inserted,
             "history_counts": {
                 "comments": history.comments.len(),
-                "revisions": history.revisions.len(),
+                "history": history.revisions.len(),
             },
             "native_only": true,
         }))

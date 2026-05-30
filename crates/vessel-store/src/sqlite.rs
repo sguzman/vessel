@@ -560,7 +560,7 @@ SELECT
     view_count,
     like_count,
     comment_count
-FROM video_metric_samples
+FROM video_metrics
 WHERE video_id = ?1
 ORDER BY fetched_at DESC
 "#,
@@ -594,7 +594,7 @@ SELECT
     availability,
     content_hash,
     changed_fields_json
-FROM video_revisions
+FROM video_history
 WHERE video_id = ?1
 ORDER BY recorded_at DESC
 "#,
@@ -688,7 +688,7 @@ ORDER BY language ASC
         let revisions = sqlx::query(
             r#"
 SELECT id, video_id, language, is_auto_generated, recorded_at, url, content_hash, changed_fields_json
-FROM subtitle_revisions
+FROM subtitle_history
 WHERE video_id = ?1
 ORDER BY recorded_at DESC
 "#,
@@ -758,7 +758,7 @@ ORDER BY updated_at DESC
             r#"
 SELECT id, comment_id, video_id, recorded_at, author_channel_id, author_name, text, like_count,
        reply_count, published_at, content_hash, changed_fields_json
-FROM comment_revisions
+FROM comment_history
 WHERE video_id = ?1
 ORDER BY recorded_at DESC
 "#,
@@ -984,7 +984,7 @@ impl SnapshotStore for SqliteStore {
             .map_err(|err| VesselError::Database(err.to_string()))?;
         sqlx::query(
             r#"
-INSERT OR IGNORE INTO channel_metric_samples (
+INSERT OR IGNORE INTO channel_metrics (
     channel_id, fetched_at, subscriber_count, video_count, view_count
 )
 VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1000,7 +1000,7 @@ VALUES (?1, ?2, ?3, ?4, ?5)
         .map_err(|err| VesselError::Database(err.to_string()))?;
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO channel_revisions (
+INSERT OR IGNORE INTO channel_history (
     id, channel_id, recorded_at, title, description, avatar_url, banner_url, handle,
     content_hash, changed_fields_json
 )
@@ -1047,7 +1047,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             .map_err(|err| VesselError::Database(err.to_string()))?;
         sqlx::query(
             r#"
-INSERT OR IGNORE INTO video_metric_samples (
+INSERT OR IGNORE INTO video_metrics (
     video_id, fetched_at, view_count, like_count, comment_count
 )
 VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1063,7 +1063,7 @@ VALUES (?1, ?2, ?3, ?4, ?5)
         .map_err(|err| VesselError::Database(err.to_string()))?;
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO video_revisions (
+INSERT OR IGNORE INTO video_history (
     id, video_id, recorded_at, title, description, primary_category, tags_json, availability,
     content_hash, changed_fields_json
 )
@@ -1224,7 +1224,7 @@ impl SqliteStore {
         let snapshot_id = Uuid::now_v7().to_string();
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO subtitle_revisions (
+INSERT OR IGNORE INTO subtitle_history (
     id, video_id, language, is_auto_generated, recorded_at, url, content_hash, changed_fields_json
 )
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -1245,7 +1245,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             Some(snapshot_id)
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM subtitle_revisions WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3 AND content_hash = ?4 LIMIT 1",
+                "SELECT id FROM subtitle_history WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3 AND content_hash = ?4 LIMIT 1",
             )
             .bind(&video.video_id)
             .bind(&track.language)
@@ -1293,7 +1293,7 @@ ON CONFLICT(video_id, language, is_auto_generated) DO UPDATE SET
         let row = sqlx::query(
             r#"
 SELECT url
-FROM subtitle_revisions
+FROM subtitle_history
 WHERE video_id = ?1 AND language = ?2 AND is_auto_generated = ?3
 ORDER BY recorded_at DESC
 LIMIT 1
@@ -1332,7 +1332,7 @@ LIMIT 1
         let snapshot_id = Uuid::now_v7().to_string();
         let result = sqlx::query(
             r#"
-INSERT OR IGNORE INTO comment_revisions (
+INSERT OR IGNORE INTO comment_history (
     id, comment_id, video_id, recorded_at, author_channel_id, author_name, text, like_count,
     reply_count, published_at, content_hash, changed_fields_json
 )
@@ -1358,7 +1358,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             Some(snapshot_id)
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT id FROM comment_revisions WHERE comment_id = ?1 AND content_hash = ?2 LIMIT 1",
+                "SELECT id FROM comment_history WHERE comment_id = ?1 AND content_hash = ?2 LIMIT 1",
             )
             .bind(&comment.comment_id)
             .bind(&content_hash)
@@ -1408,7 +1408,7 @@ ON CONFLICT(comment_id) DO UPDATE SET
         let row = sqlx::query(
             r#"
 SELECT author_channel_id, author_name, text, like_count, reply_count, published_at
-FROM comment_revisions
+FROM comment_history
 WHERE comment_id = ?1
 ORDER BY recorded_at DESC
 LIMIT 1
@@ -1437,7 +1437,7 @@ LIMIT 1
         let row = sqlx::query(
             r#"
 SELECT title, description, primary_category, tags_json, availability
-FROM video_revisions
+FROM video_history
 WHERE video_id = ?1
 ORDER BY recorded_at DESC
 LIMIT 1
@@ -1465,7 +1465,7 @@ LIMIT 1
         let row = sqlx::query(
             r#"
 SELECT title, description, avatar_url, banner_url, handle
-FROM channel_revisions
+FROM channel_history
 WHERE channel_id = ?1
 ORDER BY recorded_at DESC
 LIMIT 1

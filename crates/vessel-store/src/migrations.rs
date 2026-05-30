@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS videos (
 
 CREATE INDEX IF NOT EXISTS idx_videos_channel_id ON videos (channel_id);
 
-CREATE TABLE IF NOT EXISTS video_metric_samples (
+CREATE TABLE IF NOT EXISTS video_metrics (
     video_id TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     view_count INTEGER,
@@ -60,10 +60,10 @@ CREATE TABLE IF NOT EXISTS video_metric_samples (
     PRIMARY KEY (video_id, fetched_at)
 );
 
-CREATE INDEX IF NOT EXISTS idx_video_metric_samples_video_id_fetched_at
-ON video_metric_samples (video_id, fetched_at);
+CREATE INDEX IF NOT EXISTS idx_video_metrics_video_id_fetched_at
+ON video_metrics (video_id, fetched_at);
 
-CREATE TABLE IF NOT EXISTS channel_metric_samples (
+CREATE TABLE IF NOT EXISTS channel_metrics (
     channel_id TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     subscriber_count INTEGER,
@@ -72,10 +72,10 @@ CREATE TABLE IF NOT EXISTS channel_metric_samples (
     PRIMARY KEY (channel_id, fetched_at)
 );
 
-CREATE INDEX IF NOT EXISTS idx_channel_metric_samples_channel_id_fetched_at
-ON channel_metric_samples (channel_id, fetched_at);
+CREATE INDEX IF NOT EXISTS idx_channel_metrics_channel_id_fetched_at
+ON channel_metrics (channel_id, fetched_at);
 
-CREATE TABLE IF NOT EXISTS video_revisions (
+CREATE TABLE IF NOT EXISTS video_history (
     id TEXT PRIMARY KEY,
     video_id TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
@@ -89,10 +89,10 @@ CREATE TABLE IF NOT EXISTS video_revisions (
     UNIQUE(video_id, content_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_video_revisions_video_id_recorded_at
-ON video_revisions (video_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_video_history_video_id_recorded_at
+ON video_history (video_id, recorded_at);
 
-CREATE TABLE IF NOT EXISTS channel_revisions (
+CREATE TABLE IF NOT EXISTS channel_history (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
@@ -106,8 +106,8 @@ CREATE TABLE IF NOT EXISTS channel_revisions (
     UNIQUE(channel_id, content_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_channel_revisions_channel_id_recorded_at
-ON channel_revisions (channel_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_channel_history_channel_id_recorded_at
+ON channel_history (channel_id, recorded_at);
 
 CREATE TABLE IF NOT EXISTS subtitle_tracks (
     id TEXT PRIMARY KEY,
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS subtitle_tracks (
     UNIQUE(video_id, language, is_auto_generated)
 );
 
-CREATE TABLE IF NOT EXISTS subtitle_revisions (
+CREATE TABLE IF NOT EXISTS subtitle_history (
     id TEXT PRIMARY KEY,
     video_id TEXT NOT NULL,
     language TEXT NOT NULL,
@@ -134,8 +134,8 @@ CREATE TABLE IF NOT EXISTS subtitle_revisions (
     UNIQUE(video_id, language, is_auto_generated, content_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_subtitle_revisions_video_id_recorded_at
-ON subtitle_revisions (video_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_subtitle_history_video_id_recorded_at
+ON subtitle_history (video_id, recorded_at);
 
 CREATE TABLE IF NOT EXISTS comments (
     id TEXT PRIMARY KEY,
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS comments (
     latest_snapshot_id TEXT
 );
 
-CREATE TABLE IF NOT EXISTS comment_revisions (
+CREATE TABLE IF NOT EXISTS comment_history (
     id TEXT PRIMARY KEY,
     comment_id TEXT NOT NULL,
     video_id TEXT NOT NULL,
@@ -168,8 +168,8 @@ CREATE TABLE IF NOT EXISTS comment_revisions (
     UNIQUE(comment_id, content_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_comment_revisions_video_id_recorded_at
-ON comment_revisions (video_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_comment_history_video_id_recorded_at
+ON comment_history (video_id, recorded_at);
 
 CREATE TABLE IF NOT EXISTS fetch_runs (
     id TEXT PRIMARY KEY,
