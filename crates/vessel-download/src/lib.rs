@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, info};
 
 use vessel_core::models::{MediaFormat, VideoMetadata};
 use vessel_core::{Result, VesselError};
@@ -103,8 +104,22 @@ impl DownloadPlanner for BasicDownloadPlanner {
 }
 
 pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
+    info!(
+        target: "download",
+        video_id = %plan.video_id,
+        files = plan.downloads.len(),
+        "download execution started"
+    );
     let mut files = Vec::new();
     for download in &plan.downloads {
+        info!(
+            target: "download",
+            video_id = %plan.video_id,
+            format_id = %download.format_id,
+            role = ?download.role,
+            output = %download.output_path.display(),
+            "starting file download"
+        );
         if let Some(parent) = download.output_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -137,6 +152,14 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
         }
 
         let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT && existing_bytes > 0;
+        debug!(
+            target: "download",
+            format_id = %download.format_id,
+            resumed,
+            existing_bytes,
+            status = %status,
+            "download response received"
+        );
         let append = resumed;
         let mut file = OpenOptions::new()
             .create(true)
@@ -160,6 +183,14 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
         drop(file);
 
         fs::rename(&download.temp_path, &download.output_path).await?;
+        info!(
+            target: "download",
+            format_id = %download.format_id,
+            bytes_written,
+            resumed,
+            output = %download.output_path.display(),
+            "file download completed"
+        );
         files.push(DownloadedFile {
             format_id: download.format_id.clone(),
             output_path: download.output_path.clone(),
@@ -170,6 +201,7 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
         });
     }
 
+    info!(target: "download", video_id = %plan.video_id, "download execution completed");
     Ok(DownloadResult { files })
 }
 

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
+use tracing::{debug, info, warn};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{Config, Result, RuntimeLayout, VesselError, load_config, resolve_runtime_layout};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
@@ -29,6 +30,12 @@ use vessel_store::{StoredTrackedChannel, init_sqlite_database};
 struct Cli {
     #[arg(long = "project", global = true)]
     project: Option<String>,
+    #[arg(short = 'q', long = "quiet", global = true)]
+    quiet: bool,
+    #[arg(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
+    verbose: u8,
+    #[arg(long = "no-progress", global = true)]
+    no_progress: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -223,7 +230,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let (config, paths, loaded_from) = load_config()?;
     let layout = resolve_runtime_layout(&config, &paths, cli.project.as_deref())?;
-    init_logging(&config)?;
+    init_logging(&config, &cli)?;
+    debug!(target: "cli", project = %layout.project_name, "cli parsed");
 
     match cli.command {
         Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
@@ -261,8 +269,16 @@ async fn main() -> Result<()> {
     }
 }
 
-fn init_logging(config: &Config) -> Result<()> {
-    vessel_logging::init(&config.logging.level, config.logging.format)
+fn init_logging(config: &Config, cli: &Cli) -> Result<()> {
+    vessel_logging::init(
+        &config.logging.level,
+        config.logging.format,
+        vessel_logging::LoggingOptions {
+            quiet: cli.quiet,
+            verbose: cli.verbose,
+            progress: config.logging.progress && !cli.no_progress,
+        },
+    )
 }
 
 async fn doctor(
@@ -271,6 +287,7 @@ async fn doctor(
     loaded_from: &[std::path::PathBuf],
     layout: &RuntimeLayout,
 ) -> Result<()> {
+    info!(target: "info", "doctor started");
     let db_exists = layout.database_path.exists();
     let plugin_dirs = plugin_directories(paths, layout);
     let plugins = load_plugins(&plugin_dirs);
@@ -325,6 +342,7 @@ async fn doctor(
         serde_json::to_string_pretty(&report)
             .map_err(|err| VesselError::Config(err.to_string()))?
     );
+    debug!(target: "doctor", database_exists = db_exists, "doctor completed");
     Ok(())
 }
 
@@ -334,6 +352,7 @@ fn show_config(
     loaded_from: &[std::path::PathBuf],
     layout: &RuntimeLayout,
 ) -> Result<()> {
+    info!(target: "info", "config show started");
     let report = serde_json::json!({
         "config": config,
         "resolved": {
@@ -362,16 +381,26 @@ fn show_config(
         serde_json::to_string_pretty(&report)
             .map_err(|err| VesselError::Config(err.to_string()))?
     );
+    debug!(target: "config", "config show completed");
     Ok(())
 }
 
 async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", project = %layout.project_name, "dataset init started");
     ensure_project_layout(layout).await?;
     let target = args.db.unwrap_or_else(|| layout.database_url.clone());
     if args.recreate {
+        vessel_logging::progress(
+            "dataset",
+            format!("recreating dataset db at {}", sqlite_target_path(&target)?.display()),
+        );
         remove_sqlite_files(&target)?;
     }
     let (_store, paths) = init_sqlite_database(&target).await?;
+    vessel_logging::progress(
+        "dataset",
+        format!("dataset initialized at {}", sqlite_target_path(&target)?.display()),
+    );
     let report = serde_json::json!({
         "status": "initialized",
         "project": {
@@ -407,10 +436,15 @@ async fn dataset_destroy(args: DatasetDestroyArgs, layout: &RuntimeLayout) -> Re
         ));
     }
 
+    warn!(target: "warn", project = %layout.project_name, "dataset destroy requested");
     ensure_project_layout(layout).await?;
     let target = args.db.unwrap_or_else(|| layout.database_url.clone());
     let database_path = sqlite_target_path(&target)?;
     let removed_files = remove_sqlite_files(&target)?;
+    vessel_logging::progress(
+        "dataset",
+        format!("removed {} database files", removed_files.len()),
+    );
     let report = serde_json::json!({
         "status": "destroyed",
         "project": {
@@ -437,11 +471,13 @@ async fn extract_preview(
     paths: &vessel_core::ConfigPaths,
     layout: &RuntimeLayout,
 ) -> Result<()> {
+    info!(target: "info", url = %url, "info extraction started");
     let registry = build_registry(&load_runtime_plugins(paths, layout));
     let input = InputRef { raw: url, kind };
     let extractor = registry
         .best_for(&input)
         .ok_or_else(|| VesselError::Unsupported("no extractor matched input".to_owned()))?;
+    debug!(target: "extractor", extractor = extractor.name(), input = %input.raw, "extractor selected");
     let item = extractor
         .extract(ExtractRequest { input }, ExtractContext)
         .await?;
@@ -453,10 +489,20 @@ async fn extract_preview(
 }
 
 async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", channel = %args.channel, "channel add started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let input = parse_channel_input(&args.channel);
+    debug!(target: "extractor", input = %input.raw, "resolving channel metadata");
     let channel = extract_channel(&input).await?;
+    vessel_logging::progress(
+        "channel",
+        format!(
+            "resolved channel {} ({})",
+            channel.title.clone().unwrap_or_else(|| channel.channel_id.clone()),
+            channel.channel_id
+        ),
+    );
     store.upsert_channel_snapshot(&channel).await?;
     store.add_tracked_channel(&channel).await?;
 
@@ -475,9 +521,17 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
 }
 
 async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", project = %layout.project_name, full = args.full, "channel sync started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let tracked_channels = store.list_tracked_channels().await?;
+    vessel_logging::progress(
+        "info",
+        format!("syncing {} tracked channel{}", tracked_channels.len(), if tracked_channels.len() == 1 { "" } else { "s" }),
+    );
+    if tracked_channels.is_empty() {
+        warn!(target: "warn", "channel sync has no tracked channels");
+    }
     let run_id = store.start_run("channel sync").await?;
     let started_at = OffsetDateTime::now_utc();
 
@@ -591,6 +645,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
 
     match result {
         Ok(summary) => {
+            info!(target: "info", "channel sync completed");
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary)
@@ -610,6 +665,7 @@ async fn video_refresh(
     layout: &RuntimeLayout,
     paths: &vessel_core::ConfigPaths,
 ) -> Result<()> {
+    info!(target: "info", video = %args.video, "video refresh started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let registry = build_registry(&load_runtime_plugins(paths, layout));
@@ -622,6 +678,7 @@ async fn video_refresh(
         let extractor = registry
             .best_for(&input)
             .ok_or_else(|| VesselError::Unsupported("no extractor matched input".to_owned()))?;
+        debug!(target: "extractor", extractor = extractor.name(), input = %target_id, "extractor selected");
         let item = extractor
             .extract(ExtractRequest { input }, ExtractContext)
             .await?;
@@ -633,7 +690,21 @@ async fn video_refresh(
                 ));
             }
         };
+        vessel_logging::progress(
+            "video",
+            format!(
+                "refreshing {} {}",
+                video.video_id,
+                video.title.clone().unwrap_or_default()
+            ),
+        );
         let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
+        if snapshot_inserted {
+            vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+        } else {
+            vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
+        }
+        vessel_logging::progress("db", format!("video_metrics inserted for {}", video.video_id));
         let finished_at = OffsetDateTime::now_utc();
         store
             .record_attempt(FetchAttempt {
@@ -689,6 +760,7 @@ async fn video_refresh(
 }
 
 async fn video_history(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    debug!(target: "video", video = %args.video, "video history lookup started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let lookup = if args.video.contains("://") {
@@ -706,6 +778,7 @@ async fn video_history(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> 
 }
 
 async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", video = %args.video, "video subtitles sync started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.video)).await?;
@@ -735,6 +808,7 @@ async fn video_subtitles_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resu
 }
 
 async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", video = %args.video, "video comments sync started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let input = parse_video_input(&args.video);
@@ -764,6 +838,7 @@ async fn video_comments_sync(args: VideoRefArg, layout: &RuntimeLayout) -> Resul
 }
 
 async fn formats(url: String) -> Result<()> {
+    info!(target: "info", url = %url, "formats requested");
     let video = extract_video(&parse_video_input(&url)).await?;
     println!(
         "{}",
@@ -779,6 +854,7 @@ async fn formats(url: String) -> Result<()> {
 }
 
 async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", url = %args.url, "download started");
     ensure_project_layout(layout).await?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let video = extract_video(&parse_video_input(&args.url)).await?;
@@ -797,6 +873,7 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
     }
 
     let selector = parse_format_selector(args.format.as_deref())?;
+    debug!(target: "download", selector = ?selector, "format selector chosen");
     let planner = BasicDownloadPlanner;
     let plan = match planner.plan(&video, selector.clone(), &layout.download_output) {
         Ok(plan) => plan,
@@ -821,6 +898,17 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
             );
         }
     };
+    vessel_logging::progress(
+        "download",
+        format!(
+            "selected formats {}",
+            plan.downloads
+                .iter()
+                .map(|item| item.format_id.clone())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+    );
     let result = match execute_download(&plan).await {
         Ok(result) => result,
         Err(err) => {
@@ -869,6 +957,8 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
         convert_subtitles: args.convert_subs.clone(),
     };
     let postprocess_plan = build_plan(&postprocess_request);
+    debug!(target: "download", plan = ?postprocess_plan, "postprocess plan built");
+    vessel_logging::progress("download", "running postprocess plan");
     let postprocess_result = execute_plan(&postprocess_request, &postprocess_plan).await?;
 
     let final_output_path = postprocess_result
@@ -894,6 +984,10 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
             ),
         )
         .await?;
+    vessel_logging::progress(
+        "db",
+        format!("artifact recorded for {} at {}", video.video_id, artifact.path),
+    );
     let mut generated_artifacts = Vec::new();
     for generated in postprocess_result.generated_artifacts {
         let generated_hash = hash_file(&generated.path).await?;
@@ -918,6 +1012,7 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
     store
         .insert_archive_entry("youtube", &video.video_id, &artifact.artifact_id)
         .await?;
+    vessel_logging::progress("download", format!("download complete for {}", video.video_id));
 
     println!(
         "{}",
@@ -979,7 +1074,23 @@ async fn sync_one_channel(
     layout: &RuntimeLayout,
 ) -> Result<ChannelSyncReport> {
     let input = parse_channel_input(&tracked.canonical_url);
+    vessel_logging::progress(
+        "channel",
+        format!(
+            "{}: refresh started",
+            tracked
+                .title
+                .clone()
+                .unwrap_or_else(|| tracked.channel_id.clone())
+        ),
+    );
     let mut channel = extract_channel(&input).await?;
+    debug!(
+        target: "channel",
+        channel_id = %channel.channel_id,
+        title = ?channel.title,
+        "channel metadata resolved"
+    );
 
     let existing_cursors = store
         .load_channel_tab_cursors(&channel.channel_id)
@@ -994,7 +1105,25 @@ async fn sync_one_channel(
             backfill_complete: cursor.backfill_complete,
         })
         .collect::<Vec<_>>();
+    debug!(
+        target: "crawl",
+        channel_id = %channel.channel_id,
+        existing_cursors = existing_cursors.len(),
+        "starting channel crawl"
+    );
     let crawl = crawl_channel_videos(&input, &existing_cursors).await?;
+    vessel_logging::progress(
+        "crawl",
+        format!(
+            "{}: discovered {} unique videos across {} tabs",
+            channel
+                .title
+                .clone()
+                .unwrap_or_else(|| channel.channel_id.clone()),
+            crawl.videos.len(),
+            crawl.tabs_visited.len()
+        ),
+    );
     let discovered_count = crawl.videos.len();
     for video_ref in &crawl.videos {
         store
@@ -1026,8 +1155,9 @@ async fn sync_one_channel(
         ..ChannelSyncReport::default()
     };
 
-    for video_ref in videos {
-        if sync_channel_video(store, video_ref, args, layout).await? {
+    let total = videos.len();
+    for (index, video_ref) in videos.into_iter().enumerate() {
+        if sync_channel_video(store, video_ref, args, layout, index + 1, total).await? {
             report.video_snapshots_inserted += 1;
         }
         report.videos_refreshed += 1;
@@ -1040,6 +1170,12 @@ async fn sync_one_channel(
         channel.view_count = store.aggregate_channel_video_view_count(&channel.channel_id).await?;
     }
     report.channel_snapshot_inserted = store.upsert_channel_snapshot(&channel).await?;
+    if report.channel_snapshot_inserted {
+        vessel_logging::progress("db", format!("channel_history inserted for {}", channel.channel_id));
+    } else {
+        vessel_logging::progress("db", format!("channel_history unchanged for {}", channel.channel_id));
+    }
+    vessel_logging::progress("db", format!("channel_metrics inserted for {}", channel.channel_id));
     store
         .record_attempt(FetchAttempt {
             run_id,
@@ -1069,6 +1205,17 @@ async fn sync_one_channel(
     store
         .mark_tracked_channel_synced(&channel.channel_id)
         .await?;
+    vessel_logging::progress(
+        "channel",
+        format!(
+            "{}: sync complete ({} refreshed)",
+            channel
+                .title
+                .clone()
+                .unwrap_or_else(|| channel.channel_id.clone()),
+            report.videos_refreshed
+        ),
+    );
     Ok(report)
 }
 
@@ -1077,6 +1224,8 @@ async fn sync_channel_video(
     video_ref: ChannelVideoRef,
     args: &ChannelSyncArgs,
     layout: &RuntimeLayout,
+    index: usize,
+    total: usize,
 ) -> Result<bool> {
     let sync_comments = args.full || args.comments;
     let sync_subtitles = args.full || args.subtitles;
@@ -1085,18 +1234,44 @@ async fn sync_channel_video(
         raw: video_ref.video_id,
         kind: InputKind::VideoId,
     };
+    vessel_logging::progress(
+        "video",
+        format!(
+            "[{index}/{total}] refreshing {} {}",
+            input.raw,
+            video_ref.title.unwrap_or_default()
+        ),
+    );
     let video = extract_video(&input).await?;
     let snapshot_inserted = store.upsert_video_snapshot(&video).await?;
+    if snapshot_inserted {
+        vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+    } else {
+        vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
+    }
+    vessel_logging::progress("db", format!("video_metrics inserted for {}", video.video_id));
     if sync_subtitles {
-        store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+        let inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
+        vessel_logging::progress(
+            "db",
+            format!("subtitle_history inserted {} track(s) for {}", inserted, video.video_id),
+        );
         sync_subtitle_artifacts(store, &video, layout).await?;
     }
     if sync_thumbnails {
+        debug!(target: "download", video_id = %video.video_id, "syncing thumbnails");
         sync_video_thumbnails(store, &video, layout).await?;
     }
     if sync_comments {
         let comments = extract_comments(&input, 40).await?;
-        store.sync_comments(&comments).await?;
+        let inserted = store.sync_comments(&comments).await?;
+        vessel_logging::progress(
+            "db",
+            format!(
+                "comment_history inserted {} row(s) for {}",
+                inserted, video.video_id
+            ),
+        );
     }
     Ok(snapshot_inserted)
 }

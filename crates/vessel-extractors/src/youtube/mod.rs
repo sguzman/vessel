@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use time::OffsetDateTime;
+use tracing::{debug, trace};
 use url::Url;
 
 use vessel_core::Result;
@@ -84,6 +85,7 @@ impl Extractor for YoutubeExtractor {
 
 pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
     let video_id = canonical_video_id(input)?;
+    debug!(target: "extractor", video_id = %video_id, "youtube video extraction started");
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let html = fetch_text(&url).await?;
     let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
@@ -109,6 +111,7 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
         &url,
         OffsetDateTime::now_utc(),
     )?;
+    debug!(target: "extractor", video_id = %video_id, title = ?video.title, "youtube video extraction completed");
     Ok(video)
 }
 
@@ -117,6 +120,7 @@ pub async fn extract_comments(
     max_comments: usize,
 ) -> Result<Vec<CommentMetadata>> {
     let video_id = canonical_video_id(input)?;
+    debug!(target: "extractor", video_id = %video_id, max_comments, "youtube comments extraction started");
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let html = fetch_text(&url).await?;
     let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
@@ -140,6 +144,7 @@ pub async fn extract_comments(
     let mut next_token = Some(continuation);
 
     while let Some(token) = next_token.take() {
+        trace!(target: "crawl", video_id = %video_id, continuation = %token, collected = comments.len(), "fetching comment continuation");
         let page = fetch_comment_page(&api_key, &client_version, &visitor_data, &token).await?;
         comments.extend(parse_comment_page(
             &video_id,
@@ -153,11 +158,13 @@ pub async fn extract_comments(
         next_token = find_next_comment_continuation(&page);
     }
 
+    debug!(target: "extractor", video_id = %video_id, comments = comments.len(), "youtube comments extraction completed");
     Ok(comments)
 }
 
 pub async fn extract_channel(input: &InputRef) -> Result<ChannelMetadata> {
     let canonical_url = canonical_channel_url(input)?;
+    debug!(target: "extractor", url = %canonical_url, "youtube channel extraction started");
     let html = fetch_text(&canonical_url).await?;
     let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
         .or_else(|| extract_embedded_json(&html, "ytInitialData = "))
@@ -176,12 +183,14 @@ pub async fn extract_channel(input: &InputRef) -> Result<ChannelMetadata> {
     } else {
         None
     };
-    parse_channel_metadata(
+    let channel = parse_channel_metadata(
         &initial_data,
         about_data.as_ref(),
         &canonical_url,
         OffsetDateTime::now_utc(),
-    )
+    )?;
+    debug!(target: "extractor", channel_id = %channel.channel_id, title = ?channel.title, "youtube channel extraction completed");
+    Ok(channel)
 }
 
 pub async fn crawl_channel_videos(
@@ -676,6 +685,13 @@ async fn crawl_channel_tabs(
 
     for tab_name in tabs {
         let existing = existing_map.get(tab_name).cloned().unwrap_or_default();
+        debug!(
+            target: "crawl",
+            tab = tab_name,
+            resumed = existing.continuation_token.is_some(),
+            completed = existing.backfill_complete,
+            "channel tab crawl started"
+        );
         let mut seen_continuations = HashSet::new();
         let mut tab_videos = Vec::new();
         let mut last_seen_published_at = existing.last_seen_published_at.clone();
@@ -698,6 +714,7 @@ async fn crawl_channel_tabs(
         };
         tabs_visited.push(tab_name.to_owned());
         collect_channel_video_refs(&initial_tab_data, tab_name, &mut tab_videos);
+        debug!(target: "crawl", tab = tab_name, discovered = tab_videos.len(), "initial tab page parsed");
         if let Some(max_published) = tab_videos
             .iter()
             .filter_map(|video| video.published_at.clone())
@@ -720,8 +737,10 @@ async fn crawl_channel_tabs(
 
         while let Some(token) = next_continuation.take() {
             if !seen_continuations.insert(token.clone()) {
+                debug!(target: "crawl", tab = tab_name, "continuation loop detected; stopping tab crawl");
                 break;
             }
+            trace!(target: "crawl", tab = tab_name, continuation = %token, discovered = tab_videos.len(), "fetching tab continuation");
             let page = fetch_browse_page(
                 api_key,
                 client_version,
@@ -735,6 +754,7 @@ async fn crawl_channel_tabs(
                 current_visitor_data = next_visitor_data;
             }
             collect_channel_video_refs(&page, tab_name, &mut tab_videos);
+            debug!(target: "crawl", tab = tab_name, discovered = tab_videos.len(), "tab continuation parsed");
             if let Some(max_published) = tab_videos
                 .iter()
                 .filter_map(|video| video.published_at.clone())
@@ -748,6 +768,7 @@ async fn crawl_channel_tabs(
             }
         }
 
+        let discovered_total = tab_videos.len();
         let mut unique_for_tab = 0usize;
         for video in tab_videos {
             if videos_by_id.insert(video.video_id.clone(), video).is_none() {
@@ -756,6 +777,13 @@ async fn crawl_channel_tabs(
         }
         videos_per_tab.insert(tab_name.to_owned(), unique_for_tab);
         let backfill_complete = next_continuation.is_none();
+        debug!(
+            target: "crawl",
+            tab = tab_name,
+            discovered = discovered_total,
+            backfill_complete,
+            "channel tab crawl completed"
+        );
         if backfill_complete {
             tabs_completed.push(tab_name.to_owned());
         }

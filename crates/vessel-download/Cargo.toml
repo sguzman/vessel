@@ -10,5 +10,6 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 vessel-core = { path = "../vessel-core" }
 vessel-formats = { path = "../vessel-formats" }

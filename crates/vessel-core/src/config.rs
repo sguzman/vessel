@@ -29,6 +29,7 @@ pub struct DatabaseConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub format: LoggingFormat,
+    pub progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -94,6 +95,7 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_owned(),
             format: LoggingFormat::Human,
+            progress: true,
         }
     }
 }
