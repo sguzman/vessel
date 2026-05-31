@@ -2592,6 +2592,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
  "vessel-core",

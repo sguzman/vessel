@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,8 @@ pub struct Config {
     pub download: DownloadConfig,
     #[serde(default)]
     pub dataset: DatasetConfig,
+    #[serde(default)]
+    pub channels: ChannelsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,9 +51,24 @@ pub struct DownloadConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetConfig {
+    #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
     pub root: Option<String>,
+    #[serde(default)]
     pub snapshot_unchanged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelsConfig {
+    #[serde(default)]
+    pub categories: BTreeMap<String, ChannelCategoryConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelCategoryConfig {
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -312,5 +330,29 @@ mod tests {
         assert_eq!(layout.project_root, PathBuf::from("/data/vessel-cache/beta"));
         assert_eq!(layout.database_url, "sqlite:///tmp/custom.sqlite");
         assert_eq!(layout.download_output, "custom/%(id)s.%(ext)s");
+    }
+
+    #[test]
+    fn config_parses_channel_categories() {
+        let parsed = toml::from_str::<Config>(
+            r#"
+[dataset]
+project = "demo"
+
+[channels.categories.gaming]
+channels = ["https://www.youtube.com/@ShreddedNerd"]
+
+[channels.categories.news]
+channels = ["https://www.youtube.com/@example"]
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(parsed.dataset.project.as_deref(), Some("demo"));
+        assert_eq!(parsed.channels.categories.len(), 2);
+        assert_eq!(
+            parsed.channels.categories["gaming"].channels,
+            vec!["https://www.youtube.com/@ShreddedNerd".to_owned()]
+        );
     }
 }

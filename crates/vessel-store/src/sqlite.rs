@@ -52,6 +52,7 @@ pub struct StoredVideoLatest {
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredTrackedChannel {
     pub channel_id: String,
+    pub category: String,
     pub canonical_url: String,
     pub handle: Option<String>,
     pub title: Option<String>,
@@ -217,7 +218,7 @@ impl SqliteStore {
         &self.pool
     }
 
-    pub async fn add_tracked_channel(&self, channel: &ChannelMetadata) -> Result<()> {
+    pub async fn add_tracked_channel(&self, channel: &ChannelMetadata, category: &str) -> Result<()> {
         let added_at = channel
             .fetched_at
             .format(&time::format_description::well_known::Rfc3339)
@@ -225,16 +226,18 @@ impl SqliteStore {
         sqlx::query(
             r#"
 INSERT INTO tracked_channels (
-    channel_id, canonical_url, handle, title, added_at, last_sync_at
+    channel_id, category, canonical_url, handle, title, added_at, last_sync_at
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT(channel_id) DO UPDATE SET
+    category = excluded.category,
     canonical_url = excluded.canonical_url,
     handle = excluded.handle,
     title = excluded.title
 "#,
         )
         .bind(channel.channel_id.clone())
+        .bind(category)
         .bind(channel.url.clone())
         .bind(channel.handle.clone())
         .bind(channel.title.clone())
@@ -249,9 +252,9 @@ ON CONFLICT(channel_id) DO UPDATE SET
     pub async fn list_tracked_channels(&self) -> Result<Vec<StoredTrackedChannel>> {
         let rows = sqlx::query(
             r#"
-SELECT channel_id, canonical_url, handle, title, added_at, last_sync_at
+SELECT channel_id, category, canonical_url, handle, title, added_at, last_sync_at
 FROM tracked_channels
-ORDER BY added_at ASC
+ORDER BY category ASC, added_at ASC
 "#,
         )
         .fetch_all(&self.pool)
@@ -262,6 +265,7 @@ ORDER BY added_at ASC
             .into_iter()
             .map(|row| StoredTrackedChannel {
                 channel_id: row.get("channel_id"),
+                category: row.get("category"),
                 canonical_url: row.get("canonical_url"),
                 handle: row.get("handle"),
                 title: row.get("title"),
@@ -1871,13 +1875,14 @@ mod tests {
         };
 
         store
-            .add_tracked_channel(&channel)
+            .add_tracked_channel(&channel, "gaming")
             .await
             .expect("add channel");
         let tracked = store.list_tracked_channels().await.expect("list tracked");
 
         assert_eq!(tracked.len(), 1);
         assert_eq!(tracked[0].channel_id, "UC-tracked");
+        assert_eq!(tracked[0].category, "gaming");
         assert_eq!(tracked[0].handle.as_deref(), Some("@tracked"));
 
         let _ = fs::remove_file(&path);

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -6,7 +7,10 @@ use reqwest::Client;
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
-use vessel_core::{Config, Result, RuntimeLayout, VesselError, load_config, resolve_runtime_layout};
+use vessel_core::{
+    ChannelCategoryConfig, Config, Result, RuntimeLayout, VesselError, load_config,
+    resolve_runtime_layout,
+};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
     ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, crawl_channel_videos, extract_channel,
@@ -19,7 +23,7 @@ use vessel_extractors::{
 use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
 use vessel_postprocess::{PostprocessRequest, build_plan, execute_plan};
-use vessel_store::{StoredTrackedChannel, init_sqlite_database};
+use vessel_store::init_sqlite_database;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -161,11 +165,14 @@ struct ChannelCommand {
 enum ChannelSubcommand {
     Add(ChannelAddArgs),
     Sync(ChannelSyncArgs),
+    Config(ChannelConfigCommand),
 }
 
 #[derive(Debug, Args)]
 struct ChannelAddArgs {
     channel: String,
+    #[arg(long)]
+    category: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +191,20 @@ struct ChannelSyncArgs {
     since: Option<String>,
     #[arg(long = "max-videos")]
     max_videos: Option<usize>,
+    #[arg(long = "category")]
+    categories: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ChannelConfigCommand {
+    #[command(subcommand)]
+    command: ChannelConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ChannelConfigSubcommand {
+    Init,
+    Show,
 }
 
 #[derive(Debug, Args)]
@@ -254,6 +275,10 @@ async fn main() -> Result<()> {
         Commands::Channel(cmd) => match cmd.command {
             ChannelSubcommand::Add(args) => channel_add(args, &layout).await,
             ChannelSubcommand::Sync(args) => channel_sync(args, &layout).await,
+            ChannelSubcommand::Config(cmd) => match cmd.command {
+                ChannelConfigSubcommand::Init => channel_config_init(&layout).await,
+                ChannelConfigSubcommand::Show => channel_config_show(&layout),
+            },
         },
         Commands::Video(cmd) => match cmd.command {
             VideoSubcommand::Refresh(args) => video_refresh(args, &layout, &paths).await,
@@ -362,6 +387,9 @@ fn show_config(
     layout: &RuntimeLayout,
 ) -> Result<()> {
     info!(target: "info", "config show started");
+    let registry_path = project_channel_registry_path(layout);
+    let registry_config = load_project_channel_registry(layout)?;
+    let registry_summary = summarize_channel_registry(&registry_config)?;
     let report = serde_json::json!({
         "config": config,
         "resolved": {
@@ -376,6 +404,8 @@ fn show_config(
             "subtitles_root": layout.subtitles_root,
             "plugins_root": layout.plugins_root,
             "litecli_example": format!("litecli {}", layout.database_path.display()),
+            "channel_registry_path": registry_path,
+            "channel_registry": registry_summary,
         },
         "paths": {
             "system": paths.system,
@@ -392,6 +422,130 @@ fn show_config(
     );
     debug!(target: "config", "config show completed");
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredChannelTarget {
+    category: String,
+    input: String,
+}
+
+fn project_channel_registry_path(layout: &RuntimeLayout) -> PathBuf {
+    layout.project_root.join("vessel.toml")
+}
+
+fn load_project_channel_registry(layout: &RuntimeLayout) -> Result<Config> {
+    let path = project_channel_registry_path(layout);
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    toml::from_str::<Config>(&raw)
+        .map_err(|err| VesselError::Config(format!("{}: {err}", path.display())))
+}
+
+fn save_project_channel_registry(layout: &RuntimeLayout, config: &Config) -> Result<()> {
+    let path = project_channel_registry_path(layout);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &path,
+        toml::to_string_pretty(config).map_err(|err| VesselError::Config(err.to_string()))?,
+    )?;
+    Ok(())
+}
+
+fn summarize_channel_registry(config: &Config) -> Result<serde_json::Value> {
+    let resolved = resolve_configured_channels(config, &[])?;
+    let mut categories = serde_json::Map::new();
+    for (name, category) in &config.channels.categories {
+        categories.insert(
+            name.clone(),
+            serde_json::json!({
+                "count": category.channels.len(),
+                "channels": category.channels,
+            }),
+        );
+    }
+    Ok(serde_json::json!({
+        "categories": categories,
+        "category_count": config.channels.categories.len(),
+        "total_channels": resolved.len(),
+    }))
+}
+
+fn resolve_configured_channels(
+    config: &Config,
+    selected_categories: &[String],
+) -> Result<Vec<ConfiguredChannelTarget>> {
+    let mut normalized_seen = HashMap::<String, String>::new();
+    for (category, spec) in &config.channels.categories {
+        if category.trim().is_empty() {
+            return Err(VesselError::Config(
+                "channel category names must be non-empty".to_owned(),
+            ));
+        }
+        for channel in &spec.channels {
+            let normalized = normalize_channel_entry(channel)?;
+            if let Some(previous) = normalized_seen.insert(normalized, category.clone()) {
+                if previous != *category {
+                    return Err(VesselError::Config(format!(
+                        "channel is configured in more than one category: {channel} ({previous}, {category})"
+                    )));
+                }
+            }
+        }
+    }
+
+    let requested = if selected_categories.is_empty() {
+        config
+            .channels
+            .categories
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        selected_categories.to_vec()
+    };
+
+    let available = config
+        .channels
+        .categories
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for category in &requested {
+        if !config.channels.categories.contains_key(category) {
+            return Err(VesselError::Config(format!(
+                "unknown category '{category}'. available categories: {}",
+                available.join(", ")
+            )));
+        }
+    }
+
+    let mut resolved = Vec::new();
+    for category in requested {
+        if let Some(spec) = config.channels.categories.get(&category) {
+            for channel in &spec.channels {
+                resolved.push(ConfiguredChannelTarget {
+                    category: category.clone(),
+                    input: channel.trim().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn normalize_channel_entry(input: &str) -> Result<String> {
+    let normalized = input.trim().to_owned();
+    if normalized.is_empty() {
+        return Err(VesselError::Config(
+            "channel entries in vessel.toml must be non-empty".to_owned(),
+        ));
+    }
+    Ok(normalized)
 }
 
 async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<()> {
@@ -474,6 +628,50 @@ async fn dataset_destroy(args: DatasetDestroyArgs, layout: &RuntimeLayout) -> Re
     Ok(())
 }
 
+async fn channel_config_init(layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", project = %layout.project_name, "channel config init started");
+    ensure_project_layout(layout).await?;
+    let path = project_channel_registry_path(layout);
+    let existed = path.exists();
+    if !existed {
+        let mut config = Config::default();
+        config.dataset.project = Some(layout.project_name.clone());
+        config.channels.categories.insert(
+            "default".to_owned(),
+            ChannelCategoryConfig::default(),
+        );
+        save_project_channel_registry(layout, &config)?;
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": if existed { "exists" } else { "initialized" },
+            "path": path,
+            "project": layout.project_name,
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
+fn channel_config_show(layout: &RuntimeLayout) -> Result<()> {
+    info!(target: "info", project = %layout.project_name, "channel config show started");
+    let path = project_channel_registry_path(layout);
+    let config = load_project_channel_registry(layout)?;
+    let summary = summarize_channel_registry(&config)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "ok",
+            "path": path,
+            "project": layout.project_name,
+            "registry": summary,
+        }))
+        .map_err(|err| VesselError::Config(err.to_string()))?
+    );
+    Ok(())
+}
+
 async fn extract_preview(
     url: String,
     kind: InputKind,
@@ -500,8 +698,28 @@ async fn extract_preview(
 async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()> {
     info!(target: "info", channel = %args.channel, "channel add started");
     ensure_project_layout(layout).await?;
+    let category = args.category.ok_or_else(|| {
+        VesselError::Config("channel add requires --category <name>".to_owned())
+    })?;
+    let category = category.trim().to_owned();
+    if category.is_empty() {
+        return Err(VesselError::Config(
+            "channel add requires a non-empty category".to_owned(),
+        ));
+    }
+    let normalized_channel = normalize_channel_entry(&args.channel)?;
+    let mut registry = load_project_channel_registry(layout)?;
+    for (existing_category, spec) in &registry.channels.categories {
+        if spec.channels.iter().any(|channel| channel.trim() == normalized_channel) {
+            if existing_category != &category {
+                return Err(VesselError::Config(format!(
+                    "channel is already assigned to category '{existing_category}'"
+                )));
+            }
+        }
+    }
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
-    let input = parse_channel_input(&args.channel);
+    let input = parse_channel_input(&normalized_channel);
     debug!(target: "extractor", input = %input.raw, "resolving channel metadata");
     let channel = extract_channel(&input).await?;
     vessel_logging::progress(
@@ -513,16 +731,32 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
         ),
     );
     store.upsert_channel_snapshot(&channel).await?;
-    store.add_tracked_channel(&channel).await?;
+    store.add_tracked_channel(&channel, &category).await?;
+    let category_entry = registry
+        .channels
+        .categories
+        .entry(category.clone())
+        .or_insert_with(ChannelCategoryConfig::default);
+    if !category_entry
+        .channels
+        .iter()
+        .any(|configured| configured.trim() == normalized_channel)
+    {
+        category_entry.channels.push(normalized_channel);
+    }
+    registry.dataset.project = Some(layout.project_name.clone());
+    save_project_channel_registry(layout, &registry)?;
 
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "status": "tracked",
+            "category": category,
             "channel_id": channel.channel_id,
             "handle": channel.handle,
             "title": channel.title,
             "url": channel.url,
+            "registry_path": project_channel_registry_path(layout),
         }))
         .map_err(|err| VesselError::Config(err.to_string()))?
     );
@@ -532,14 +766,26 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
 async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<()> {
     info!(target: "info", project = %layout.project_name, full = args.full, metrics_only = args.metrics_only, "channel sync started");
     ensure_project_layout(layout).await?;
+    let registry = load_project_channel_registry(layout)?;
+    let configured_targets = resolve_configured_channels(&registry, &args.categories)?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
-    let tracked_channels = store.list_tracked_channels().await?;
+    let selected_categories = if args.categories.is_empty() {
+        registry.channels.categories.keys().cloned().collect::<Vec<_>>()
+    } else {
+        args.categories.clone()
+    };
     vessel_logging::progress(
         "info",
-        format!("syncing {} tracked channel{}", tracked_channels.len(), if tracked_channels.len() == 1 { "" } else { "s" }),
+        format!(
+            "syncing {} configured channel{} across {} categor{}",
+            configured_targets.len(),
+            if configured_targets.len() == 1 { "" } else { "s" },
+            selected_categories.len(),
+            if selected_categories.len() == 1 { "y" } else { "ies" }
+        ),
     );
-    if tracked_channels.is_empty() {
-        warn!(target: "warn", "channel sync has no tracked channels");
+    if configured_targets.is_empty() {
+        warn!(target: "warn", "channel sync has no configured channels");
     }
     let run_id = store.start_run("channel sync").await?;
     let started_at = OffsetDateTime::now_utc();
@@ -552,7 +798,9 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
         let mut summary = serde_json::json!({
             "status": "synced",
             "run_id": run_id,
-            "tracked_channels": tracked_channels.len(),
+            "tracked_channels": configured_targets.len(),
+            "matched_channels": configured_targets.len(),
+            "selected_categories": selected_categories,
             "channels_processed": 0usize,
             "channel_history_inserted": 0usize,
             "channel_metrics_inserted": 0usize,
@@ -578,8 +826,8 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
             }
         });
 
-        for tracked in tracked_channels {
-            match sync_one_channel(&store, &tracked, &args, run_id, started_at, layout).await {
+        for target in configured_targets {
+            match sync_one_channel(&store, &target, &args, run_id, started_at, layout).await {
                 Ok(channel_report) => {
                     increment_summary(&mut summary, "channels_processed", 1);
                     increment_summary(
@@ -649,7 +897,7 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
                         .record_attempt(FetchAttempt {
                             run_id,
                             target_kind: "channel".to_owned(),
-                            target_external_id: tracked.channel_id.clone(),
+                            target_external_id: target.input.clone(),
                             status: AttemptStatus::Failed,
                             started_at,
                             finished_at: OffsetDateTime::now_utc(),
@@ -1102,24 +1350,23 @@ struct ChannelSyncReport {
 
 async fn sync_one_channel(
     store: &vessel_store::SqliteStore,
-    tracked: &StoredTrackedChannel,
+    tracked: &ConfiguredChannelTarget,
     args: &ChannelSyncArgs,
     run_id: uuid::Uuid,
     started_at: OffsetDateTime,
     layout: &RuntimeLayout,
 ) -> Result<ChannelSyncReport> {
-    let input = parse_channel_input(&tracked.canonical_url);
+    let input = parse_channel_input(&tracked.input);
     vessel_logging::progress(
         "channel",
         format!(
-            "{}: refresh started",
-            tracked
-                .title
-                .clone()
-                .unwrap_or_else(|| tracked.channel_id.clone())
+            "[{}] {}: refresh started",
+            tracked.category,
+            tracked.input
         ),
     );
     let mut channel = extract_channel(&input).await?;
+    store.add_tracked_channel(&channel, &tracked.category).await?;
     debug!(
         target: "channel",
         channel_id = %channel.channel_id,
@@ -1839,4 +2086,55 @@ fn print_unsupported_report_with_details(
 
 fn binary_available(name: &str) -> bool {
     Command::new(name).arg("-version").output().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_configured_channels;
+    use vessel_core::{ChannelCategoryConfig, Config};
+
+    #[test]
+    fn configured_channels_select_all_or_requested_categories() {
+        let mut config = Config::default();
+        config.channels.categories.insert(
+            "gaming".to_owned(),
+            ChannelCategoryConfig {
+                channels: vec!["https://www.youtube.com/@one".to_owned()],
+            },
+        );
+        config.channels.categories.insert(
+            "news".to_owned(),
+            ChannelCategoryConfig {
+                channels: vec!["https://www.youtube.com/@two".to_owned()],
+            },
+        );
+
+        let all = resolve_configured_channels(&config, &[]).expect("all categories");
+        assert_eq!(all.len(), 2);
+
+        let gaming =
+            resolve_configured_channels(&config, &["gaming".to_owned()]).expect("gaming");
+        assert_eq!(gaming.len(), 1);
+        assert_eq!(gaming[0].category, "gaming");
+    }
+
+    #[test]
+    fn configured_channels_reject_duplicates_across_categories() {
+        let mut config = Config::default();
+        config.channels.categories.insert(
+            "gaming".to_owned(),
+            ChannelCategoryConfig {
+                channels: vec!["https://www.youtube.com/@same".to_owned()],
+            },
+        );
+        config.channels.categories.insert(
+            "news".to_owned(),
+            ChannelCategoryConfig {
+                channels: vec!["https://www.youtube.com/@same".to_owned()],
+            },
+        );
+
+        let err = resolve_configured_channels(&config, &[]).expect_err("duplicate should fail");
+        assert!(err.to_string().contains("more than one category"));
+    }
 }

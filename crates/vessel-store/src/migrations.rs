@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS channels (
 
 CREATE TABLE IF NOT EXISTS tracked_channels (
     channel_id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
     canonical_url TEXT NOT NULL,
     handle TEXT,
     title TEXT,
