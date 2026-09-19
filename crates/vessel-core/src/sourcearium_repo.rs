@@ -75,6 +75,28 @@ pub fn discover_youtube_sources(sourcearium_root: &Path) -> Result<Vec<Sourceari
 }
 
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExistingSourceariumArtifact {
+    pub path: PathBuf,
+    pub artifact: SourceariumArtifactV1,
+}
+
+pub fn load_youtube_transcript_artifact(
+    source: &SourceariumYoutubeSource,
+    video_id: &str,
+) -> Result<Option<ExistingSourceariumArtifact>> {
+    let artifact_id = format!("youtube:video:{video_id}:transcript");
+    let transcripts_dir = source.source_dir.join("transcripts");
+    let Some(path) = find_artifact_path(&transcripts_dir, &artifact_id)? else {
+        return Ok(None);
+    };
+    let raw = fs::read_to_string(&path)?;
+    let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw).map_err(|error| {
+        corpus_error(format!("{}: {error}", path.display()))
+    })?;
+    Ok(Some(ExistingSourceariumArtifact { path, artifact }))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterializeStatus {
     Created,
