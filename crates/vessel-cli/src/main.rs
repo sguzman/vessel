@@ -33,7 +33,7 @@ use vessel_store::{init_sqlite_database, init_sqlite_database_path};
 #[command(
     name = "vessel",
     version,
-    about = "Rust-native media extraction and metadata ledger"
+    about = "Rust-native media acquisition and Sourcearium text materialization"
 )]
 struct Cli {
     #[arg(long = "project", global = true)]
