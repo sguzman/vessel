@@ -3,6 +3,7 @@ pub mod error;
 pub mod events;
 pub mod models;
 pub mod sourcearium;
+pub mod sourcearium_repo;
 pub mod transcript;
 
 pub use config::{
@@ -16,6 +17,7 @@ pub use sourcearium::{
     YoutubeChannelPolicyV1, YoutubeSelectionPolicyV1, YoutubeSourcePolicyV1,
     YoutubeTranscriptPolicyV1,
 };
+pub use sourcearium_repo::{SourceariumYoutubeSource, discover_youtube_sources};
 pub use transcript::{
     TranscriptCandidate, TranscriptDerivation, TranscriptProvider, TranscriptRequest,
     TranscriptSegment,
