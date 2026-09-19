@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::models::{ChannelMetadata, VideoMetadata};
 use crate::{
     AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, TranscriptCandidate,
-    TranscriptDerivation, VesselError, YoutubeSourcePolicyV1,
+    TranscriptDerivation, VesselError, VideoSelection, YoutubeSourcePolicyV1,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,9 +297,7 @@ pub fn plan_sourcearium_prune(sourcearium_root: &Path) -> Result<SourceariumPrun
         paths.sort();
 
         for path in paths {
-            if !path.is_file()
-                || path.extension().and_then(|value| value.to_str()) != Some("md")
-            {
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
                 continue;
             }
             if path
@@ -324,8 +322,7 @@ pub fn plan_sourcearium_prune(sourcearium_root: &Path) -> Result<SourceariumPrun
                 )));
             }
 
-            let expected_artifact_id =
-                format!("youtube:video:{}:transcript", artifact.source.id);
+            let expected_artifact_id = format!("youtube:video:{}:transcript", artifact.source.id);
             if artifact.artifact_id != expected_artifact_id {
                 return Err(corpus_error(format!(
                     "{} has artifact_id {:?}; expected {:?}",
@@ -391,8 +388,7 @@ pub fn apply_sourcearium_prune(
         let raw = fs::read_to_string(&canonical_path)?;
         let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
             .map_err(|error| corpus_error(format!("{}: {error}", canonical_path.display())))?;
-        if artifact.artifact_id != candidate.artifact_id
-            || artifact.source.id != candidate.video_id
+        if artifact.artifact_id != candidate.artifact_id || artifact.source.id != candidate.video_id
         {
             return Err(corpus_error(format!(
                 "refusing stale prune candidate {}; artifact identity changed",
@@ -1103,13 +1099,14 @@ exclude_video_ids = [{exclude}]
             candidate.video_id == "old-video" && candidate.reason == "before_cutoff"
         }));
         assert!(plan.candidates.iter().any(|candidate| {
-            candidate.video_id == "explicit-drop"
-                && candidate.reason == "explicitly_excluded"
+            candidate.video_id == "explicit-drop" && candidate.reason == "explicitly_excluded"
         }));
-        assert!(!plan
-            .candidates
-            .iter()
-            .any(|candidate| candidate.video_id == "explicit-keep"));
+        assert!(
+            !plan
+                .candidates
+                .iter()
+                .any(|candidate| candidate.video_id == "explicit-keep")
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }
