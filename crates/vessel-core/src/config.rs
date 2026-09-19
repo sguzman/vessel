@@ -296,7 +296,12 @@ mod tests {
         assert_eq!(layout.project_name, "alpha");
         assert_eq!(layout.project_root, PathBuf::from("/workspace/demo/.cache/vessel/alpha"));
         assert_eq!(layout.database_path, layout.project_root.join("vessel.sqlite"));
-        assert!(layout.database_url.ends_with(".cache/vessel/alpha/vessel.sqlite"));
+        assert!(
+            layout
+                .database_url
+                .replace('\\', "/")
+                .ends_with(".cache/vessel/alpha/vessel.sqlite")
+        );
         assert_eq!(
             layout.download_output,
             layout
