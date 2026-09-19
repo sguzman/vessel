@@ -42,7 +42,7 @@ These capabilities should not force future work to continue the old parity campa
 5. Integrate existing subtitle acquisition into the provider chain.
 6. Add CPU-first local ASR fallback.
 7. Make update idempotent and non-destructive.
-8. Add explicit prune/dry-run behavior.
+8. Add explicit safe prune behavior. Preview is already implemented separately from pruning.
 9. Harden provenance, replacement rules, and transcript verification.
 10. Generalize media-source support only where it materially improves corpus acquisition.
 
@@ -52,10 +52,10 @@ These capabilities should not force future work to continue the old parity campa
 | --- | --- | --- |
 | 10 | Sourcearium Artifact Contract | Completed |
 | 11 | Sourcearium YouTube Policy | Completed |
-| 12 | Transcript Provider Abstraction | Planned |
-| 13 | Sourcearium Serializer + Validator | Planned |
-| 14 | `vessel update` Reconcile Loop | Planned |
-| 15 | Subtitle Provider Integration | Planned |
+| 12 | Transcript Provider Abstraction | Completed |
+| 13 | Sourcearium Serializer + Validator | Completed |
+| 14 | `vessel update` Reconcile Loop | In Progress |
+| 15 | Subtitle Provider Integration | Completed |
 | 16 | Local ASR Fallback | In Progress |
 | 17 | Safe Prune + Replacement Semantics | Planned |
 | 18 | Additional Media Sources | Deferred |
@@ -91,7 +91,9 @@ See [Sourcearium YouTube Policy Contract](youtube-policy-contract.md).
 
 ## Milestone 12: Transcript Provider Abstraction
 
-Create one internal transcript resolution interface that can represent:
+Status: **Completed**
+
+Implemented one internal transcript resolution interface that can represent:
 
 - creator subtitles
 - platform automatic captions
@@ -103,7 +105,9 @@ Do not make Sourcearium serialization depend directly on YouTube response struct
 
 ## Milestone 13: Sourcearium Serializer + Validator
 
-Implement deterministic artifact serialization and validation against Sourcearium v1.
+Status: **Completed**
+
+Implemented deterministic artifact serialization and validation against Sourcearium v1.
 
 Acceptance intent:
 
@@ -131,6 +135,9 @@ Implemented:
 - upgrade probes for weaker existing transcripts are operationally throttled (30 days by default) instead of refetching every historical watch page on every run
 - exact resolved publication dates are cached as replaceable operational state, so date-cutoff exclusions do not require repeated watch-page fetches
 - no operational cursor state is written to Sourcearium policy or artifacts
+- offline corpus inventory through `vessel inventory`
+- opt-in per-video decision reporting through `--report-items`
+- non-materializing preview mode through `--preview`; preview skips corpus writes and local ASR while allowing disposable cache warming
 
 Target:
 
@@ -150,7 +157,9 @@ Acceptance intent:
 
 ## Milestone 15: Subtitle Provider Integration
 
-Reuse existing subtitle/caption extraction machinery behind the transcript-provider interface.
+Status: **Completed**
+
+Existing subtitle/caption extraction is normalized behind the transcript-provider path.
 
 Provider precedence:
 
@@ -185,10 +194,11 @@ Implemented additionally:
 - one Whisper model is loaded lazily and reused across ASR fallbacks in the same update run
 - validator is available through `vessel validate` for offline corpus checks
 
-Remaining:
+Remaining before calling the ASR path proven:
 
-- optional acceleration
-- real-world corpus smoke test against a configured Sourcearium channel
+- real-world local-ASR smoke test against a configured Sourcearium video
+
+Optional acceleration is deferred until CPU behavior is proven and performance justifies it.
 
 ## Milestone 17: Safe Prune
 

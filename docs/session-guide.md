@@ -126,16 +126,40 @@ When a task implementation is wrong:
 - issue a corrected bounded task
 - do not rewrite the project mission to justify the mistaken implementation
 
+## Current Implementation State
+
+The following are already implemented and CI-tested:
+
+- Sourcearium artifact schema v1 types and deterministic serializer
+- YouTube source-policy v1 parser/validator
+- creator-subtitle and automatic-caption provider path
+- pure-Rust Candle/Whisper local ASR fallback
+- CPU-first ASR with lazy model reuse
+- Sourcearium materializer with atomic replacement and downgrade protection
+- offline `vessel validate`
+- offline `vessel inventory`
+- Sourcearium-driven `vessel update`
+- persistent disposable crawl/backlog/cutoff/probe state
+- limited-run backlog safety
+- upgrade-probe cadence for weaker transcripts
+- metadata-only no-churn semantics
+- opt-in per-video decision reporting
+- non-materializing `--preview` mode
+- Linux full-workspace CI
+- native Windows path/store/ASR tests and CLI compile
+- locked Cargo dependency resolution
+
 ## Current Next Work
 
-External schema/policy design is complete.
+The architecture is no longer the main uncertainty.
 
-The highest-value implementation sequence is:
+Highest-value next steps:
 
-1. transcript-provider abstraction
-2. Sourcearium v1 serializer + validator
-3. YouTube policy parser + validator
-4. `vessel update` reconciliation skeleton
-5. existing subtitle acquisition integration
-6. local ASR fallback
-7. safe prune semantics
+1. exercise `--preview --max-videos 3` against the first real configured channel
+2. materialize a deliberately tiny real corpus
+3. inspect creator-caption, auto-caption, and local-ASR behavior
+4. rerun and verify no-op Git behavior
+5. implement explicit safe prune semantics
+6. consider optional ASR acceleration only after CPU behavior is proven
+
+Do not add more generalized acquisition abstractions before real Sourcearium data demonstrates a need.

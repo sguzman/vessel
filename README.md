@@ -13,8 +13,26 @@ discover -> select -> materialize text -> preserve provenance
 The intended steady-state workflow is:
 
 ```bash
+vessel inventory
+vessel validate
 vessel update
 ```
+
+Before materializing a newly configured source, use preview mode:
+
+```bash
+vessel update --preview --max-videos 3
+```
+
+Preview performs real discovery and caption probing but does not write Sourcearium artifacts or run local ASR. It may warm disposable operational state under `.cache/vessel/`.
+
+For diagnostic runs:
+
+```bash
+vessel update --max-videos 3 --report-items
+```
+
+`--report-items` adds per-video decision traces without changing materialization semantics.
 
 Vessel now targets **Sourcearium artifact schema v1** for durable corpus output.
 
@@ -73,9 +91,12 @@ Local ASR is CPU-first by default. GPU acceleration is optional.
 Normal update:
 
 - discovers the desired media set
+- persists disposable crawl/backlog state outside the corpus
 - materializes missing text
 - improves an artifact when a stronger representation becomes available
+- throttles weaker-transcript upgrade probes operationally
 - produces no durable diff on a no-op refresh
+- avoids metadata-only transcript churn
 - never deletes already acquired text merely because policy narrowed or upstream disappeared
 
 Destructive cleanup belongs behind explicit operations such as:
@@ -125,7 +146,7 @@ Requirements:
 - `ffmpeg` for current media/postprocessing paths
 
 ```bash
-cargo build --release
+cargo build --release --locked
 target/release/vessel --help
 ```
 
