@@ -94,18 +94,26 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
     let html = fetch_text(&url).await?;
     let initial_data = extract_embedded_json(&html, "var ytInitialData = ")
         .or_else(|| extract_embedded_json(&html, "ytInitialData = "));
-    let mut player_response = extract_embedded_json(&html, "var ytInitialPlayerResponse = ")
-        .or_else(|| extract_embedded_json(&html, "ytInitialPlayerResponse = "))
-        .ok_or_else(|| {
-            VesselError::Extractor(
-                "failed to locate ytInitialPlayerResponse in watch page".to_owned(),
-            )
-        })?;
+    let mut player_response =
+        extract_embedded_json(&html, "var ytInitialPlayerResponse = ")
+            .or_else(|| extract_embedded_json(&html, "ytInitialPlayerResponse = "));
     if let Some(api_key) = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"") {
         if let Ok(android_response) = fetch_android_player_response(&api_key, &video_id).await {
-            merge_player_fallback(&mut player_response, &android_response);
+            match player_response.as_mut() {
+                Some(watch_response) => {
+                    merge_player_fallback(watch_response, &android_response);
+                }
+                None => {
+                    player_response = Some(android_response);
+                }
+            }
         }
     }
+    let player_response = player_response.ok_or_else(|| {
+        VesselError::Extractor(
+            "youtube watch page and Android fallback exposed no player response".to_owned(),
+        )
+    })?;
     let video = parse_video_metadata(
         &player_response,
         initial_data.as_ref(),
