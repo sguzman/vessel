@@ -112,3 +112,23 @@ Precondition check failed.
 So, on the tested GitHub-hosted IP, a caption-first direct-transcript path does not bypass the access restriction.
 
 Do not add a `get_transcript` fallback merely because older examples show the endpoint working. Re-evaluate it only against the actual target environment or after independently verified upstream behavior changes.
+
+## Target-Environment Preflight
+
+Before running a real Sourcearium update on a new network/environment, test one known public video through Vessel's normal extractor:
+
+```powershell
+vessel info https://www.youtube.com/watch?v=uiGIbdrQjbI
+```
+
+This is a connectivity/access preflight, not corpus QA.
+
+If it succeeds, proceed to the normal Sourcearium preview:
+
+```powershell
+vessel update --preview --max-videos 3
+```
+
+If it returns the explicit YouTube anti-bot gate error, stop before materialization and treat access/authentication as a separate design problem.
+
+The sampled URL is only a stable acceptance probe; Sourcearium policy remains the authority for which sources belong in the corpus.
