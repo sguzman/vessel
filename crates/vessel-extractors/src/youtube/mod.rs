@@ -102,9 +102,7 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
             )
         })?;
     if let Some(api_key) = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"") {
-        if let Ok(android_response) =
-            fetch_player_response(&api_key, &video_id, "ANDROID", "20.10.38").await
-        {
+        if let Ok(android_response) = fetch_android_player_response(&api_key, &video_id).await {
             merge_streaming_data(&mut player_response, &android_response);
         }
     }
@@ -343,24 +341,35 @@ fn extract_config_string(input: &str, marker: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
-async fn fetch_player_response(
-    api_key: &str,
-    video_id: &str,
-    client_name: &str,
-    client_version: &str,
-) -> Result<Value> {
-    let client = http_client()?;
+async fn fetch_android_player_response(api_key: &str, video_id: &str) -> Result<Value> {
+    const CLIENT_NAME: &str = "ANDROID";
+    const CLIENT_ID: &str = "3";
+    const CLIENT_VERSION: &str = "21.26.364";
+    const USER_AGENT: &str =
+        "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip";
+
+    let client = Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|err| VesselError::Extractor(format!("http client build failed: {err}")))?;
     let response = client
         .post(format!(
             "https://www.youtube.com/youtubei/v1/player?key={api_key}"
         ))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("X-YouTube-Client-Name", CLIENT_ID)
+        .header("X-YouTube-Client-Version", CLIENT_VERSION)
         .json(&serde_json::json!({
             "videoId": video_id,
             "context": {
                 "client": {
-                    "clientName": client_name,
-                    "clientVersion": client_version,
+                    "clientName": CLIENT_NAME,
+                    "clientVersion": CLIENT_VERSION,
+                    "androidSdkVersion": 30,
+                    "userAgent": USER_AGENT,
+                    "osName": "Android",
+                    "osVersion": "11",
+                    "hl": "en",
                 }
             }
         }))
@@ -502,7 +511,7 @@ fn parse_video_metadata(
     let details = raw
         .get("videoDetails")
         .and_then(Value::as_object)
-        .ok_or_else(|| VesselError::Extractor("player response missing videoDetails".to_owned()))?;
+        .ok_or_else(|| missing_video_details_error(raw))?;
     let microformat = raw
         .get("microformat")
         .and_then(|v| v.get("playerMicroformatRenderer"));
@@ -571,6 +580,38 @@ fn parse_video_metadata(
         fetched_at,
         raw: raw.clone(),
     })
+}
+
+fn missing_video_details_error(raw: &Value) -> VesselError {
+    let status = raw
+        .get("playabilityStatus")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    let reason = raw
+        .get("playabilityStatus")
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str);
+
+    if status == Some("LOGIN_REQUIRED")
+        && reason
+            .is_some_and(|reason| reason.to_ascii_lowercase().contains("bot"))
+    {
+        return VesselError::Extractor(format!(
+            "youtube anti-bot gate blocked player metadata: {}",
+            reason.unwrap_or("sign-in required")
+        ));
+    }
+
+    if let Some(status) = status {
+        return VesselError::Extractor(match reason {
+            Some(reason) => format!(
+                "youtube player did not expose videoDetails: status={status}, reason={reason}"
+            ),
+            None => format!("youtube player did not expose videoDetails: status={status}"),
+        });
+    }
+
+    VesselError::Extractor("youtube player response missing videoDetails".to_owned())
 }
 
 fn parse_formats(streaming_data: &Value) -> Vec<MediaFormat> {
@@ -1627,8 +1668,8 @@ mod tests {
     use super::{
         append_unique_channel_videos, collect_channel_video_refs, extract_embedded_json,
         find_next_comment_continuation,
-        merge_streaming_data, parse_channel_metadata, parse_comment_page, parse_compact_count,
-        parse_video_id_from_url, parse_video_metadata,
+        merge_streaming_data, missing_video_details_error, parse_channel_metadata,
+        parse_comment_page, parse_compact_count, parse_video_id_from_url, parse_video_metadata,
     };
     use std::collections::HashSet;
 
@@ -1673,6 +1714,36 @@ mod tests {
         assert_eq!(video.upload_date.as_deref(), Some("2024-01-01"));
         assert_eq!(video.formats.len(), 1);
         assert_eq!(video.thumbnails.len(), 1);
+    }
+
+    #[test]
+    fn reports_youtube_anti_bot_gate_instead_of_missing_video_details() {
+        let raw = serde_json::json!({
+            "playabilityStatus": {
+                "status": "LOGIN_REQUIRED",
+                "reason": "Sign in to confirm you’re not a bot"
+            }
+        });
+
+        let error = missing_video_details_error(&raw);
+        let message = error.to_string();
+        assert!(message.contains("anti-bot gate"));
+        assert!(message.contains("Sign in to confirm"));
+    }
+
+    #[test]
+    fn reports_non_bot_playability_failure_with_status_and_reason() {
+        let raw = serde_json::json!({
+            "playabilityStatus": {
+                "status": "ERROR",
+                "reason": "This video is unavailable"
+            }
+        });
+
+        let error = missing_video_details_error(&raw);
+        let message = error.to_string();
+        assert!(message.contains("status=ERROR"));
+        assert!(message.contains("This video is unavailable"));
     }
 
     #[test]
