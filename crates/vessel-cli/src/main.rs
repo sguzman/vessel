@@ -3132,7 +3132,7 @@ mod tests {
         resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
     };
     use vessel_core::models::InputKind;
-    use vessel_core::{ChannelCategoryConfig, Config};
+    use vessel_core::{ChannelCategoryConfig, Config, VesselError};
 
     #[test]
     fn configured_channels_select_all_or_requested_categories() {
