@@ -88,11 +88,7 @@ impl WhisperCandleBackend {
             })
             .collect::<Vec<_>>();
 
-        candidate_from_segments(
-            &self.config.model,
-            Some(result.language),
-            segments,
-        )
+        candidate_from_segments(&self.config.model, Some(result.language), segments)
     }
 }
 

@@ -11,6 +11,165 @@ use crate::{
     TranscriptDerivation, VesselError, YoutubeSourcePolicyV1,
 };
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceariumValidationReport {
+    pub valid: bool,
+    pub policies_validated: usize,
+    pub artifacts_validated: usize,
+    pub errors: Vec<String>,
+}
+
+pub fn validate_sourcearium_repository(
+    sourcearium_root: &Path,
+) -> Result<SourceariumValidationReport> {
+    let sources_root = sourcearium_root.join("sources");
+    if !sources_root.is_dir() {
+        return Err(corpus_error(format!(
+            "Sourcearium sources directory is missing: {}",
+            sources_root.display()
+        )));
+    }
+
+    let mut errors = Vec::new();
+    let policies_validated = match discover_youtube_sources(sourcearium_root) {
+        Ok(sources) => sources.len(),
+        Err(error) => {
+            errors.push(error.to_string());
+            0
+        }
+    };
+
+    let mut files = Vec::new();
+    collect_files(&sources_root, &mut files)?;
+    files.sort();
+
+    let mut artifact_paths_by_id = BTreeMap::<String, PathBuf>::new();
+    let mut artifacts_validated = 0usize;
+
+    for path in files {
+        if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+            let extension = extension.to_ascii_lowercase();
+            if matches!(extension.as_str(), "pdf" | "epub" | "doc" | "docx") {
+                errors.push(format!(
+                    "forbidden binary document format under sources/: {}",
+                    path.display()
+                ));
+                continue;
+            }
+        }
+
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                errors.push(format!("{}: not valid UTF-8 text: {error}", path.display()));
+                continue;
+            }
+        };
+
+        let (artifact, body) = match SourceariumArtifactV1::parse_markdown(&raw) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                errors.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+
+        if let Some(previous) =
+            artifact_paths_by_id.insert(artifact.artifact_id.clone(), path.clone())
+        {
+            errors.push(format!(
+                "duplicate Sourcearium artifact_id {:?}: {} and {}",
+                artifact.artifact_id,
+                previous.display(),
+                path.display()
+            ));
+        }
+
+        if let Err(error) = validate_artifact_body(&artifact, &body) {
+            errors.push(format!("{}: {error}", path.display()));
+            continue;
+        }
+
+        artifacts_validated += 1;
+    }
+
+    Ok(SourceariumValidationReport {
+        valid: errors.is_empty(),
+        policies_validated,
+        artifacts_validated,
+        errors,
+    })
+}
+
+fn collect_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files(&path, output)?;
+        } else {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact_body(artifact: &SourceariumArtifactV1, body: &str) -> Result<()> {
+    if artifact.kind != "transcript" {
+        return Ok(());
+    }
+
+    if body.trim().is_empty() {
+        return Err(corpus_error("transcript body must not be empty"));
+    }
+
+    if artifact.representation.timestamps != Some(true) {
+        return Ok(());
+    }
+
+    let mut previous = None;
+    let mut segments = 0usize;
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let seconds = parse_sourcearium_timestamp(line).ok_or_else(|| {
+            corpus_error(format!(
+                "timestamped transcript line does not begin with [HH:MM:SS]: {line:?}"
+            ))
+        })?;
+        if let Some(previous) = previous
+            && seconds < previous
+        {
+            return Err(corpus_error("transcript timestamps must be monotonic"));
+        }
+        previous = Some(seconds);
+        segments += 1;
+    }
+
+    if segments == 0 {
+        return Err(corpus_error("timestamped transcript contains no segments"));
+    }
+
+    Ok(())
+}
+
+fn parse_sourcearium_timestamp(line: &str) -> Option<u64> {
+    let close = line.find(']')?;
+    if !line.starts_with('[') || close < 8 {
+        return None;
+    }
+    let timestamp = &line[1..close];
+    let mut parts = timestamp.split(':');
+    let hours = parts.next()?.parse::<u64>().ok()?;
+    let minutes = parts.next()?.parse::<u64>().ok()?;
+    let seconds = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+    Some(hours * 3_600 + minutes * 60 + seconds)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceariumYoutubeSource {
     pub source_dir: PathBuf,
