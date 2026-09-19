@@ -253,7 +253,7 @@ impl YoutubeSourcePolicyV1 {
             )));
         }
 
-        require_token("source_key", &self.source_key, true)?;
+        require_source_key("source_key", &self.source_key)?;
         require_nonempty("channel.input", &self.channel.input)?;
         validate_optional_nonempty("channel.id", self.channel.id.as_deref())?;
         validate_optional_nonempty("channel.handle", self.channel.handle.as_deref())?;
@@ -384,20 +384,29 @@ fn validate_optional_nonempty(field: &str, value: Option<&str>) -> Result<()> {
 }
 
 fn require_token(field: &str, value: &str, allow_hyphen: bool) -> Result<()> {
-    if !is_token(value, allow_hyphen) {
+    if !is_token(value, allow_hyphen, false) {
         return Err(corpus_error(format!(
-            "{field} must be a lowercase identifier, got {value:?}"
+            "{field} must be a lowercase identifier beginning with a letter, got {value:?}"
         )));
     }
     Ok(())
 }
 
-fn is_token(value: &str, allow_hyphen: bool) -> bool {
+fn require_source_key(field: &str, value: &str) -> Result<()> {
+    if !is_token(value, true, true) {
+        return Err(corpus_error(format!(
+            "{field} must be a lowercase source key, got {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_token(value: &str, allow_hyphen: bool, allow_leading_digit: bool) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+    if !first.is_ascii_lowercase() && !(allow_leading_digit && first.is_ascii_digit()) {
         return false;
     }
     chars.all(|ch| {
@@ -538,6 +547,26 @@ include_video_ids = ["old-important"]
                 .expect("selection"),
             VideoSelection::BeforeCutoff
         );
+    }
+
+    #[test]
+    fn core_tokens_must_begin_with_a_letter_but_source_keys_may_begin_with_digits() {
+        let mut artifact = base_artifact();
+        artifact.kind = "1transcript".into();
+        assert!(artifact.validate().is_err());
+
+        let policy = YoutubeSourcePolicyV1::parse_toml(
+            r#"
+schema = 1
+family = "youtube"
+source_key = "2026-archive"
+
+[channel]
+input = "@example"
+"#,
+        )
+        .expect("numeric source-key prefix is valid");
+        assert_eq!(policy.source_key, "2026-archive");
     }
 
     #[test]
