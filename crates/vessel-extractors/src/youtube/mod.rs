@@ -1,3 +1,7 @@
+mod transcript;
+
+pub use transcript::{acquire_best_caption_candidate, parse_youtube_json3};
+
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
