@@ -357,14 +357,8 @@ pub fn materialize_youtube_transcript(
             });
         }
 
-        let (current_artifact, current_body) =
-            SourceariumArtifactV1::parse_markdown(&current)?;
-        if same_textual_representation(
-            &current_artifact,
-            &current_body,
-            &artifact,
-            &body,
-        ) {
+        let (current_artifact, current_body) = SourceariumArtifactV1::parse_markdown(&current)?;
+        if same_textual_representation(&current_artifact, &current_body, &artifact, &body) {
             return Ok(MaterializeResult {
                 path,
                 status: MaterializeStatus::Unchanged,
