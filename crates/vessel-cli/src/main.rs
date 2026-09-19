@@ -819,8 +819,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         &video.video_id,
                         "would_require_local_asr",
                         serde_json::json!({
-                            "model": asr_config.model,
-                            "device": asr_config.device,
+                            "model": &asr_config.model,
+                            "device": &asr_config.device,
                         }),
                     );
                     continue;
