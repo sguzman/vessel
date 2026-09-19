@@ -2815,9 +2815,11 @@ fn binary_available(name: &str) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use time::OffsetDateTime;
+
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
-        resolve_asr_config, resolve_configured_channels,
+        resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
