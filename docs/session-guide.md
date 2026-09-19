@@ -53,35 +53,41 @@ Make Vessel a reliable media-to-text materialization engine for maintaining Sour
 
 Do not optimize a task for broad `yt-dlp` parity unless the task explicitly requires it.
 
-## Frozen External Contract
+## Frozen External Contracts
 
-Sourcearium artifact schema v1 is already defined.
+Sourcearium has two current frozen contracts relevant to Vessel:
 
-Before touching corpus materialization, read:
+1. artifact schema v1
+2. YouTube source policy v1
+
+Before corpus-facing implementation, read:
 
 ```text
 docs/sourcearium-contract.md
+docs/youtube-policy-contract.md
 ```
 
 A grunt must not:
 
 - invent new Sourcearium v1 core fields
+- invent new YouTube policy v1 fields
 - collapse source/representation/acquisition provenance
-- serialize operational refresh telemetry into corpus files
+- serialize operational refresh telemetry into Sourcearium
+- move execution throttles into durable corpus policy
 - weaken non-destructive update semantics
-- change Sourcearium schema semantics to simplify Vessel implementation
+- change Sourcearium semantics to simplify Vessel implementation
 
-If v1 is insufficient, escalate to the director rather than silently extending it.
+If an external contract is insufficient, escalate to the director.
 
 ## Session Start Checklist
 
 Before implementation:
 
 1. Read `docs/charter.md`.
-2. Read `docs/sourcearium-contract.md` for corpus-facing work.
+2. Read both Sourcearium contracts for corpus-facing work.
 3. Read the relevant roadmap milestone.
-4. Identify whether the task changes durable Sourcearium semantics or only Vessel operational state.
-5. State the bounded implementation target.
+4. State the bounded implementation target.
+5. Identify durable Sourcearium semantics versus Vessel operational state.
 6. Preserve unrelated working capabilities.
 
 ## Engineering Rules
@@ -90,13 +96,14 @@ Before implementation:
 - No silent Python/`yt-dlp` fallback for supported native behavior.
 - Preserve provenance.
 - Keep Sourcearium output readable without Vessel.
-- Keep operational refresh state out of durable artifacts.
+- Keep operational refresh state out of durable artifacts/policy.
 - Repeated runs should be idempotent.
-- Sourcearium serialization should be deterministic.
+- Serialize Sourcearium deterministically.
+- Validate policy before network work.
 - Validate candidate artifacts before replacement.
 - Replace durable artifacts atomically.
 - Normal update must be non-destructive.
-- Do not introduce a generalized DSL where a small explicit schema is enough.
+- Do not introduce a generalized DSL where the frozen policy is enough.
 - Do not create new time-series collection merely because fields are available.
 - Tests should target reconciliation, idempotency, provenance, deterministic output, and safe failure.
 
@@ -121,14 +128,14 @@ When a task implementation is wrong:
 
 ## Current Next Work
 
-The corpus artifact contract is no longer an open design task.
+External schema/policy design is complete.
 
-The highest-value implementation sequence is now:
+The highest-value implementation sequence is:
 
-1. corpus/channel policy schema
-2. transcript-provider abstraction
-3. Sourcearium v1 serializer + validator
+1. transcript-provider abstraction
+2. Sourcearium v1 serializer + validator
+3. YouTube policy parser + validator
 4. `vessel update` reconciliation skeleton
-5. subtitle acquisition integration
+5. existing subtitle acquisition integration
 6. local ASR fallback
 7. safe prune semantics

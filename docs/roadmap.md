@@ -35,11 +35,11 @@ These capabilities should not force future work to continue the old parity campa
 
 ## New Priority Order
 
-1. Define corpus contract and scope invariants.
-2. Define a small declarative source-selection policy.
-3. Implement desired-set reconciliation behind `vessel update`.
-4. Implement transcript-provider precedence.
-5. Materialize Sourcearium schema-v1 artifacts.
+1. Define external Sourcearium contracts.
+2. Implement transcript-provider abstraction.
+3. Implement Sourcearium v1 serializer + validator.
+4. Implement desired-set reconciliation behind `vessel update`.
+5. Integrate existing subtitle acquisition into the provider chain.
 6. Add CPU-first local ASR fallback.
 7. Make update idempotent and non-destructive.
 8. Add explicit prune/dry-run behavior.
@@ -50,17 +50,17 @@ These capabilities should not force future work to continue the old parity campa
 
 | Milestone | Title | Status |
 | --- | --- | --- |
-| 10 | Sourcearium Contract | Completed |
-| 11 | Corpus Policy | Planned |
-| 12 | `vessel update` Reconcile Loop | Planned |
-| 13 | Transcript Provider Chain | Planned |
-| 14 | Sourcearium Materializer | Planned |
-| 15 | Local ASR Fallback | Planned |
-| 16 | Safe Prune + Replacement Semantics | Planned |
-| 17 | Provenance Hardening | Planned |
+| 10 | Sourcearium Artifact Contract | Completed |
+| 11 | Sourcearium YouTube Policy | Completed |
+| 12 | Transcript Provider Abstraction | Planned |
+| 13 | Sourcearium Serializer + Validator | Planned |
+| 14 | `vessel update` Reconcile Loop | Planned |
+| 15 | Subtitle Provider Integration | Planned |
+| 16 | Local ASR Fallback | Planned |
+| 17 | Safe Prune + Replacement Semantics | Planned |
 | 18 | Additional Media Sources | Deferred |
 
-## Milestone 10: Sourcearium Contract
+## Milestone 10: Sourcearium Artifact Contract
 
 Completed:
 
@@ -70,23 +70,51 @@ Completed:
 - stable artifact identity defined
 - deterministic serialization requirement defined
 - atomic candidate validation/replacement requirement defined
-- YouTube-specific extension namespace reserved
 
 See [Sourcearium Contract](sourcearium-contract.md).
 
-## Milestone 11: Corpus Policy
+## Milestone 11: Sourcearium YouTube Policy
 
-Initial supported policy:
+Completed:
 
-- named source/channel
-- publication cutoff
+- policy owned by Sourcearium
+- one `source.toml` per YouTube source directory
+- stable local `source_key`
+- inclusive publication cutoff
 - explicit include IDs
 - explicit exclude IDs
-- ASR fallback enabled/disabled
+- transcript provider permissions
+- execution throttles excluded from durable policy
+- include/exclude conflict defined as invalid
 
-Avoid title-regex/query-language complexity until real usage requires it.
+See [Sourcearium YouTube Policy Contract](youtube-policy-contract.md).
 
-## Milestone 12: Update Reconcile Loop
+## Milestone 12: Transcript Provider Abstraction
+
+Create one internal transcript resolution interface that can represent:
+
+- creator subtitles
+- platform automatic captions
+- local ASR
+
+It must return normalized transcript data plus enough provenance to materialize Sourcearium v1.
+
+Do not make Sourcearium serialization depend directly on YouTube response structs.
+
+## Milestone 13: Sourcearium Serializer + Validator
+
+Implement deterministic artifact serialization and validation against Sourcearium v1.
+
+Acceptance intent:
+
+- stable TOML field order
+- stable body rendering
+- no-op serialization byte-equivalent
+- local ASR requires engine/model
+- transcript timestamp presence explicit
+- validate before replacement
+
+## Milestone 14: Update Reconcile Loop
 
 Target:
 
@@ -96,36 +124,25 @@ vessel update
 
 Acceptance intent:
 
-- discover selected upstream material
-- compare against already materialized Sourcearium artifacts
-- acquire missing items
-- avoid duplicate work
-- avoid Git churn when nothing meaningful changed
-- never delete existing corpus material
+- scan Sourcearium YouTube policies
+- validate policies before network work
+- discover desired video sets
+- compare desired set against materialized artifact identities
+- acquire missing/upgradeable representations
+- never delete material during update
+- no Git churn on no-op runs
 
-## Milestone 13: Transcript Provider Chain
+## Milestone 15: Subtitle Provider Integration
 
-Default precedence:
+Reuse existing subtitle/caption extraction machinery behind the transcript-provider interface.
+
+Provider precedence:
 
 1. creator subtitles
 2. platform automatic captions
 3. local ASR
 
-Provider provenance must survive normalization.
-
-## Milestone 14: Sourcearium Materializer
-
-Emit Sourcearium schema-v1 Markdown files with:
-
-- stable artifact identity
-- source identity
-- representation provenance
-- acquisition provenance
-- timestamped readable text
-- deterministic serialization
-- validation before atomic replacement
-
-## Milestone 15: Local ASR
+## Milestone 16: Local ASR
 
 Requirements:
 
@@ -136,7 +153,7 @@ Requirements:
 - temporary audio cleanup after success
 - engine/model provenance captured in Sourcearium v1
 
-## Milestone 16: Safe Prune
+## Milestone 17: Safe Prune
 
 `update` is non-destructive.
 
@@ -151,7 +168,7 @@ Upstream deletion or policy narrowing must not silently erase acquired research 
 
 ## Deprioritized Work
 
-The following are not current success criteria:
+Not current success criteria:
 
 - option-level `yt-dlp` parity
 - external downloader parity
@@ -160,5 +177,3 @@ The following are not current success criteria:
 - subscriber/view time-series collection
 - PostgreSQL support
 - generic non-media text acquisition
-
-They may be revisited only if they directly support the corpus mission.
