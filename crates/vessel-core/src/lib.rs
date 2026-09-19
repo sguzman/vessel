@@ -17,7 +17,10 @@ pub use sourcearium::{
     YoutubeChannelPolicyV1, YoutubeSelectionPolicyV1, YoutubeSourcePolicyV1,
     YoutubeTranscriptPolicyV1,
 };
-pub use sourcearium_repo::{SourceariumYoutubeSource, discover_youtube_sources};
+pub use sourcearium_repo::{
+    MaterializeResult, MaterializeStatus, SourceariumYoutubeSource, discover_youtube_sources,
+    materialize_youtube_transcript,
+};
 pub use transcript::{
     TranscriptCandidate, TranscriptDerivation, TranscriptProvider, TranscriptRequest,
     TranscriptSegment,
