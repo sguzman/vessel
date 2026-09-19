@@ -82,6 +82,8 @@ struct UpdateArgs {
     asr_device: Option<String>,
     #[arg(long = "asr-language")]
     asr_language: Option<String>,
+    #[arg(long = "upgrade-check-days", default_value_t = 30)]
+    upgrade_check_days: u64,
 }
 
 #[derive(Debug, Args)]
@@ -367,6 +369,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "explicitly_excluded": 0,
             "outside_date_policy": 0,
             "already_strongest": 0,
+            "existing_unmanaged": 0,
+            "upgrade_check_deferred": 0,
+            "upgrade_checks_completed": 0,
             "created": 0,
             "updated": 0,
             "unchanged": 0,
@@ -593,15 +598,42 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     increment_summary(&mut summary, "outside_date_policy", 1);
                     continue;
                 }
-                VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {
-                    if existing.as_ref().is_some_and(|existing| {
-                        existing.artifact.representation.derivation == "creator_subtitles"
-                    }) {
+                VideoSelection::Included
+                | VideoSelection::ExplicitlyIncluded
+                | VideoSelection::PublicationDateUnresolved => {}
+            }
+
+            if let Some(existing_artifact) = existing.as_ref() {
+                match existing_artifact.artifact.representation.derivation.as_str() {
+                    "creator_subtitles" => {
                         increment_summary(&mut summary, "already_strongest", 1);
                         continue;
                     }
+                    "platform_auto_caption" | "local_asr" => {
+                        let last_probe = match operational_store
+                            .load_transcript_probe_at(&video_ref.video_id)
+                            .await
+                        {
+                            Ok(last_probe) => last_probe,
+                            Err(error) => {
+                                push_update_error(&mut summary, &video_ref.video_id, error);
+                                None
+                            }
+                        };
+                        if !transcript_upgrade_probe_due(
+                            last_probe.as_deref(),
+                            args.upgrade_check_days,
+                            OffsetDateTime::now_utc(),
+                        ) {
+                            increment_summary(&mut summary, "upgrade_check_deferred", 1);
+                            continue;
+                        }
+                    }
+                    _ => {
+                        increment_summary(&mut summary, "existing_unmanaged", 1);
+                        continue;
+                    }
                 }
-                VideoSelection::PublicationDateUnresolved => {}
             }
 
             if args
@@ -677,6 +709,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 (candidate, None)
             } else if existing.is_some() {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
+                match operational_store
+                    .mark_transcript_probed(&video.video_id)
+                    .await
+                {
+                    Ok(()) => increment_summary(&mut summary, "upgrade_checks_completed", 1),
+                    Err(error) => push_update_error(&mut summary, &video.video_id, error),
+                }
                 continue;
             } else if policy.transcripts.allow_local_asr {
                 increment_summary(&mut summary, "requires_local_asr", 1);
@@ -719,6 +758,14 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         }
                     }
 
+                    match operational_store
+                        .mark_transcript_probed(&video.video_id)
+                        .await
+                    {
+                        Ok(()) => increment_summary(&mut summary, "upgrade_checks_completed", 1),
+                        Err(error) => push_update_error(&mut summary, &video.video_id, error),
+                    }
+
                     if let Some(cache_dir) = asr_cache_dir {
                         increment_summary(&mut summary, "local_asr_materialized", 1);
                         if let Err(error) = tokio::fs::remove_dir_all(&cache_dir).await {
@@ -752,6 +799,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "sources": source_reports,
         "remote_videos_processed": remote_videos_processed,
         "max_videos": args.max_videos,
+        "upgrade_check_days": args.upgrade_check_days,
         "limit_reached": limit_reached,
         "local_asr_implemented": true,
         "asr": {
@@ -768,6 +816,32 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             .map_err(|error| VesselError::Config(error.to_string()))?
     );
     Ok(())
+}
+
+fn transcript_upgrade_probe_due(
+    last_probed_at: Option<&str>,
+    interval_days: u64,
+    now: OffsetDateTime,
+) -> bool {
+    if interval_days == 0 {
+        return true;
+    }
+
+    let Some(last_probed_at) = last_probed_at else {
+        return true;
+    };
+    let Ok(last_probed_at) = OffsetDateTime::parse(
+        last_probed_at,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return true;
+    };
+
+    let elapsed_seconds = now
+        .unix_timestamp()
+        .saturating_sub(last_probed_at.unix_timestamp());
+    elapsed_seconds >= 0
+        && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
 }
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
@@ -2781,11 +2855,29 @@ mod tests {
             asr_model: Some("base".into()),
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
+            upgrade_check_days: 30,
         };
         let config = resolve_asr_config(&args);
         assert_eq!(config.model, "base");
         assert_eq!(config.device, "cpu");
         assert_eq!(config.language.as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn transcript_upgrade_probe_cadence_is_operational() {
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(40);
+        let recent = (now - time::Duration::days(5))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let old = (now - time::Duration::days(35))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        assert!(!transcript_upgrade_probe_due(Some(&recent), 30, now));
+        assert!(transcript_upgrade_probe_due(Some(&old), 30, now));
+        assert!(transcript_upgrade_probe_due(None, 30, now));
+        assert!(transcript_upgrade_probe_due(Some(&recent), 0, now));
+        assert!(transcript_upgrade_probe_due(Some("invalid"), 30, now));
     }
 
     #[test]

@@ -236,4 +236,9 @@ CREATE TABLE IF NOT EXISTS channel_video_membership (
     discovered_at TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id, discovered_from_tab)
 );
+
+CREATE TABLE IF NOT EXISTS transcript_probe_state (
+    video_id TEXT PRIMARY KEY,
+    last_probed_at TEXT NOT NULL
+);
 "#;

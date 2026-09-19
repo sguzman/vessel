@@ -419,6 +419,36 @@ ORDER BY MAX(discovered_at) DESC, video_id ASC
             .collect())
     }
 
+    pub async fn load_transcript_probe_at(&self, video_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT last_probed_at FROM transcript_probe_state WHERE video_id = ?1",
+        )
+        .bind(video_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))
+    }
+
+    pub async fn mark_transcript_probed(&self, video_id: &str) -> Result<()> {
+        let probed_at = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        sqlx::query(
+            r#"
+INSERT INTO transcript_probe_state (video_id, last_probed_at)
+VALUES (?1, ?2)
+ON CONFLICT(video_id) DO UPDATE SET
+    last_probed_at = excluded.last_probed_at
+"#,
+        )
+        .bind(video_id)
+        .bind(probed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
     pub async fn aggregate_channel_video_view_count(&self, channel_id: &str) -> Result<Option<u64>> {
         let total = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT SUM(view_count) FROM videos WHERE channel_id = ?1",
@@ -1938,6 +1968,48 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.iter().any(|id| id == "video-a"));
         assert!(ids.iter().any(|id| id == "video-b"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn transcript_probe_state_is_operational_and_replaceable() {
+        let path = temp_db_path("transcript-probe");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+
+        assert_eq!(
+            store
+                .load_transcript_probe_at("video-probe")
+                .await
+                .expect("initial probe"),
+            None
+        );
+
+        store
+            .mark_transcript_probed("video-probe")
+            .await
+            .expect("mark probe");
+        let first = store
+            .load_transcript_probe_at("video-probe")
+            .await
+            .expect("load probe")
+            .expect("probe exists");
+        assert!(!first.is_empty());
+
+        store
+            .mark_transcript_probed("video-probe")
+            .await
+            .expect("remark probe");
+        assert!(
+            store
+                .load_transcript_probe_at("video-probe")
+                .await
+                .expect("reload probe")
+                .is_some()
+        );
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));

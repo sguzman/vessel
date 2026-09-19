@@ -48,7 +48,7 @@ When `vessel update` operates directly on a Sourcearium checkout, its disposable
     └── <video-id>/
 ```
 
-The SQLite database stores crawl cursors and other acquisition memory. It is explicitly not corpus authority.
+The SQLite database stores crawl cursors, discovered backlog, transcript upgrade-probe timestamps, and other acquisition memory. It is explicitly not corpus authority.
 
 Deleting `.cache/vessel/` must not delete or invalidate existing Sourcearium artifacts; it only makes future acquisition more expensive because Vessel must rediscover state.
 
