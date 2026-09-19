@@ -89,3 +89,26 @@ A player-access failure must not:
 - cause prune candidates
 
 Normal failure leaves durable corpus authority unchanged.
+
+## Direct Transcript Endpoint
+
+The 2026-09-19 ContraPoints acceptance also tested whether Vessel could avoid player metadata for captioned videos by calling YouTube's Innertube `get_transcript` endpoint directly.
+
+The diagnostic generated transcript parameters for the sampled video and tried:
+
+- WEB + manual English
+- WEB + auto-generated English
+- Android + manual English
+- Android + auto-generated English
+
+All four hosted-runner requests returned:
+
+```text
+HTTP 400
+FAILED_PRECONDITION
+Precondition check failed.
+```
+
+So, on the tested GitHub-hosted IP, a caption-first direct-transcript path does not bypass the access restriction.
+
+Do not add a `get_transcript` fallback merely because older examples show the endpoint working. Re-evaluate it only against the actual target environment or after independently verified upstream behavior changes.
