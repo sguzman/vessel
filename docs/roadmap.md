@@ -126,6 +126,7 @@ Implemented:
 - completed backfills refresh first pages without recrawling full history
 - discovered channel/video membership stays operational rather than entering corpus files
 - membership table is used as a persistent processing backlog, so `--max-videos` cannot strand older discovered videos
+- cursor advancement is gated on durable membership persistence, so an operational-state failure causes safe rediscovery instead of silent loss
 - no operational cursor state is written to Sourcearium policy or artifacts
 
 Target:

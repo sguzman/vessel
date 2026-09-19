@@ -476,6 +476,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         summary["tabs_resumed_from_checkpoint"] =
             serde_json::json!(crawl.tabs_resumed_from_checkpoint);
 
+        let mut membership_persisted = true;
         for video_ref in &crawl.videos {
             if let Err(error) = operational_store
                 .record_channel_video_membership(
@@ -485,38 +486,51 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 )
                 .await
             {
+                membership_persisted = false;
                 push_update_error(&mut summary, &video_ref.video_id, error);
             }
         }
+        summary["operational_membership_persisted"] =
+            serde_json::Value::Bool(membership_persisted);
 
-        for cursor in &crawl.cursors {
-            if let Err(error) = operational_store
-                .save_channel_tab_cursor(
-                    &channel.channel_id,
-                    &cursor.tab_name,
-                    cursor.continuation_token.as_deref(),
-                    cursor.visitor_data.as_deref(),
-                    cursor.delegated_session_id.as_deref(),
-                    cursor.last_seen_published_at.as_deref(),
-                    cursor.backfill_complete,
-                )
-                .await
-            {
-                summary["errors"]
-                    .as_array_mut()
-                    .expect("errors array")
-                    .push(serde_json::json!({"message": error.to_string()}));
+        let mut cursor_state_advanced = false;
+        if membership_persisted {
+            let mut cursor_writes_succeeded = true;
+            for cursor in &crawl.cursors {
+                if let Err(error) = operational_store
+                    .save_channel_tab_cursor(
+                        &channel.channel_id,
+                        &cursor.tab_name,
+                        cursor.continuation_token.as_deref(),
+                        cursor.visitor_data.as_deref(),
+                        cursor.delegated_session_id.as_deref(),
+                        cursor.last_seen_published_at.as_deref(),
+                        cursor.backfill_complete,
+                    )
+                    .await
+                {
+                    cursor_writes_succeeded = false;
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                }
+            }
+
+            if cursor_writes_succeeded {
+                cursor_state_advanced = true;
+                if let Err(error) = operational_store
+                    .mark_tracked_channel_synced(&channel.channel_id)
+                    .await
+                {
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                }
             }
         }
-        if let Err(error) = operational_store
-            .mark_tracked_channel_synced(&channel.channel_id)
-            .await
-        {
-            summary["errors"]
-                .as_array_mut()
-                .expect("errors array")
-                .push(serde_json::json!({"message": error.to_string()}));
-        }
+        summary["cursor_state_advanced"] = serde_json::Value::Bool(cursor_state_advanced);
 
         let backlog_ids = match operational_store
             .list_channel_video_ids(&channel.channel_id)
