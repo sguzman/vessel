@@ -171,3 +171,12 @@ Vessel began as a Rust-native, replacement-oriented `yt-dlp` project with local 
 That work remains useful infrastructure, but the project north star is now:
 
 > maintain selected media-derived text as durable, provenance-preserving Sourcearium material.
+
+
+## YouTube Access Boundaries
+
+YouTube may allow channel discovery while bot-gating player requests, especially from hosted/cloud IP ranges.
+
+Vessel distinguishes this from parser failure and does not silently inject cookies, browser automation, PO-token providers, or yt-dlp fallback.
+
+See [YouTube Access Boundaries](docs/youtube-access.md).

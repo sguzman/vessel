@@ -194,6 +194,12 @@ Implemented additionally:
 - one Whisper model is loaded lazily and reused across ASR fallbacks in the same update run
 - validator is available through `vessel validate` for offline corpus checks
 
+Real-source acceptance discovered and documented:
+
+- hosted-runner YouTube anti-bot gate can block player metadata while channel crawl still succeeds
+- Vessel now classifies this as an access/environment failure rather than generic missing metadata
+- authentication/attestation is an explicit deferred design boundary, not a silent fallback
+
 Remaining before calling the ASR path proven:
 
 - real-world local-ASR smoke test against a configured Sourcearium video
