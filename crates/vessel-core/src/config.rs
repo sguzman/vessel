@@ -303,12 +303,12 @@ mod tests {
                 .ends_with(".cache/vessel/alpha/vessel.sqlite")
         );
         assert_eq!(
-            layout.download_output,
+            layout.download_output.replace('\\', "/"),
             layout
                 .project_root
                 .join("downloads/%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s")
                 .to_string_lossy()
-                .into_owned()
+                .replace('\\', "/")
         );
     }
 
