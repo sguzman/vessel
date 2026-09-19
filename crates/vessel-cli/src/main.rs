@@ -93,6 +93,8 @@ struct UpdateArgs {
     upgrade_check_days: u64,
     #[arg(long = "report-items")]
     report_items: bool,
+    #[arg(long)]
+    preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -345,6 +347,7 @@ async fn main() -> Result<()> {
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
+    let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
     } else {
@@ -394,9 +397,10 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "unresolved_no_provider": 0,
             "errors": [],
         });
-        if args.report_items {
+        if report_items {
             summary["items"] = serde_json::json!([]);
         }
+        summary["preview"] = serde_json::Value::Bool(args.preview);
 
         if !policy.transcripts.enabled {
             summary["status"] = serde_json::Value::String("transcripts_disabled".into());
@@ -617,7 +621,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     increment_summary(&mut summary, "explicitly_excluded", 1);
                     push_update_item(
                         &mut summary,
-                        args.report_items,
+                        report_items,
                         &video_ref.video_id,
                         "excluded_explicit",
                         serde_json::json!({}),
@@ -628,7 +632,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     increment_summary(&mut summary, "outside_date_policy", 1);
                     push_update_item(
                         &mut summary,
-                        args.report_items,
+                        report_items,
                         &video_ref.video_id,
                         "excluded_before_cutoff",
                         serde_json::json!({"published_on": known_date}),
@@ -646,7 +650,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         increment_summary(&mut summary, "already_strongest", 1);
                         push_update_item(
                             &mut summary,
-                            args.report_items,
+                            report_items,
                             &video_ref.video_id,
                             "already_strongest",
                             serde_json::json!({"derivation": "creator_subtitles"}),
@@ -672,7 +676,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                             increment_summary(&mut summary, "upgrade_check_deferred", 1);
                             push_update_item(
                                 &mut summary,
-                                args.report_items,
+                                report_items,
                                 &video_ref.video_id,
                                 "upgrade_check_deferred",
                                 serde_json::json!({"derivation": existing_artifact.artifact.representation.derivation}),
@@ -684,7 +688,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         increment_summary(&mut summary, "existing_unmanaged", 1);
                         push_update_item(
                             &mut summary,
-                            args.report_items,
+                            report_items,
                             &video_ref.video_id,
                             "existing_unmanaged",
                             serde_json::json!({"derivation": existing_artifact.artifact.representation.derivation}),
@@ -763,7 +767,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     increment_summary(&mut summary, "unresolved_date", 1);
                     push_update_item(
                         &mut summary,
-                        args.report_items,
+                        report_items,
                         &video.video_id,
                         "unresolved_publication_date",
                         serde_json::json!({}),
@@ -787,21 +791,40 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
                 push_update_item(
                     &mut summary,
-                    args.report_items,
+                    report_items,
                     &video.video_id,
-                    "preserved_without_better_caption",
+                    if args.preview {
+                        "would_preserve_without_better_caption"
+                    } else {
+                        "preserved_without_better_caption"
+                    },
                     serde_json::json!({}),
                 );
-                match operational_store
-                    .mark_transcript_probed(&video.video_id)
-                    .await
-                {
-                    Ok(()) => increment_summary(&mut summary, "upgrade_checks_completed", 1),
-                    Err(error) => push_update_error(&mut summary, &video.video_id, error),
+                if !args.preview {
+                    match operational_store
+                        .mark_transcript_probed(&video.video_id)
+                        .await
+                    {
+                        Ok(()) => increment_summary(&mut summary, "upgrade_checks_completed", 1),
+                        Err(error) => push_update_error(&mut summary, &video.video_id, error),
+                    }
                 }
                 continue;
             } else if policy.transcripts.allow_local_asr {
                 increment_summary(&mut summary, "requires_local_asr", 1);
+                if args.preview {
+                    push_update_item(
+                        &mut summary,
+                        report_items,
+                        &video.video_id,
+                        "would_require_local_asr",
+                        serde_json::json!({
+                            "model": asr_config.model,
+                            "device": asr_config.device,
+                        }),
+                    );
+                    continue;
+                }
                 increment_summary(&mut summary, "local_asr_attempted", 1);
                 match acquire_local_asr_candidate(
                     &sourcearium_root,
@@ -824,13 +847,32 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 increment_summary(&mut summary, "unresolved_no_provider", 1);
                 push_update_item(
                     &mut summary,
-                    args.report_items,
+                    report_items,
                     &video.video_id,
                     "unresolved_no_provider",
                     serde_json::json!({}),
                 );
                 continue;
             };
+
+            if args.preview {
+                let existing_derivation = existing
+                    .as_ref()
+                    .map(|artifact| artifact.artifact.representation.derivation.as_str());
+                let action =
+                    preview_materialization_action(existing_derivation, candidate.derivation);
+                push_update_item(
+                    &mut summary,
+                    report_items,
+                    &video.video_id,
+                    action,
+                    serde_json::json!({
+                        "candidate_derivation": candidate.derivation.as_str(),
+                        "language": candidate.language,
+                    }),
+                );
+                continue;
+            }
 
             match materialize_youtube_transcript(
                 &sourcearium_root,
@@ -864,7 +906,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     };
                     push_update_item(
                         &mut summary,
-                        args.report_items,
+                        report_items,
                         &video.video_id,
                         materialize_action,
                         serde_json::json!({
@@ -934,6 +976,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "remote_videos_processed": remote_videos_processed,
         "max_videos": args.max_videos,
         "upgrade_check_days": args.upgrade_check_days,
+        "preview": args.preview,
         "limit_reached": limit_reached,
         "local_asr_implemented": true,
         "asr": {
@@ -950,6 +993,26 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             .map_err(|error| VesselError::Config(error.to_string()))?
     );
     Ok(())
+}
+
+fn preview_materialization_action(
+    existing_derivation: Option<&str>,
+    candidate: vessel_core::TranscriptDerivation,
+) -> &'static str {
+    match existing_derivation {
+        None => "would_create",
+        Some("local_asr")
+            if candidate.quality_rank() > vessel_core::TranscriptDerivation::LocalAsr.quality_rank() =>
+        {
+            "would_upgrade"
+        }
+        Some("platform_auto_caption")
+            if candidate == vessel_core::TranscriptDerivation::CreatorSubtitles =>
+        {
+            "would_upgrade"
+        }
+        Some(_) => "would_compare_content",
+    }
 }
 
 fn transcript_upgrade_probe_due(
@@ -2988,8 +3051,8 @@ mod tests {
 
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
-        push_update_item, resolve_asr_config, resolve_configured_channels,
-        transcript_upgrade_probe_due,
+        preview_materialization_action, push_update_item, resolve_asr_config,
+        resolve_configured_channels, transcript_upgrade_probe_due,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
@@ -3029,6 +3092,7 @@ mod tests {
             asr_language: Some("es".into()),
             upgrade_check_days: 30,
             report_items: false,
+            preview: false,
         };
         let config = resolve_asr_config(&args);
         assert_eq!(config.model, "base");
@@ -3051,6 +3115,37 @@ mod tests {
         assert!(transcript_upgrade_probe_due(None, 30, now));
         assert!(transcript_upgrade_probe_due(Some(&recent), 0, now));
         assert!(transcript_upgrade_probe_due(Some("invalid"), 30, now));
+    }
+
+    #[test]
+    fn preview_actions_distinguish_create_upgrade_and_compare() {
+        use vessel_core::TranscriptDerivation;
+
+        assert_eq!(
+            preview_materialization_action(None, TranscriptDerivation::CreatorSubtitles),
+            "would_create"
+        );
+        assert_eq!(
+            preview_materialization_action(
+                Some("local_asr"),
+                TranscriptDerivation::PlatformAutoCaption,
+            ),
+            "would_upgrade"
+        );
+        assert_eq!(
+            preview_materialization_action(
+                Some("platform_auto_caption"),
+                TranscriptDerivation::CreatorSubtitles,
+            ),
+            "would_upgrade"
+        );
+        assert_eq!(
+            preview_materialization_action(
+                Some("platform_auto_caption"),
+                TranscriptDerivation::PlatformAutoCaption,
+            ),
+            "would_compare_content"
+        );
     }
 
     #[test]
