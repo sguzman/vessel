@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -517,7 +518,38 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 .push(serde_json::json!({"message": error.to_string()}));
         }
 
-        for video_ref in crawl.videos {
+        let backlog_ids = match operational_store
+            .list_channel_video_ids(&channel.channel_id)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+                Vec::new()
+            }
+        };
+        summary["known_backlog"] = serde_json::Value::from(backlog_ids.len() as u64);
+
+        let mut candidates = crawl.videos;
+        let mut seen_video_ids = candidates
+            .iter()
+            .map(|video| video.video_id.clone())
+            .collect::<HashSet<_>>();
+        for video_id in backlog_ids {
+            if seen_video_ids.insert(video_id.clone()) {
+                candidates.push(ChannelVideoRef {
+                    video_id,
+                    tab_name: "operational_backlog".into(),
+                    title: None,
+                    published_at: None,
+                });
+            }
+        }
+
+        for video_ref in candidates {
             let existing = match load_youtube_transcript_artifact(&source, &video_ref.video_id) {
                 Ok(existing) => existing,
                 Err(error) => {

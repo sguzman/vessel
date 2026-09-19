@@ -398,6 +398,27 @@ VALUES (?1, ?2, ?3, ?4)
         Ok(())
     }
 
+    pub async fn list_channel_video_ids(&self, channel_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            r#"
+SELECT video_id
+FROM channel_video_membership
+WHERE channel_id = ?1
+GROUP BY video_id
+ORDER BY MAX(discovered_at) DESC, video_id ASC
+"#,
+        )
+        .bind(channel_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("video_id"))
+            .collect())
+    }
+
     pub async fn aggregate_channel_video_view_count(&self, channel_id: &str) -> Result<Option<u64>> {
         let total = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT SUM(view_count) FROM videos WHERE channel_id = ?1",
@@ -1884,6 +1905,39 @@ mod tests {
         assert_eq!(tracked[0].channel_id, "UC-tracked");
         assert_eq!(tracked[0].category, "gaming");
         assert_eq!(tracked[0].handle.as_deref(), Some("@tracked"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn channel_video_membership_can_drive_incremental_backlog() {
+        let path = temp_db_path("membership-backlog");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+
+        store
+            .record_channel_video_membership("UC-backlog", "video-a", "videos")
+            .await
+            .expect("record a");
+        store
+            .record_channel_video_membership("UC-backlog", "video-b", "shorts")
+            .await
+            .expect("record b");
+        store
+            .record_channel_video_membership("UC-backlog", "video-a", "streams")
+            .await
+            .expect("record duplicate membership");
+
+        let ids = store
+            .list_channel_video_ids("UC-backlog")
+            .await
+            .expect("list ids");
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().any(|id| id == "video-a"));
+        assert!(ids.iter().any(|id| id == "video-b"));
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));

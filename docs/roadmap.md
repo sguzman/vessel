@@ -125,6 +125,7 @@ Implemented:
 - per-tab YouTube cursor reuse
 - completed backfills refresh first pages without recrawling full history
 - discovered channel/video membership stays operational rather than entering corpus files
+- membership table is used as a persistent processing backlog, so `--max-videos` cannot strand older discovered videos
 - no operational cursor state is written to Sourcearium policy or artifacts
 
 Target:
