@@ -52,3 +52,21 @@ jobs:
             crates/vessel-core/src/transcript.rs \
             crates/vessel-extractors/src/youtube/transcript.rs \
             crates/vessel-asr/src/lib.rs
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test path and corpus layers
+        run: cargo test -p vessel-core -p vessel-store -p vessel-asr --all-targets
+
+      - name: Compile native Windows CLI
+        run: cargo check -p vessel-cli
