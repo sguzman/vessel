@@ -47,14 +47,9 @@ pub async fn acquire_best_caption_candidate(
             continue;
         };
 
-        return fetch_caption_candidate(
-            base_url,
-            &track.language,
-            derivation,
-            &http_client()?,
-        )
-        .await
-        .map(Some);
+        return fetch_caption_candidate(base_url, &track.language, derivation, &http_client()?)
+            .await
+            .map(Some);
     }
 
     Ok(None)
@@ -115,9 +110,8 @@ async fn fetch_caption_candidate(
 }
 
 fn json3_url(base_url: &str) -> Result<Url> {
-    let mut url = Url::parse(base_url).map_err(|error| {
-        VesselError::Extractor(format!("invalid youtube caption URL: {error}"))
-    })?;
+    let mut url = Url::parse(base_url)
+        .map_err(|error| VesselError::Extractor(format!("invalid youtube caption URL: {error}")))?;
     let retained = url
         .query_pairs()
         .filter(|(key, _)| key != "fmt")
@@ -213,8 +207,8 @@ fn http_client() -> Result<Client> {
 
 #[cfg(test)]
 mod tests {
-    use vessel_core::models::{Availability, Platform};
     use time::OffsetDateTime;
+    use vessel_core::models::{Availability, Platform};
 
     use super::*;
 
@@ -254,9 +248,8 @@ mod tests {
           ]
         }"#;
 
-        let candidate =
-            parse_youtube_json3(raw, TranscriptDerivation::PlatformAutoCaption, "en")
-                .expect("parse captions");
+        let candidate = parse_youtube_json3(raw, TranscriptDerivation::PlatformAutoCaption, "en")
+            .expect("parse captions");
 
         assert_eq!(candidate.language.as_deref(), Some("en"));
         assert_eq!(candidate.segments.len(), 2);
@@ -318,7 +311,11 @@ mod tests {
     fn json3_url_replaces_existing_format_parameter() {
         let url = json3_url("https://example.test/timedtext?lang=en&fmt=vtt").expect("url");
         let pairs = url.query_pairs().collect::<Vec<_>>();
-        assert!(pairs.iter().any(|(key, value)| key == "lang" && value == "en"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "lang" && value == "en")
+        );
         assert_eq!(
             pairs
                 .iter()
