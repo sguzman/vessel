@@ -241,4 +241,10 @@ CREATE TABLE IF NOT EXISTS transcript_probe_state (
     video_id TEXT PRIMARY KEY,
     last_probed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS source_video_state (
+    video_id TEXT PRIMARY KEY,
+    channel_id TEXT,
+    published_on TEXT
+);
 "#;

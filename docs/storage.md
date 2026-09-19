@@ -48,7 +48,7 @@ When `vessel update` operates directly on a Sourcearium checkout, its disposable
     └── <video-id>/
 ```
 
-The SQLite database stores crawl cursors, discovered backlog, transcript upgrade-probe timestamps, and other acquisition memory. It is explicitly not corpus authority.
+The SQLite database stores crawl cursors, discovered backlog, resolved publication dates, transcript upgrade-probe timestamps, and other acquisition memory. It is explicitly not corpus authority.
 
 Sourcearium-local SQLite is opened through SQLx's filesystem-path API rather than by constructing a URL from the path. This is intentional for native Windows paths such as `C:\...\sourcearium\.cache\vessel\vessel.sqlite`.
 

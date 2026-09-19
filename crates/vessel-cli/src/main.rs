@@ -576,9 +576,20 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 }
             };
 
+            let cached_published_on = match operational_store
+                .load_source_video_published_on(&video_ref.video_id)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    push_update_error(&mut summary, &video_ref.video_id, error);
+                    None
+                }
+            };
             let known_date = existing
                 .as_ref()
-                .and_then(|existing| existing.artifact.source.published.as_deref());
+                .and_then(|existing| existing.artifact.source.published.as_deref())
+                .or(cached_published_on.as_deref());
 
             let initial_selection = match policy.select_video(&video_ref.video_id, known_date) {
                 Ok(selection) => selection,
@@ -672,6 +683,17 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             }
 
             let publication_date = normalize_update_publication_date(video.upload_date.as_deref());
+            if let Some(published_on) = publication_date.as_deref()
+                && let Err(error) = operational_store
+                    .save_source_video_published_on(
+                        &video.video_id,
+                        video.channel_id.as_deref(),
+                        published_on,
+                    )
+                    .await
+            {
+                push_update_error(&mut summary, &video.video_id, error);
+            }
             let selection = match policy.select_video(&video.video_id, publication_date.as_deref()) {
                 Ok(selection) => selection,
                 Err(error) => {

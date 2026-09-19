@@ -419,6 +419,43 @@ ORDER BY MAX(discovered_at) DESC, video_id ASC
             .collect())
     }
 
+    pub async fn load_source_video_published_on(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT published_on FROM source_video_state WHERE video_id = ?1",
+        )
+        .bind(video_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))
+    }
+
+    pub async fn save_source_video_published_on(
+        &self,
+        video_id: &str,
+        channel_id: Option<&str>,
+        published_on: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+INSERT INTO source_video_state (video_id, channel_id, published_on)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(video_id) DO UPDATE SET
+    channel_id = excluded.channel_id,
+    published_on = excluded.published_on
+"#,
+        )
+        .bind(video_id)
+        .bind(channel_id)
+        .bind(published_on)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+        Ok(())
+    }
+
     pub async fn load_transcript_probe_at(&self, video_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT last_probed_at FROM transcript_probe_state WHERE video_id = ?1",
@@ -2013,6 +2050,59 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.iter().any(|id| id == "video-a"));
         assert!(ids.iter().any(|id| id == "video-b"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn source_video_publication_date_is_cached_without_history() {
+        let path = temp_db_path("source-video-date");
+        let path_str = path.to_string_lossy().into_owned();
+        let (store, _) = init_sqlite_database(&path_str).await.expect("db init");
+
+        assert_eq!(
+            store
+                .load_source_video_published_on("video-date")
+                .await
+                .expect("initial date"),
+            None
+        );
+
+        store
+            .save_source_video_published_on(
+                "video-date",
+                Some("UC-date"),
+                "2024-01-02",
+            )
+            .await
+            .expect("save date");
+        assert_eq!(
+            store
+                .load_source_video_published_on("video-date")
+                .await
+                .expect("cached date")
+                .as_deref(),
+            Some("2024-01-02")
+        );
+
+        store
+            .save_source_video_published_on(
+                "video-date",
+                Some("UC-date"),
+                "2024-01-03",
+            )
+            .await
+            .expect("replace date");
+        assert_eq!(
+            store
+                .load_source_video_published_on("video-date")
+                .await
+                .expect("updated date")
+                .as_deref(),
+            Some("2024-01-03")
+        );
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));

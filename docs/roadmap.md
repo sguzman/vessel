@@ -128,6 +128,7 @@ Implemented:
 - membership table is used as a persistent processing backlog, so `--max-videos` cannot strand older discovered videos
 - cursor advancement is gated on durable membership persistence, so an operational-state failure causes safe rediscovery instead of silent loss
 - upgrade probes for weaker existing transcripts are operationally throttled (30 days by default) instead of refetching every historical watch page on every run
+- exact resolved publication dates are cached as replaceable operational state, so date-cutoff exclusions do not require repeated watch-page fetches
 - no operational cursor state is written to Sourcearium policy or artifacts
 
 Target:
