@@ -43,7 +43,7 @@ jobs:
       - name: Format active corpus files
         if: always()
         run: |
-          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr
+          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr -p vessel-store -p vessel-cli
           git diff --exit-code -- \
             crates/vessel-core/src/error.rs \
             crates/vessel-core/src/lib.rs \
@@ -51,7 +51,10 @@ jobs:
             crates/vessel-core/src/sourcearium_repo.rs \
             crates/vessel-core/src/transcript.rs \
             crates/vessel-extractors/src/youtube/transcript.rs \
-            crates/vessel-asr/src/lib.rs
+            crates/vessel-asr/src/lib.rs \
+            crates/vessel-store/src/sqlite.rs \
+            crates/vessel-store/src/lib.rs \
+            crates/vessel-cli/src/main.rs
 
   windows-smoke:
     runs-on: windows-latest

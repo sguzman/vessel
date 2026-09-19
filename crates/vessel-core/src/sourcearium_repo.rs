@@ -309,7 +309,10 @@ pub fn materialize_youtube_transcript(
     let mut extensions = BTreeMap::new();
     if let Some(handle) = channel.and_then(|channel| channel.handle.as_deref()) {
         let mut youtube = toml::Table::new();
-        youtube.insert("channel_handle".into(), toml::Value::String(handle.to_owned()));
+        youtube.insert(
+            "channel_handle".into(),
+            toml::Value::String(handle.to_owned()),
+        );
         extensions.insert("youtube".into(), youtube);
     }
 
@@ -677,8 +680,8 @@ input = "https://www.youtube.com/@{key}"
         let video = sample_video();
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
 
-        let first =
-            materialize_youtube_transcript(&root, &source, &video, None, &candidate).expect("first");
+        let first = materialize_youtube_transcript(&root, &source, &video, None, &candidate)
+            .expect("first");
         assert_eq!(first.status, MaterializeStatus::Created);
         assert!(
             first
@@ -686,8 +689,8 @@ input = "https://www.youtube.com/@{key}"
                 .ends_with("2026-09-18__abc123__a-useful-video.md")
         );
 
-        let second =
-            materialize_youtube_transcript(&root, &source, &video, None, &candidate).expect("second");
+        let second = materialize_youtube_transcript(&root, &source, &video, None, &candidate)
+            .expect("second");
         assert_eq!(second.status, MaterializeStatus::Unchanged);
         assert_eq!(second.path, first.path);
 
@@ -759,7 +762,8 @@ input = "https://www.youtube.com/@{key}"
         let source = discover_youtube_sources(&root).unwrap().remove(0);
         let video = sample_video();
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
-        let first = materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+        let first =
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
 
         let duplicate = source.source_dir.join("transcripts").join("duplicate.md");
         fs::copy(&first.path, &duplicate).unwrap();
