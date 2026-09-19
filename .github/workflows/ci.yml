@@ -34,11 +34,12 @@ jobs:
       - name: Format active corpus files
         if: always()
         run: |
-          cargo fmt -p vessel-core -p vessel-extractors
+          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr
           git diff --exit-code -- \
             crates/vessel-core/src/error.rs \
             crates/vessel-core/src/lib.rs \
             crates/vessel-core/src/sourcearium.rs \
             crates/vessel-core/src/sourcearium_repo.rs \
             crates/vessel-core/src/transcript.rs \
-            crates/vessel-extractors/src/youtube/transcript.rs
+            crates/vessel-extractors/src/youtube/transcript.rs \
+            crates/vessel-asr/src/lib.rs

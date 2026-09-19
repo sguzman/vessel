@@ -56,7 +56,7 @@ These capabilities should not force future work to continue the old parity campa
 | 13 | Sourcearium Serializer + Validator | Planned |
 | 14 | `vessel update` Reconcile Loop | Planned |
 | 15 | Subtitle Provider Integration | Planned |
-| 16 | Local ASR Fallback | Planned |
+| 16 | Local ASR Fallback | In Progress |
 | 17 | Safe Prune + Replacement Semantics | Planned |
 | 18 | Additional Media Sources | Deferred |
 
@@ -144,14 +144,25 @@ Provider precedence:
 
 ## Milestone 16: Local ASR
 
-Requirements:
+Status: **In Progress**
 
-- CPU-first normal operation
+Implemented:
+
+- dedicated `vessel-asr` crate
+- pure-Rust `whisper-candle-core` backend
+- CPU-first default
+- multilingual `small` default model
+- ASR result normalization into `TranscriptCandidate`
+- engine/model provenance for Sourcearium v1
+- backend kept outside Sourcearium and YouTube-specific layers
+
+Remaining:
+
+- acquire temporary best-audio input from the existing download subsystem
+- call ASR from `vessel update` when platform captions are unavailable
+- delete temporary audio after successful materialization
+- operational CLI/config overrides for model/device
 - optional acceleration
-- Rust-native/Rust-facing backend
-- backend abstraction
-- temporary audio cleanup after success
-- engine/model provenance captured in Sourcearium v1
 
 ## Milestone 17: Safe Prune
 

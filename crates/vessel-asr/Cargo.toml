@@ -1,0 +1,9 @@
+[package]
+name = "vessel-asr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+whisper-candle-core = "0.1.2"
+vessel-core = { path = "../vessel-core" }

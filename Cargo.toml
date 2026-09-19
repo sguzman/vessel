@@ -9,6 +9,7 @@ members = [
     "crates/vessel-formats",
     "crates/vessel-download",
     "crates/vessel-postprocess",
+    "crates/vessel-asr",
     "crates/vessel-testing",
 ]
 resolver = "3"
