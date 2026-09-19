@@ -757,10 +757,29 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             match selection {
                 VideoSelection::ExplicitlyExcluded => {
                     increment_summary(&mut summary, "explicitly_excluded", 1);
+                    push_update_item(
+                        &mut summary,
+                        report_items,
+                        &video.video_id,
+                        "excluded_explicit",
+                        serde_json::json!({
+                            "stage": "resolved_video",
+                        }),
+                    );
                     continue;
                 }
                 VideoSelection::BeforeCutoff => {
                     increment_summary(&mut summary, "outside_date_policy", 1);
+                    push_update_item(
+                        &mut summary,
+                        report_items,
+                        &video.video_id,
+                        "excluded_before_cutoff",
+                        serde_json::json!({
+                            "stage": "resolved_video",
+                            "published_on": publication_date,
+                        }),
+                    );
                     continue;
                 }
                 VideoSelection::PublicationDateUnresolved => {
