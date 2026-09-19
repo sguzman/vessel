@@ -12,6 +12,7 @@ use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
     VesselError, VideoSelection, discover_youtube_sources, load_config,
     load_youtube_transcript_artifact, materialize_youtube_transcript, resolve_runtime_layout,
+    validate_sourcearium_repository,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -50,6 +51,7 @@ struct Cli {
 enum Commands {
     Doctor,
     Update(UpdateArgs),
+    Validate(ValidateArgs),
     Config(ConfigCommand),
     Dataset(DatasetCommand),
     Channel(ChannelCommand),
@@ -59,6 +61,12 @@ enum Commands {
     Formats(UrlArg),
     Download(DownloadArgs),
     Plugin(PluginCommand),
+}
+
+#[derive(Debug, Args)]
+struct ValidateArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +291,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
         Commands::Update(args) => sourcearium_update(args).await,
+        Commands::Validate(args) => sourcearium_validate(args),
         Commands::Config(cmd) => match cmd.command {
             ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from, &layout),
         },
@@ -756,6 +765,29 @@ fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: Ves
             "video_id": video_id,
             "message": error.to_string(),
         }));
+}
+
+fn sourcearium_validate(args: ValidateArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+
+    let report = validate_sourcearium_repository(&sourcearium_root)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    if report.valid {
+        Ok(())
+    } else {
+        Err(VesselError::Corpus(format!(
+            "Sourcearium validation failed with {} error(s)",
+            report.errors.len()
+        )))
+    }
 }
 
 fn init_logging(config: &Config, cli: &Cli) -> Result<()> {

@@ -18,8 +18,9 @@ pub use sourcearium::{
     YoutubeTranscriptPolicyV1,
 };
 pub use sourcearium_repo::{
-    ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumYoutubeSource,
-    discover_youtube_sources, load_youtube_transcript_artifact, materialize_youtube_transcript,
+    ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumValidationReport,
+    SourceariumYoutubeSource, discover_youtube_sources, load_youtube_transcript_artifact,
+    materialize_youtube_transcript, validate_sourcearium_repository,
 };
 pub use transcript::{
     TranscriptCandidate, TranscriptDerivation, TranscriptProvider, TranscriptRequest,

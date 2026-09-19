@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use serde::Serialize;
 
 use crate::models::VideoMetadata;
 use crate::{
@@ -509,6 +512,75 @@ input = "https://www.youtube.com/@{key}"
         let second = materialize_youtube_transcript(&root, &source, &video, &weak).unwrap();
         assert_eq!(second.status, MaterializeStatus::PreservedStronger);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_validator_detects_duplicate_artifact_ids() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        let first = materialize_youtube_transcript(&root, &source, &video, &candidate).unwrap();
+
+        let duplicate = source.source_dir.join("transcripts").join("duplicate.md");
+        fs::copy(&first.path, &duplicate).unwrap();
+
+        let report = validate_sourcearium_repository(&root).unwrap();
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate Sourcearium artifact_id"))
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_validator_rejects_non_monotonic_timestamp_body() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, &candidate).unwrap();
+        let raw = fs::read_to_string(&materialized.path).unwrap();
+        let raw = raw.replace(
+            "[00:00:03] Hello corpus.",
+            "[00:00:10] Later.\n\n[00:00:09] Earlier.",
+        );
+        fs::write(&materialized.path, raw).unwrap();
+
+        let report = validate_sourcearium_repository(&root).unwrap();
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("timestamps must be monotonic"))
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_validator_rejects_binary_document_formats() {
+        let root = temp_sourcearium();
+        fs::write(root.join("sources").join("book.pdf"), b"%PDF").unwrap();
+
+        let report = validate_sourcearium_repository(&root).unwrap();
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("forbidden binary document format"))
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }

@@ -169,6 +169,7 @@ Remaining:
 - reuse one loaded model across many fallback videos in a single update run
 - optional acceleration
 - real-world corpus smoke test against a configured Sourcearium channel
+- validator is now available through `vessel validate` for offline corpus checks
 
 ## Milestone 17: Safe Prune
 
