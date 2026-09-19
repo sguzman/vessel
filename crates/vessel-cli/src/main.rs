@@ -346,6 +346,12 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     }
 
     let sources = discover_youtube_sources(&sourcearium_root)?;
+    let operational_db_path = sourcearium_root
+        .join(".cache")
+        .join("vessel")
+        .join("vessel.sqlite");
+    let operational_db_url = format!("sqlite://{}", operational_db_path.display());
+    let (operational_store, _) = init_sqlite_database(&operational_db_url).await?;
     let mut asr_backend: Option<WhisperCandleBackend> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
@@ -381,36 +387,77 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         }
 
         let channel_input = parse_sourcearium_channel_input(&policy.channel.input)?;
-
-        if let Some(expected_channel_id) = policy.channel.id.as_deref() {
-            match extract_channel(&channel_input).await {
-                Ok(channel) if channel.channel_id == expected_channel_id => {}
-                Ok(channel) => {
-                    summary["status"] = serde_json::Value::String("channel_identity_mismatch".into());
-                    summary["errors"]
-                        .as_array_mut()
-                        .expect("errors array")
-                        .push(serde_json::json!({
-                            "message": "resolved channel id does not match Sourcearium policy",
-                            "expected": expected_channel_id,
-                            "actual": channel.channel_id,
-                        }));
-                    source_reports.push(summary);
-                    continue;
-                }
-                Err(error) => {
-                    summary["status"] = serde_json::Value::String("channel_resolution_failed".into());
-                    summary["errors"]
-                        .as_array_mut()
-                        .expect("errors array")
-                        .push(serde_json::json!({"message": error.to_string()}));
-                    source_reports.push(summary);
-                    continue;
-                }
+        let channel = match extract_channel(&channel_input).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                summary["status"] = serde_json::Value::String("channel_resolution_failed".into());
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+                source_reports.push(summary);
+                continue;
             }
+        };
+
+        if let Some(expected_channel_id) = policy.channel.id.as_deref()
+            && channel.channel_id != expected_channel_id
+        {
+            summary["status"] = serde_json::Value::String("channel_identity_mismatch".into());
+            summary["errors"]
+                .as_array_mut()
+                .expect("errors array")
+                .push(serde_json::json!({
+                    "message": "resolved channel id does not match Sourcearium policy",
+                    "expected": expected_channel_id,
+                    "actual": channel.channel_id,
+                }));
+            source_reports.push(summary);
+            continue;
         }
 
-        let crawl = match crawl_channel_videos(&channel_input, &[]).await {
+        if let Err(error) = operational_store
+            .add_tracked_channel(&channel, &policy.source_key)
+            .await
+        {
+            summary["status"] = serde_json::Value::String("operational_state_failed".into());
+            summary["errors"]
+                .as_array_mut()
+                .expect("errors array")
+                .push(serde_json::json!({"message": error.to_string()}));
+            source_reports.push(summary);
+            continue;
+        }
+
+        let existing_cursors = match operational_store
+            .load_channel_tab_cursors(&channel.channel_id)
+            .await
+        {
+            Ok(cursors) => cursors
+                .into_iter()
+                .map(|cursor| ChannelTabCursor {
+                    tab_name: cursor.tab_name,
+                    continuation_token: cursor.continuation_token,
+                    visitor_data: cursor.visitor_data,
+                    delegated_session_id: cursor.delegated_session_id,
+                    last_seen_published_at: cursor.last_seen_published_at,
+                    backfill_complete: cursor.backfill_complete,
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                summary["status"] = serde_json::Value::String("operational_state_failed".into());
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+                source_reports.push(summary);
+                continue;
+            }
+        };
+        summary["existing_tab_cursors"] =
+            serde_json::Value::from(existing_cursors.len() as u64);
+
+        let crawl = match crawl_channel_videos(&channel_input, &existing_cursors).await {
             Ok(crawl) => crawl,
             Err(error) => {
                 summary["status"] = serde_json::Value::String("channel_crawl_failed".into());
@@ -423,6 +470,52 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             }
         };
         summary["discovered"] = serde_json::Value::from(crawl.videos.len() as u64);
+        summary["tabs_visited"] = serde_json::json!(crawl.tabs_visited);
+        summary["tabs_completed"] = serde_json::json!(crawl.tabs_completed);
+        summary["tabs_resumed_from_checkpoint"] =
+            serde_json::json!(crawl.tabs_resumed_from_checkpoint);
+
+        for video_ref in &crawl.videos {
+            if let Err(error) = operational_store
+                .record_channel_video_membership(
+                    &channel.channel_id,
+                    &video_ref.video_id,
+                    &video_ref.tab_name,
+                )
+                .await
+            {
+                push_update_error(&mut summary, &video_ref.video_id, error);
+            }
+        }
+
+        for cursor in &crawl.cursors {
+            if let Err(error) = operational_store
+                .save_channel_tab_cursor(
+                    &channel.channel_id,
+                    &cursor.tab_name,
+                    cursor.continuation_token.as_deref(),
+                    cursor.visitor_data.as_deref(),
+                    cursor.delegated_session_id.as_deref(),
+                    cursor.last_seen_published_at.as_deref(),
+                    cursor.backfill_complete,
+                )
+                .await
+            {
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+            }
+        }
+        if let Err(error) = operational_store
+            .mark_tracked_channel_synced(&channel.channel_id)
+            .await
+        {
+            summary["errors"]
+                .as_array_mut()
+                .expect("errors array")
+                .push(serde_json::json!({"message": error.to_string()}));
+        }
 
         for video_ref in crawl.videos {
             let existing = match load_youtube_transcript_artifact(&source, &video_ref.video_id) {
@@ -607,6 +700,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let report = serde_json::json!({
         "status": "ok",
         "sourcearium_root": sourcearium_root,
+        "operational_state": {
+            "sqlite": operational_db_path,
+        },
         "sources": source_reports,
         "remote_videos_processed": remote_videos_processed,
         "max_videos": args.max_videos,

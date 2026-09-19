@@ -37,6 +37,23 @@ Examples of durable corpus content:
 
 The corpus must remain inspectable and useful without opening Vessel's SQLite database.
 
+## Sourcearium-Local Operational State
+
+When `vessel update` operates directly on a Sourcearium checkout, its disposable state lives under the repository's ignored cache tree:
+
+```text
+<sourcearium>/.cache/vessel/
+├── vessel.sqlite
+└── asr/
+    └── <video-id>/
+```
+
+The SQLite database stores crawl cursors and other acquisition memory. It is explicitly not corpus authority.
+
+Deleting `.cache/vessel/` must not delete or invalidate existing Sourcearium artifacts; it only makes future acquisition more expensive because Vessel must rediscover state.
+
+A completed YouTube backfill still refreshes each tab's initial page on later runs so new uploads are noticed, while old continuation pages are not repeatedly traversed.
+
 ## Operational Layout
 
 Existing project state may continue to live under:

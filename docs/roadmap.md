@@ -116,6 +116,17 @@ Acceptance intent:
 
 ## Milestone 14: Update Reconcile Loop
 
+Status: **In Progress**
+
+Implemented:
+
+- Sourcearium YouTube policy discovery and validation
+- operational SQLite under `.cache/vessel/vessel.sqlite`
+- per-tab YouTube cursor reuse
+- completed backfills refresh first pages without recrawling full history
+- discovered channel/video membership stays operational rather than entering corpus files
+- no operational cursor state is written to Sourcearium policy or artifacts
+
 Target:
 
 ```bash
