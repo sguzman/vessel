@@ -96,10 +96,7 @@ impl SourceariumArtifactV1 {
             "representation.engine",
             self.representation.engine.as_deref(),
         )?;
-        validate_optional_nonempty(
-            "representation.model",
-            self.representation.model.as_deref(),
-        )?;
+        validate_optional_nonempty("representation.model", self.representation.model.as_deref())?;
 
         if self.kind == "transcript" && self.representation.timestamps.is_none() {
             return Err(corpus_error(
@@ -140,8 +137,9 @@ impl SourceariumArtifactV1 {
 
     pub fn to_markdown(&self, body: &str) -> Result<String> {
         self.validate()?;
-        let front_matter = toml::to_string(self)
-            .map_err(|error| corpus_error(format!("failed to serialize Sourcearium v1: {error}")))?;
+        let front_matter = toml::to_string(self).map_err(|error| {
+            corpus_error(format!("failed to serialize Sourcearium v1: {error}"))
+        })?;
 
         let normalized_body = normalize_line_endings(body);
         let normalized_body = normalized_body.trim_end_matches('\n');
@@ -234,8 +232,9 @@ pub enum VideoSelection {
 
 impl YoutubeSourcePolicyV1 {
     pub fn parse_toml(input: &str) -> Result<Self> {
-        let policy: Self = toml::from_str(input)
-            .map_err(|error| corpus_error(format!("invalid YouTube source policy TOML: {error}")))?;
+        let policy: Self = toml::from_str(input).map_err(|error| {
+            corpus_error(format!("invalid YouTube source policy TOML: {error}"))
+        })?;
         policy.validate()?;
         Ok(policy)
     }
@@ -267,8 +266,14 @@ impl YoutubeSourcePolicyV1 {
             )));
         }
 
-        ensure_unique("selection.include_video_ids", &self.selection.include_video_ids)?;
-        ensure_unique("selection.exclude_video_ids", &self.selection.exclude_video_ids)?;
+        ensure_unique(
+            "selection.include_video_ids",
+            &self.selection.include_video_ids,
+        )?;
+        ensure_unique(
+            "selection.exclude_video_ids",
+            &self.selection.exclude_video_ids,
+        )?;
 
         let included: HashSet<&str> = self
             .selection
@@ -299,7 +304,11 @@ impl YoutubeSourcePolicyV1 {
         Ok(())
     }
 
-    pub fn select_video(&self, video_id: &str, published_date: Option<&str>) -> Result<VideoSelection> {
+    pub fn select_video(
+        &self,
+        video_id: &str,
+        published_date: Option<&str>,
+    ) -> Result<VideoSelection> {
         require_nonempty("video_id", video_id)?;
 
         if self
@@ -392,10 +401,7 @@ fn is_token(value: &str, allow_hyphen: bool) -> bool {
         return false;
     }
     chars.all(|ch| {
-        ch.is_ascii_lowercase()
-            || ch.is_ascii_digit()
-            || ch == '_'
-            || (allow_hyphen && ch == '-')
+        ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || (allow_hyphen && ch == '-')
     })
 }
 
@@ -551,6 +557,10 @@ exclude_video_ids = ["same"]
 "#,
         )
         .expect_err("conflict must fail");
-        assert!(error.to_string().contains("both include_video_ids and exclude_video_ids"));
+        assert!(
+            error
+                .to_string()
+                .contains("both include_video_ids and exclude_video_ids")
+        );
     }
 }
