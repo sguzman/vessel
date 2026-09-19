@@ -29,16 +29,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test workspace
-        run: cargo test --workspace --all-targets
-
-      - name: Upload resolved lockfile
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolved-cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
-          retention-days: 1
+        run: cargo test --locked --workspace --all-targets
 
       - name: Format active corpus files
         if: always()
@@ -66,7 +57,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test path and corpus layers
-        run: cargo test -p vessel-core -p vessel-store -p vessel-asr --all-targets
+        run: cargo test --locked -p vessel-core -p vessel-store -p vessel-asr --all-targets
 
       - name: Compile native Windows CLI
-        run: cargo check -p vessel-cli
+        run: cargo check --locked -p vessel-cli
