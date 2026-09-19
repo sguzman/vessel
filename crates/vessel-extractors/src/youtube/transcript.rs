@@ -104,7 +104,7 @@ async fn fetch_caption_candidate(
     let raw = response.text().await.map_err(|error| {
         VesselError::Extractor(format!("youtube caption response decode failed: {error}"))
     })?;
-    let mut candidate = parse_youtube_json3(&raw, derivation, language)?;
+    let candidate = parse_youtube_json3(&raw, derivation, language)?;
     candidate.validate()?;
     Ok(candidate)
 }

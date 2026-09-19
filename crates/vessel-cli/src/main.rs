@@ -331,6 +331,7 @@ async fn main() -> Result<()> {
 }
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
+    let asr_config = resolve_asr_config(&args);
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
     } else {
@@ -345,7 +346,6 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     }
 
     let sources = discover_youtube_sources(&sourcearium_root)?;
-    let asr_config = resolve_asr_config(&args);
     let mut asr_backend: Option<WhisperCandleBackend> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
@@ -2597,6 +2597,8 @@ fn binary_available(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         resolve_asr_config, resolve_configured_channels,
