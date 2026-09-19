@@ -60,6 +60,22 @@ It does not:
 
 Those responsibilities remain in their existing layers.
 
+## Media Normalization
+
+Vessel acquires the selected best-audio format through its existing download planner and stores it under:
+
+```text
+<sourcearium>/.cache/vessel/asr/<video-id>/
+```
+
+Before inference, Vessel normalizes that temporary media to 16 kHz mono PCM WAV using FFmpeg.
+
+This makes the ASR input deterministic instead of depending on whichever codec container YouTube selected for best audio.
+
+If acquisition, transcoding, model loading, or inference fails, no Sourcearium artifact is changed.
+
+After successful Sourcearium materialization, the per-video ASR cache directory is deleted. Failed runs retain operational media for retry.
+
 ## Model Acquisition
 
 The selected Whisper model may be downloaded by the ASR backend on first use and cached according to the backend's model-cache behavior.

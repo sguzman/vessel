@@ -156,13 +156,19 @@ Implemented:
 - engine/model provenance for Sourcearium v1
 - backend kept outside Sourcearium and YouTube-specific layers
 
+Implemented additionally:
+
+- `vessel update` invokes ASR when platform captions are unavailable and policy allows it
+- existing `bestaudio` download planning reused for temporary media
+- ASR input normalized to 16 kHz mono PCM WAV
+- temporary ASR media retained on failure and deleted after successful materialization
+- CLI overrides for ASR model, device, and language
+
 Remaining:
 
-- acquire temporary best-audio input from the existing download subsystem
-- call ASR from `vessel update` when platform captions are unavailable
-- delete temporary audio after successful materialization
-- operational CLI/config overrides for model/device
+- reuse one loaded model across many fallback videos in a single update run
 - optional acceleration
+- real-world corpus smoke test against a configured Sourcearium channel
 
 ## Milestone 17: Safe Prune
 

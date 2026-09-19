@@ -6,11 +6,12 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
+use vessel_asr::{AsrConfig, WhisperCandleBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, VesselError,
-    VideoSelection, discover_youtube_sources, load_config, load_youtube_transcript_artifact,
-    materialize_youtube_transcript, resolve_runtime_layout,
+    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
+    VesselError, VideoSelection, discover_youtube_sources, load_config,
+    load_youtube_transcript_artifact, materialize_youtube_transcript, resolve_runtime_layout,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -66,6 +67,12 @@ struct UpdateArgs {
     sourcearium: PathBuf,
     #[arg(long = "max-videos")]
     max_videos: Option<usize>,
+    #[arg(long = "asr-model")]
+    asr_model: Option<String>,
+    #[arg(long = "asr-device")]
+    asr_device: Option<String>,
+    #[arg(long = "asr-language")]
+    asr_language: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -329,6 +336,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     }
 
     let sources = discover_youtube_sources(&sourcearium_root)?;
+    let asr_config = resolve_asr_config(&args);
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
     let mut limit_reached = false;
@@ -350,6 +358,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "preserved_without_better_caption": 0,
             "unresolved_date": 0,
             "requires_local_asr": 0,
+            "local_asr_attempted": 0,
+            "local_asr_materialized": 0,
             "unresolved_no_provider": 0,
             "errors": [],
         });
@@ -514,29 +524,54 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 }
             };
 
-            let Some(candidate) = candidate else {
-                if existing.is_some() {
-                    increment_summary(&mut summary, "preserved_without_better_caption", 1);
-                } else if policy.transcripts.allow_local_asr {
-                    increment_summary(&mut summary, "requires_local_asr", 1);
-                } else {
-                    increment_summary(&mut summary, "unresolved_no_provider", 1);
+            let (candidate, asr_cache_dir) = if let Some(candidate) = candidate {
+                (candidate, None)
+            } else if existing.is_some() {
+                increment_summary(&mut summary, "preserved_without_better_caption", 1);
+                continue;
+            } else if policy.transcripts.allow_local_asr {
+                increment_summary(&mut summary, "requires_local_asr", 1);
+                increment_summary(&mut summary, "local_asr_attempted", 1);
+                match acquire_local_asr_candidate(&sourcearium_root, &video, &asr_config).await {
+                    Ok((candidate, cache_dir)) => (candidate, Some(cache_dir)),
+                    Err(error) => {
+                        push_update_error(&mut summary, &video.video_id, error);
+                        continue;
+                    }
                 }
+            } else {
+                increment_summary(&mut summary, "unresolved_no_provider", 1);
                 continue;
             };
 
             match materialize_youtube_transcript(&sourcearium_root, &source, &video, &candidate) {
-                Ok(result) => match result.status {
-                    MaterializeStatus::Created => increment_summary(&mut summary, "created", 1),
-                    MaterializeStatus::Updated => increment_summary(&mut summary, "updated", 1),
-                    MaterializeStatus::Unchanged => increment_summary(&mut summary, "unchanged", 1),
-                    MaterializeStatus::PreservedStronger => {
-                        increment_summary(&mut summary, "preserved_stronger", 1)
+                Ok(result) => {
+                    match result.status {
+                        MaterializeStatus::Created => increment_summary(&mut summary, "created", 1),
+                        MaterializeStatus::Updated => increment_summary(&mut summary, "updated", 1),
+                        MaterializeStatus::Unchanged => {
+                            increment_summary(&mut summary, "unchanged", 1)
+                        }
+                        MaterializeStatus::PreservedStronger => {
+                            increment_summary(&mut summary, "preserved_stronger", 1)
+                        }
+                        MaterializeStatus::PreservedUnknownDerivation => {
+                            increment_summary(&mut summary, "preserved_unknown_derivation", 1)
+                        }
                     }
-                    MaterializeStatus::PreservedUnknownDerivation => {
-                        increment_summary(&mut summary, "preserved_unknown_derivation", 1)
+
+                    if let Some(cache_dir) = asr_cache_dir {
+                        increment_summary(&mut summary, "local_asr_materialized", 1);
+                        if let Err(error) = tokio::fs::remove_dir_all(&cache_dir).await {
+                            warn!(
+                                target: "asr",
+                                cache = %cache_dir.display(),
+                                error = %error,
+                                "ASR transcript materialized but temporary cache cleanup failed"
+                            );
+                        }
                     }
-                },
+                }
                 Err(error) => push_update_error(&mut summary, &video.video_id, error),
             }
         }
@@ -556,13 +591,114 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "remote_videos_processed": remote_videos_processed,
         "max_videos": args.max_videos,
         "limit_reached": limit_reached,
-        "local_asr_implemented": false,
+        "local_asr_implemented": true,
+        "asr": {
+            "engine": vessel_asr::ENGINE_NAME,
+            "model": asr_config.model,
+            "device": asr_config.device,
+            "language": asr_config.language,
+        },
     });
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
             .map_err(|error| VesselError::Config(error.to_string()))?
     );
+    Ok(())
+}
+
+fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
+    let mut config = AsrConfig::default();
+    if let Some(model) = args.asr_model.as_deref() {
+        config.model = model.to_owned();
+    }
+    if let Some(device) = args.asr_device.as_deref() {
+        config.device = device.to_owned();
+    }
+    if let Some(language) = args.asr_language.as_deref() {
+        config.language = Some(language.to_owned());
+    }
+    config
+}
+
+async fn acquire_local_asr_candidate(
+    sourcearium_root: &Path,
+    video: &VideoMetadata,
+    config: &AsrConfig,
+) -> Result<(TranscriptCandidate, PathBuf)> {
+    let cache_dir = sourcearium_root
+        .join(".cache")
+        .join("vessel")
+        .join("asr")
+        .join(&video.video_id);
+    tokio::fs::create_dir_all(&cache_dir).await?;
+
+    let output_template = cache_dir
+        .join("source.%(ext)s")
+        .to_string_lossy()
+        .into_owned();
+    let planner = BasicDownloadPlanner;
+    let plan = planner.plan(video, FormatSelector::BestAudio, &output_template)?;
+    let source_audio = plan
+        .downloads
+        .first()
+        .map(|download| download.output_path.clone())
+        .ok_or_else(|| {
+            VesselError::Extractor(format!(
+                "ASR audio planner produced no download for {}",
+                video.video_id
+            ))
+        })?;
+
+    if !source_audio.is_file() {
+        execute_download(&plan).await?;
+    }
+
+    let whisper_wav = cache_dir.join("whisper-input.wav");
+    if !whisper_wav.is_file() {
+        transcode_asr_audio(&source_audio, &whisper_wav).await?;
+    }
+
+    let backend = WhisperCandleBackend::new(config.clone());
+    let wav_for_worker = whisper_wav.clone();
+    let candidate = tokio::task::spawn_blocking(move || backend.transcribe_path(&wav_for_worker))
+        .await
+        .map_err(|error| {
+            VesselError::Extractor(format!("local ASR worker failed to join: {error}"))
+        })??;
+
+    Ok((candidate, cache_dir))
+}
+
+async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
+    let status = tokio::process::Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(source)
+        .arg("-vn")
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg(destination)
+        .status()
+        .await
+        .map_err(|error| {
+            VesselError::Extractor(format!("failed to start ffmpeg for ASR input: {error}"))
+        })?;
+
+    if !status.success() {
+        return Err(VesselError::Extractor(format!(
+            "ffmpeg failed to normalize ASR input {} -> {}",
+            source.display(),
+            destination.display()
+        )));
+    }
     Ok(())
 }
 
@@ -2410,8 +2546,8 @@ fn binary_available(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_update_publication_date, parse_sourcearium_channel_input,
-        resolve_configured_channels,
+        UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
+        resolve_asr_config, resolve_configured_channels,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
@@ -2439,6 +2575,21 @@ mod tests {
             resolve_configured_channels(&config, &["gaming".to_owned()]).expect("gaming");
         assert_eq!(gaming.len(), 1);
         assert_eq!(gaming[0].category, "gaming");
+    }
+
+    #[test]
+    fn asr_cli_overrides_are_operational_only() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            asr_model: Some("base".into()),
+            asr_device: Some("cpu".into()),
+            asr_language: Some("es".into()),
+        };
+        let config = resolve_asr_config(&args);
+        assert_eq!(config.model, "base");
+        assert_eq!(config.device, "cpu");
+        assert_eq!(config.language.as_deref(), Some("es"));
     }
 
     #[test]
