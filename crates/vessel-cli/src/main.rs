@@ -1247,7 +1247,7 @@ fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: Ves
         .expect("errors array")
         .push(serde_json::json!({
             "video_id": video_id,
-            "message": message,
+            "message": message.clone(),
         }));
 
     if let Some(items) = summary
