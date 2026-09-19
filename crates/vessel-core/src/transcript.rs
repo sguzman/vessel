@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Result, TextRepresentationV1, VesselError, YoutubeTranscriptPolicyV1,
-};
+use crate::{Result, TextRepresentationV1, VesselError, YoutubeTranscriptPolicyV1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
