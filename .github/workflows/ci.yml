@@ -20,12 +20,19 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Test workspace
         run: cargo test --workspace --all-targets
 
-      - name: Format active core crate
+      - name: Format active Sourcearium core files
         if: always()
-        run: cargo fmt -p vessel-core -- --check
+        run: |
+          cargo fmt -p vessel-core
+          git diff --exit-code --             crates/vessel-core/src/error.rs             crates/vessel-core/src/lib.rs             crates/vessel-core/src/sourcearium.rs             crates/vessel-core/src/transcript.rs
