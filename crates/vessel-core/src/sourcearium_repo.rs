@@ -357,7 +357,20 @@ pub fn materialize_youtube_transcript(
             });
         }
 
-        let (current_artifact, _) = SourceariumArtifactV1::parse_markdown(&current)?;
+        let (current_artifact, current_body) =
+            SourceariumArtifactV1::parse_markdown(&current)?;
+        if same_textual_representation(
+            &current_artifact,
+            &current_body,
+            &artifact,
+            &body,
+        ) {
+            return Ok(MaterializeResult {
+                path,
+                status: MaterializeStatus::Unchanged,
+            });
+        }
+
         let Some(current_rank) = derivation_rank(&current_artifact.representation.derivation)
         else {
             return Ok(MaterializeResult {
@@ -473,6 +486,16 @@ fn slugify(value: &str) -> String {
     } else {
         slug
     }
+}
+
+fn same_textual_representation(
+    current: &SourceariumArtifactV1,
+    current_body: &str,
+    candidate: &SourceariumArtifactV1,
+    candidate_body: &str,
+) -> bool {
+    current.representation == candidate.representation
+        && current_body.trim_end_matches('\n') == candidate_body.trim_end_matches('\n')
 }
 
 fn derivation_rank(value: &str) -> Option<u8> {
@@ -693,6 +716,40 @@ input = "https://www.youtube.com/@{key}"
             .expect("second");
         assert_eq!(second.status, MaterializeStatus::Unchanged);
         assert_eq!(second.path, first.path);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn mutable_source_metadata_does_not_churn_unchanged_transcript() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let mut video = sample_video();
+        let channel = sample_channel();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+
+        let first =
+            materialize_youtube_transcript(&root, &source, &video, Some(&channel), &candidate)
+                .expect("first");
+        let original = fs::read_to_string(&first.path).unwrap();
+
+        video.title = Some("Changed display title".into());
+        let mut changed_channel = channel.clone();
+        changed_channel.title = Some("Changed channel title".into());
+        changed_channel.handle = Some("@changed".into());
+
+        let second = materialize_youtube_transcript(
+            &root,
+            &source,
+            &video,
+            Some(&changed_channel),
+            &candidate,
+        )
+        .expect("second");
+
+        assert_eq!(second.status, MaterializeStatus::Unchanged);
+        assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

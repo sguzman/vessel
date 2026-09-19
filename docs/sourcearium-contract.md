@@ -120,6 +120,8 @@ Requirements:
 
 A no-op `vessel update` must generate byte-equivalent durable output or skip rewriting the file.
 
+Mutable display metadata alone (for example, a renamed video title or channel handle) does not rewrite an existing artifact when the textual representation and its representation provenance are unchanged. Sourcearium is a text corpus, not a metadata time series.
+
 ## Acquisition Time
 
 `acquisition.acquired_at` is optional.
