@@ -2,7 +2,7 @@
 
 ## Two Storage Domains
 
-Vessel now distinguishes operational state from durable research material.
+Vessel distinguishes operational state from durable research material.
 
 ### Operational Vessel state
 
@@ -21,15 +21,19 @@ Examples:
 
 ### External corpus state
 
-Durable user-owned research material.
+Durable user-owned research material lives in Sourcearium.
 
-Examples:
+Vessel currently targets **Sourcearium artifact schema v1**.
 
-- transcript files
-- provenance metadata
+See [Sourcearium Contract](sourcearium-contract.md).
+
+Examples of durable corpus content:
+
+- transcript body
+- upstream source identity
+- representation provenance
+- acquisition provenance
 - timestamp mappings
-- source references
-- normalized text
 
 The corpus must remain inspectable and useful without opening Vessel's SQLite database.
 
@@ -49,59 +53,71 @@ Existing project state may continue to live under:
 
 This layout is implementation state, not the canonical research corpus.
 
-## Corpus Layout
+## Sourcearium Layout
 
-The exact heterogeneous corpus repository belongs to a separate project, but Vessel should support materializing into a layout approximately like:
+Recommended YouTube transcript destination:
 
 ```text
-corpus/
-├── corpus.toml
+<sourcearium-root>/
 └── sources/
-    └── <source-name>/
-        └── transcripts/
-            └── <date>__<source-id>__<slug>.md
+    └── youtube/
+        └── <channel-key>/
+            └── transcripts/
+                └── <YYYY-MM-DD>__<video-id>__<slug>.md
 ```
 
-The corpus repository may also contain material not produced by Vessel.
+The filesystem path is not canonical identity. Each artifact carries a stable Sourcearium `artifact_id`.
 
-## Artifact Metadata
+## Sourcearium v1 Metadata
 
-A transcript artifact should preserve fields equivalent to:
+A YouTube transcript maps to:
 
-```yaml
-source_type: youtube
-source_id: abc123
-source_url: https://www.youtube.com/watch?v=abc123
-source_name: example-channel
-title: Example title
-published: 2026-09-18
-language: en
-transcript_source: creator_subtitles
+```toml
+schema = 1
+artifact_id = "youtube:video:abc123:transcript"
+kind = "transcript"
+title = "Example title"
+
+[source]
+family = "youtube"
+kind = "video"
+id = "abc123"
+url = "https://www.youtube.com/watch?v=abc123"
+creator = "Example Channel"
+creator_id = "UCexample"
+published = "2026-09-18"
+
+[representation]
+derivation = "creator_subtitles"
+language = "en"
+timestamps = true
+
+[acquisition]
+producer = "vessel"
+method = "platform_caption_fetch"
 ```
 
-For local ASR:
+For local ASR, `representation.engine` and `representation.model` are required.
 
-```yaml
-transcript_source: local_asr
-transcript_engine: <engine>
-transcript_model: <model>
-```
-
-The exact schema should be versioned once implemented.
+Do not add ad hoc Sourcearium core fields from Vessel. Source-specific extras use `[extensions.youtube]`.
 
 ## Timestamped Body
 
-Preferred readable representation:
+Canonical readable representation:
 
-```markdown
-[00:00:03] First segment...
+```text
+[00:00:03] First segment.
 
-[00:00:09] Second segment...
+[00:00:09] Second segment.
 ```
 
-Raw provider payloads may be cached separately when useful, but the primary corpus file should be readable text.
+Raw provider payloads may be cached in Vessel when useful, but the Sourcearium artifact is readable text.
 
-## Git-Churn Rule
+## Deterministic Output
+
+Sourcearium writes should be deterministic.
+
+A no-op update must not create a durable diff.
 
 Do not rewrite corpus files merely because Vessel checked them again.
 
@@ -112,9 +128,9 @@ Fields such as:
 - HTTP timing
 - fetch-run ID
 
-belong in operational state unless they materially affect provenance.
+belong in operational state.
 
-A no-op update should produce no corpus diff.
+If `acquisition.acquired_at` is emitted, preserve it while the current representation remains unchanged.
 
 ## Retention
 
@@ -127,13 +143,31 @@ download temporary audio
 transcribe
         |
         v
-materialize text
+validate Sourcearium candidate
+        |
+        v
+atomically materialize text
         |
         v
 delete temporary audio
 ```
 
 Users may later opt into media retention, but retaining media is not required for the default transcript-corpus workflow.
+
+## Replacement Safety
+
+A new candidate must not damage an existing durable artifact.
+
+Before replacement:
+
+- candidate acquisition/transcription completes
+- Sourcearium v1 metadata validates
+- transcript body validates
+- candidate is stronger or meaningfully changed under policy
+
+Write atomically.
+
+On failure, preserve the old artifact unchanged.
 
 ## Non-Destructive Reconciliation
 

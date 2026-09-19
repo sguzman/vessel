@@ -69,25 +69,27 @@ Vessel should not become, by default:
 - a tweet archiver merely because the corpus may contain tweets
 - a permanent media archive when only the derived text is desired
 
-A separate corpus repository may contain heterogeneous text from many producers and acquisition tools.
+Sourcearium is the durable heterogeneous corpus. Vessel is one producer for it.
 
-## Corpus Contract
+## Sourcearium Contract
 
-Vessel must treat the external corpus as durable user-owned data.
+Vessel currently targets **Sourcearium artifact schema v1**.
+
+This is an external contract owned by the Sourcearium project.
+
+Vessel must not silently invent a separate corpus format or extend Sourcearium v1 core fields.
+
+See [docs/sourcearium-contract.md](sourcearium-contract.md).
+
+A materialized Sourcearium item must preserve the three provenance layers:
+
+- source identity
+- textual representation
+- acquisition process
 
 Normal update behavior is additive and conservative.
 
-A materialized item should have enough provenance to answer:
-
-- where did this text come from?
-- what upstream object does it represent?
-- was the text creator-supplied, platform-generated, or locally transcribed?
-- which language is represented?
-- if locally transcribed, which engine/model produced it?
-- what timestamp mapping is available?
-- when was the artifact materially produced or replaced?
-
-Operational details such as "last checked" belong in ignored cache/state unless they materially affect the research artifact.
+Operational details such as last-check timestamps belong in ignored/cache state unless they materially define a newly acquired representation.
 
 ## Transcript Precedence
 
@@ -97,9 +99,9 @@ Default precedence:
 2. platform automatic caption track
 3. local ASR
 
-The precedence should be configurable eventually, but the provenance label must never be erased.
+A stronger representation may replace a weaker one for the same Sourcearium artifact identity.
 
-An ASR transcript may later be replaced by a better upstream transcript, but replacement should be content-aware and auditable through Git.
+A weaker representation must not automatically overwrite a stronger one.
 
 ## ASR Policy
 
@@ -107,10 +109,10 @@ An ASR transcript may later be replaced by a better upstream transcript, but rep
 - GPU optional
 - Rust-native implementation preferred
 - transcription backend behind a stable interface
-- temporary media is disposable after successful materialization unless policy says otherwise
-- do not make a specific ASR engine part of the corpus file format
+- temporary media disposable after successful materialization unless policy says otherwise
+- ASR engine/model recorded in Sourcearium representation provenance
 
-The engine should be replaceable without invalidating corpus semantics.
+The transcription backend is replaceable without invalidating Sourcearium semantics.
 
 ## Destructive Operations
 
@@ -136,16 +138,16 @@ Vessel predates the current director/grunt workflow. Going forward:
 
 - Prefer explicit failure over hidden fallback.
 - Preserve provenance across every transformation.
-- Separate acquisition state from durable corpus output.
+- Separate acquisition state from durable Sourcearium output.
 - Keep repeated updates idempotent.
 - Avoid Git churn from operational refresh metadata.
+- Validate candidates before replacing durable artifacts.
+- Use atomic replacement for Sourcearium writes.
 - Keep heavy work off UI/render threads if a UI is ever added.
-- Prefer ordinary inspectable files for durable user data.
-- Do not make SQLite the only route to reading a corpus.
-- Preserve the ability to inspect and manipulate outputs without Vessel.
+- Preserve the ability to inspect and manipulate Sourcearium outputs without Vessel.
 
 ## Success Test
 
-The project is succeeding when a user can maintain a meaningful set of media sources by editing a small declarative policy file and periodically running one command, after which the corpus contains every desired text artifact with trustworthy provenance.
+The project is succeeding when a user can maintain a meaningful set of media sources by editing a small declarative policy file and periodically running one command, after which Sourcearium contains every desired text artifact with trustworthy provenance.
 
 Everything else is secondary.

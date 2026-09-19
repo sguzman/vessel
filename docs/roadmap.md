@@ -8,7 +8,7 @@ That work produced substantial reusable infrastructure. It is no longer the prod
 
 Current priority:
 
-> make selected media-derived text easy to maintain as a durable, provenance-preserving corpus.
+> make selected media-derived text easy to maintain as durable, provenance-preserving Sourcearium artifacts.
 
 ## Legacy Capability Baseline
 
@@ -39,7 +39,7 @@ These capabilities should not force future work to continue the old parity campa
 2. Define a small declarative source-selection policy.
 3. Implement desired-set reconciliation behind `vessel update`.
 4. Implement transcript-provider precedence.
-5. Materialize stable human-readable transcript artifacts into an external corpus path/repository.
+5. Materialize Sourcearium schema-v1 artifacts.
 6. Add CPU-first local ASR fallback.
 7. Make update idempotent and non-destructive.
 8. Add explicit prune/dry-run behavior.
@@ -50,15 +50,29 @@ These capabilities should not force future work to continue the old parity campa
 
 | Milestone | Title | Status |
 | --- | --- | --- |
-| 10 | Corpus Charter + Contract | Completed |
+| 10 | Sourcearium Contract | Completed |
 | 11 | Corpus Policy | Planned |
 | 12 | `vessel update` Reconcile Loop | Planned |
 | 13 | Transcript Provider Chain | Planned |
-| 14 | Corpus Materializer | Planned |
+| 14 | Sourcearium Materializer | Planned |
 | 15 | Local ASR Fallback | Planned |
 | 16 | Safe Prune + Replacement Semantics | Planned |
 | 17 | Provenance Hardening | Planned |
 | 18 | Additional Media Sources | Deferred |
+
+## Milestone 10: Sourcearium Contract
+
+Completed:
+
+- Sourcearium artifact schema v1 frozen externally
+- exact YouTube transcript field mapping documented
+- provenance layers separated into source / representation / acquisition
+- stable artifact identity defined
+- deterministic serialization requirement defined
+- atomic candidate validation/replacement requirement defined
+- YouTube-specific extension namespace reserved
+
+See [Sourcearium Contract](sourcearium-contract.md).
 
 ## Milestone 11: Corpus Policy
 
@@ -83,7 +97,7 @@ vessel update
 Acceptance intent:
 
 - discover selected upstream material
-- compare against already materialized corpus artifacts
+- compare against already materialized Sourcearium artifacts
 - acquire missing items
 - avoid duplicate work
 - avoid Git churn when nothing meaningful changed
@@ -99,18 +113,17 @@ Default precedence:
 
 Provider provenance must survive normalization.
 
-## Milestone 14: Corpus Materializer
+## Milestone 14: Sourcearium Materializer
 
-Emit Git-friendly files with:
+Emit Sourcearium schema-v1 Markdown files with:
 
-- stable source identity
-- title/date/source URL
-- provenance metadata
-- transcript language
-- timestamped segments
-- normalized readable text
-
-The corpus path is external to Vessel's operational cache.
+- stable artifact identity
+- source identity
+- representation provenance
+- acquisition provenance
+- timestamped readable text
+- deterministic serialization
+- validation before atomic replacement
 
 ## Milestone 15: Local ASR
 
@@ -121,7 +134,7 @@ Requirements:
 - Rust-native/Rust-facing backend
 - backend abstraction
 - temporary audio cleanup after success
-- engine/model provenance captured in output
+- engine/model provenance captured in Sourcearium v1
 
 ## Milestone 16: Safe Prune
 

@@ -49,32 +49,56 @@ A grunt does not silently redefine the macro-goal.
 
 ## Current Macro-Goal
 
-Make Vessel a reliable media-to-text materialization engine for maintaining external research corpora.
+Make Vessel a reliable media-to-text materialization engine for maintaining Sourcearium.
 
 Do not optimize a task for broad `yt-dlp` parity unless the task explicitly requires it.
+
+## Frozen External Contract
+
+Sourcearium artifact schema v1 is already defined.
+
+Before touching corpus materialization, read:
+
+```text
+docs/sourcearium-contract.md
+```
+
+A grunt must not:
+
+- invent new Sourcearium v1 core fields
+- collapse source/representation/acquisition provenance
+- serialize operational refresh telemetry into corpus files
+- weaken non-destructive update semantics
+- change Sourcearium schema semantics to simplify Vessel implementation
+
+If v1 is insufficient, escalate to the director rather than silently extending it.
 
 ## Session Start Checklist
 
 Before implementation:
 
 1. Read `docs/charter.md`.
-2. Read the relevant roadmap milestone.
-3. Identify whether the task changes durable corpus semantics or only operational state.
-4. State the bounded implementation target.
-5. Preserve unrelated working capabilities.
+2. Read `docs/sourcearium-contract.md` for corpus-facing work.
+3. Read the relevant roadmap milestone.
+4. Identify whether the task changes durable Sourcearium semantics or only Vessel operational state.
+5. State the bounded implementation target.
+6. Preserve unrelated working capabilities.
 
 ## Engineering Rules
 
 - Prefer Rust-native implementation.
 - No silent Python/`yt-dlp` fallback for supported native behavior.
 - Preserve provenance.
-- Keep corpus output readable without Vessel.
-- Keep operational refresh state out of durable artifacts unless meaningful.
+- Keep Sourcearium output readable without Vessel.
+- Keep operational refresh state out of durable artifacts.
 - Repeated runs should be idempotent.
+- Sourcearium serialization should be deterministic.
+- Validate candidate artifacts before replacement.
+- Replace durable artifacts atomically.
 - Normal update must be non-destructive.
 - Do not introduce a generalized DSL where a small explicit schema is enough.
 - Do not create new time-series collection merely because fields are available.
-- Tests should target reconciliation, idempotency, provenance, and safe failure.
+- Tests should target reconciliation, idempotency, provenance, deterministic output, and safe failure.
 
 ## Definition Of Done
 
@@ -97,11 +121,13 @@ When a task implementation is wrong:
 
 ## Current Next Work
 
-The highest-value next implementation sequence is:
+The corpus artifact contract is no longer an open design task.
 
-1. corpus policy schema
-2. corpus artifact format
-3. transcript-provider abstraction
+The highest-value implementation sequence is now:
+
+1. corpus/channel policy schema
+2. transcript-provider abstraction
+3. Sourcearium v1 serializer + validator
 4. `vessel update` reconciliation skeleton
 5. subtitle acquisition integration
 6. local ASR fallback
