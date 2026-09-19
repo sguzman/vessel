@@ -51,9 +51,8 @@ pub fn discover_youtube_sources(sourcearium_root: &Path) -> Result<Vec<Sourceari
             })?;
 
         let raw = fs::read_to_string(&policy_path)?;
-        let policy = YoutubeSourcePolicyV1::parse_toml(&raw).map_err(|error| {
-            corpus_error(format!("{}: {error}", policy_path.display()))
-        })?;
+        let policy = YoutubeSourcePolicyV1::parse_toml(&raw)
+            .map_err(|error| corpus_error(format!("{}: {error}", policy_path.display())))?;
 
         if policy.source_key != dir_key {
             return Err(corpus_error(format!(
@@ -74,7 +73,6 @@ pub fn discover_youtube_sources(sourcearium_root: &Path) -> Result<Vec<Sourceari
     Ok(sources)
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExistingSourceariumArtifact {
     pub path: PathBuf,
@@ -91,9 +89,8 @@ pub fn load_youtube_transcript_artifact(
         return Ok(None);
     };
     let raw = fs::read_to_string(&path)?;
-    let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw).map_err(|error| {
-        corpus_error(format!("{}: {error}", path.display()))
-    })?;
+    let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
+        .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
     Ok(Some(ExistingSourceariumArtifact { path, artifact }))
 }
 
@@ -178,7 +175,8 @@ pub fn materialize_youtube_transcript(
         }
 
         let (current_artifact, _) = SourceariumArtifactV1::parse_markdown(&current)?;
-        let Some(current_rank) = derivation_rank(&current_artifact.representation.derivation) else {
+        let Some(current_rank) = derivation_rank(&current_artifact.representation.derivation)
+        else {
             return Ok(MaterializeResult {
                 path,
                 status: MaterializeStatus::PreservedUnknownDerivation,
@@ -219,9 +217,8 @@ fn find_artifact_path(directory: &Path, artifact_id: &str) -> Result<Option<Path
         }
 
         let raw = fs::read_to_string(&path)?;
-        let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw).map_err(|error| {
-            corpus_error(format!("{}: {error}", path.display()))
-        })?;
+        let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
+            .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
         if artifact.artifact_id == artifact_id {
             matches.push(path);
         }
@@ -298,9 +295,7 @@ fn slugify(value: &str) -> String {
 fn derivation_rank(value: &str) -> Option<u8> {
     match value {
         "creator_subtitles" => Some(TranscriptDerivation::CreatorSubtitles.quality_rank()),
-        "platform_auto_caption" => {
-            Some(TranscriptDerivation::PlatformAutoCaption.quality_rank())
-        }
+        "platform_auto_caption" => Some(TranscriptDerivation::PlatformAutoCaption.quality_rank()),
         "local_asr" => Some(TranscriptDerivation::LocalAsr.quality_rank()),
         _ => None,
     }
@@ -315,7 +310,12 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| corpus_error(format!("artifact filename is not valid UTF-8: {}", path.display())))?;
+        .ok_or_else(|| {
+            corpus_error(format!(
+                "artifact filename is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?;
     let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
 
     let result = (|| -> std::io::Result<()> {
@@ -353,10 +353,7 @@ mod tests {
     use super::*;
 
     fn temp_sourcearium() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-sourcearium-test-{}",
-            Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("vessel-sourcearium-test-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("sources").join("youtube")).expect("create source root");
         root
     }
@@ -440,8 +437,7 @@ input = "https://www.youtube.com/@{key}"
             derivation,
             language: Some("en".into()),
             timestamps: true,
-            engine: (derivation == TranscriptDerivation::LocalAsr)
-                .then(|| "whisper-candle".into()),
+            engine: (derivation == TranscriptDerivation::LocalAsr).then(|| "whisper-candle".into()),
             model: (derivation == TranscriptDerivation::LocalAsr).then(|| "small.en".into()),
             segments: vec![crate::TranscriptSegment {
                 start_seconds: Some(3),
@@ -461,9 +457,11 @@ input = "https://www.youtube.com/@{key}"
         let first =
             materialize_youtube_transcript(&root, &source, &video, &candidate).expect("first");
         assert_eq!(first.status, MaterializeStatus::Created);
-        assert!(first
-            .path
-            .ends_with("2026-09-18__abc123__a-useful-video.md"));
+        assert!(
+            first
+                .path
+                .ends_with("2026-09-18__abc123__a-useful-video.md")
+        );
 
         let second =
             materialize_youtube_transcript(&root, &source, &video, &candidate).expect("second");
