@@ -374,7 +374,7 @@ pub fn apply_sourcearium_prune(
     plan: &SourceariumPrunePlan,
 ) -> Result<usize> {
     let sources_root = sourcearium_root.join("sources").canonicalize()?;
-    let mut removed = 0usize;
+    let mut validated_paths = Vec::with_capacity(plan.candidates.len());
 
     for candidate in &plan.candidates {
         let canonical_path = candidate.path.canonicalize()?;
@@ -396,11 +396,14 @@ pub fn apply_sourcearium_prune(
             )));
         }
 
-        fs::remove_file(&canonical_path)?;
-        removed += 1;
+        validated_paths.push(canonical_path);
     }
 
-    Ok(removed)
+    for path in &validated_paths {
+        fs::remove_file(path)?;
+    }
+
+    Ok(validated_paths.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1107,6 +1110,36 @@ exclude_video_ids = [{exclude}]
                 .iter()
                 .any(|candidate| candidate.video_id == "explicit-keep")
         );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn prune_apply_validates_entire_plan_before_removing_anything() {
+        let root = temp_sourcearium();
+        write_policy_with_selection(&root, "alpha", None, &[], &["drop-a", "drop-b"]);
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+
+        let mut video_a = sample_video();
+        video_a.video_id = "drop-a".into();
+        video_a.url = "https://www.youtube.com/watch?v=drop-a".into();
+        let result_a =
+            materialize_youtube_transcript(&root, &source, &video_a, None, &candidate).unwrap();
+
+        let mut video_b = sample_video();
+        video_b.video_id = "drop-b".into();
+        video_b.url = "https://www.youtube.com/watch?v=drop-b".into();
+        let result_b =
+            materialize_youtube_transcript(&root, &source, &video_b, None, &candidate).unwrap();
+
+        let mut plan = plan_sourcearium_prune(&root).expect("plan");
+        assert_eq!(plan.candidates.len(), 2);
+        plan.candidates[1].artifact_id = "youtube:video:wrong:transcript".into();
+
+        assert!(apply_sourcearium_prune(&root, &plan).is_err());
+        assert!(result_a.path.exists());
+        assert!(result_b.path.exists());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
