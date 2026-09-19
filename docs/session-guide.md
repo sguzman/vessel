@@ -1,27 +1,108 @@
 # Session Guide
 
-## Recommended Session Order
+## Project Identity
 
-1. Finish Milestone 00 until the CLI and schema are stable.
-2. Implement native YouTube `info` for a single video.
-3. Persist video snapshots and video history queries.
-4. Add tracked channels and channel sync.
-5. Add download planning and file transaction semantics.
-6. Add native subtitles, thumbnails, and first-pass native comments.
-7. Harden native YouTube downloads and broaden native comment pagination.
-8. Complete baseline format selector parsing and evaluation parity.
-9. Add FFmpeg-backed merge, remux, audio extraction, metadata/thumbnail embedding, and subtitle conversion.
-10. Add manifest-based plugin discovery, extractor extensions, and provider hooks.
+Use this marker in future implementation prompts:
+
+```text
+[VESSEL | #16A7A0]
+```
+
+Project color: Vessel Wake Teal `#16A7A0`.
+
+## Director-Era Operating Model
+
+Vessel predates the current director/grunt workflow. Future work follows this model.
+
+### Human principal
+
+Owns:
+
+- ultimate goals
+- value judgments
+- major scope changes
+- approval of destructive or externally consequential behavior
+
+### Project director
+
+Owns:
+
+- project continuity
+- architecture
+- invariants
+- roadmap
+- task decomposition
+- integration decisions
+- documentation consistency
+- deciding whether a proposed feature advances the actual mission
+
+### Codex / grunt session
+
+Owns:
+
+- one bounded implementation task
+- tests for that task
+- required doc updates
+- reporting concrete blockers or deviations
+
+A grunt does not silently redefine the macro-goal.
+
+## Current Macro-Goal
+
+Make Vessel a reliable media-to-text materialization engine for maintaining external research corpora.
+
+Do not optimize a task for broad `yt-dlp` parity unless the task explicitly requires it.
+
+## Session Start Checklist
+
+Before implementation:
+
+1. Read `docs/charter.md`.
+2. Read the relevant roadmap milestone.
+3. Identify whether the task changes durable corpus semantics or only operational state.
+4. State the bounded implementation target.
+5. Preserve unrelated working capabilities.
+
+## Engineering Rules
+
+- Prefer Rust-native implementation.
+- No silent Python/`yt-dlp` fallback for supported native behavior.
+- Preserve provenance.
+- Keep corpus output readable without Vessel.
+- Keep operational refresh state out of durable artifacts unless meaningful.
+- Repeated runs should be idempotent.
+- Normal update must be non-destructive.
+- Do not introduce a generalized DSL where a small explicit schema is enough.
+- Do not create new time-series collection merely because fields are available.
+- Tests should target reconciliation, idempotency, provenance, and safe failure.
 
 ## Definition Of Done
 
-- A milestone is done when its acceptance checklist is complete and the relevant command path is no longer a stub.
-- Schema changes must preserve the current-vs-snapshots distinction.
-- New behavior should add tests for idempotency or compatibility when applicable.
-- Unsupported features must fail explicitly and may not shell out to Python or `yt-dlp`.
+A task is done when:
 
-## Future Session Rules
+- the requested path works
+- tests cover the important invariant
+- failure behavior is explicit
+- relevant docs match actual behavior
+- no unrelated scope was silently introduced
 
-- Keep extraction, ledger, and download changes separated by crate boundary.
-- Do not bypass the event model with ad hoc logging once real execution paths are added.
-- Preserve the native-only runtime contract even when parity gaps remain.
+## Correction Lifecycle
+
+When a task implementation is wrong:
+
+- preserve the macro-goal
+- describe the defect precisely
+- issue a corrected bounded task
+- do not rewrite the project mission to justify the mistaken implementation
+
+## Current Next Work
+
+The highest-value next implementation sequence is:
+
+1. corpus policy schema
+2. corpus artifact format
+3. transcript-provider abstraction
+4. `vessel update` reconciliation skeleton
+5. subtitle acquisition integration
+6. local ASR fallback
+7. safe prune semantics

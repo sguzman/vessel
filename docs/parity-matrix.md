@@ -1,47 +1,67 @@
-# Parity Matrix
+# Capability Matrix
 
-## Native Milestones
+## Current Mission
 
-- [x] Workspace scaffold
-- [x] Native CLI command tree
+The success criterion is corpus materialization, not global `yt-dlp` parity.
+
+## Existing Media Capabilities
+
+- [x] Rust workspace and native CLI
 - [x] Config loading
-- [x] Logging bootstrap
-- [x] SQLite schema bootstrap
+- [x] Logging
+- [x] SQLite operational storage
 - [x] Native YouTube video metadata extraction
-- [x] Video snapshot history
-- [x] Channel tracking and sync
-- [x] Basic native download path
+- [x] Channel discovery/tracking
+- [x] Native download path
 - [x] Subtitles
+- [x] Automatic-caption metadata
 - [x] Thumbnails
 - [x] Comments
-
-## Downloader And Postprocessing
-
-- [x] Format selector parser for baseline expressions
-- [x] Output template rendering
-- [x] Resume and partial file handling
-- [x] Artifact persistence
+- [x] Format selection
+- [x] Resume and partial-file handling
 - [x] Archive semantics
 - [x] FFmpeg merge/remux
 - [x] Audio extraction
 - [x] Metadata embedding
 - [x] Thumbnail embedding
 - [x] Subtitle conversion
+- [x] Plugin API
+- [x] YouTube comment pagination
+- [x] Signature/cipher-protected native YouTube download support
 
-## Compatibility Milestones
+## Corpus Mission Capabilities
 
-- [x] Deeper native YouTube comment coverage and pagination
-- [x] Native YouTube download hardening for cipher/signature-protected media
-- [ ] Additional native extractors beyond YouTube
-- [ ] Option-level CLI parity campaign
-- [x] Plugin API and plugin management
+- [x] Project charter and scope boundary
+- [ ] External corpus policy schema
+- [ ] Publication cutoff selection
+- [ ] Explicit include list
+- [ ] Explicit exclude list
+- [ ] Desired-set reconciliation
+- [ ] `vessel update`
+- [ ] Creator-subtitle preference
+- [ ] Platform-auto-caption fallback
+- [ ] Local ASR fallback
+- [ ] CPU-first ASR default
+- [ ] Stable transcript provenance schema
+- [ ] Git-friendly transcript materialization
+- [ ] No-op update produces no corpus diff
+- [ ] Explicit dry-run prune
+- [ ] Explicit prune
+- [ ] Upstream deletion/private state preserves local text
+
+## Still Useful But Deprioritized Compatibility Work
+
+- [ ] Additional native media extractors beyond YouTube
+- [ ] Option-level `yt-dlp` parity
 - [ ] External downloader parity
 
-## Regression Targets
+These items are not blockers for the corpus mission.
 
-- [x] Re-running channel sync does not duplicate snapshots.
-- [x] Metadata changes create exactly one new snapshot.
-- [ ] Failed fetches preserve prior latest state.
-- [ ] Deleted/private states preserve old metadata.
+## Regression Invariants
+
+- [x] Existing channel sync does not duplicate unchanged historical snapshots.
 - [x] Download resume keeps archive and artifacts consistent.
-- [x] Format selection matches documented baseline expressions.
+- [ ] Corpus update is idempotent.
+- [ ] Failed acquisition preserves previously materialized text.
+- [ ] Better transcript replacement preserves provenance in Git history.
+- [ ] Policy narrowing never causes implicit deletion.

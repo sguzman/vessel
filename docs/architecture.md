@@ -1,39 +1,164 @@
 # Architecture
 
+## Architectural North Star
+
+Vessel is an acquisition/materialization engine, not the canonical research archive.
+
+The architecture is split into two state domains:
+
+```text
+upstream media
+    |
+    v
+Vessel acquisition engine
+    |
+    +-- operational cache / SQLite / temporary media
+    |
+    v
+external corpus repository
+    |
+    +-- durable text
+    +-- timestamps
+    +-- provenance
+    +-- Git history
+```
+
+The corpus must remain useful without Vessel running.
+
+## Core Pipeline
+
+A corpus update is modeled as:
+
+1. **Discover** candidate upstream objects.
+2. **Select** candidates using declarative policy.
+3. **Resolve text** using the preferred transcript providers.
+4. **Acquire media** only if text cannot otherwise be obtained.
+5. **Transcribe** locally when required.
+6. **Normalize** text and timestamp structure.
+7. **Materialize** durable Git-friendly artifacts.
+8. **Record operational state** outside the durable artifact unless it is meaningful provenance.
+
+This is a desired-state reconcile loop, not a metadata polling loop.
+
+## Transcript Provider Chain
+
+The default provider chain is:
+
+```text
+Creator subtitles
+      |
+      v
+Platform automatic captions
+      |
+      v
+Local ASR
+```
+
+Provider choice and provenance are separate concepts. Even when all providers normalize to the same internal transcript structure, the emitted artifact must retain which provider produced it.
+
 ## Workspace Map
 
-- `vessel-cli`: user-facing CLI and command wiring.
-- `vessel-core`: config, errors, event model, normalized metadata types.
-- `vessel-extractors`: extractor traits, registry, site-specific implementations, and manifest-based plugin loading.
-- `vessel-ledger`: ledger-facing sync APIs and decisions.
-- `vessel-store`: SQLite schema, migrations, and store traits.
-- `vessel-logging`: `tracing` initialization and log formatting.
-- `vessel-formats`: format selector AST and output templates.
-- `vessel-download`: download planning interfaces.
-- `vessel-postprocess`: FFmpeg/postprocessor planning interfaces.
-- `vessel-testing`: shared fixture helpers for later parity and regression tests.
+Existing crates remain useful:
 
-## Core Boundaries
+- `vessel-cli`: user-facing CLI and command wiring
+- `vessel-core`: config, errors, events, normalized metadata
+- `vessel-extractors`: source discovery and site-specific extraction
+- `vessel-ledger`: idempotency and operational decisions
+- `vessel-store`: local SQLite/cache persistence
+- `vessel-logging`: tracing/log formatting
+- `vessel-formats`: media format selection
+- `vessel-download`: media acquisition
+- `vessel-postprocess`: FFmpeg-backed media transformations
+- `vessel-testing`: shared test fixtures
 
-- Extraction produces structured metadata. It does not own downloads.
-- Downloads consume normalized metadata and format decisions.
-- The ledger owns idempotency, snapshot insertion rules, and fetch-run recording.
-- The store owns persistence details and current-vs-history table semantics.
-- Logging consumes the internal event stream rather than inventing separate state transitions.
-- Plugins extend extractors and provider resolution through manifests and data files rather than patching built-in crates.
+Future corpus work should introduce boundaries rather than overload existing crates:
 
-## Event Flow
+- transcript-provider abstraction
+- local ASR backend abstraction
+- corpus policy parser/evaluator
+- corpus materializer/exporter
 
-1. CLI loads config and initializes logging.
-2. CLI resolves an extractor through `ExtractorRegistry`.
-3. Extractor returns normalized `ExtractedItem` values plus raw payloads.
-4. Ledger hashes normalized payloads and decides whether snapshots changed.
-5. Store persists current rows, snapshots, and fetch attempts.
-6. Download and postprocess stages attach artifacts later in the roadmap.
-7. Plugin manifests can register extra extractors and provider hooks at runtime.
+Exact crate names are implementation decisions, not charter-level commitments.
 
-## Initial Assumptions
+## State Authority
 
-- Native-first and YouTube-first.
-- SQLite-first; PostgreSQL is deferred until the ledger semantics are stable.
-- Strict native-only runtime: `vessel` must not shell out to Python or `yt-dlp` for supported behavior.
+### Durable authority
+
+The external corpus repository is authoritative for acquired research text.
+
+It should contain ordinary inspectable files and provenance.
+
+### Operational authority
+
+Vessel may use SQLite and caches for:
+
+- discovered source identities
+- pagination/cursors
+- fetch attempts
+- local acquisition state
+- content hashes
+- materialization bookkeeping
+- temporary media paths
+- error/retry information
+
+Operational state may be deleted and rebuilt without invalidating the corpus.
+
+## Selection Policy
+
+Selection policy belongs with the corpus or a user-controlled project configuration.
+
+Initial policy should remain deliberately small:
+
+- source/channel
+- publication date cutoff
+- explicit include identifiers
+- explicit exclude identifiers
+
+Do not begin by building a query language.
+
+More expressive rules can be added only when real corpus use demonstrates the need.
+
+## Materialization Contract
+
+A materialized transcript should support:
+
+- stable upstream identifier
+- source URL
+- source/channel identity
+- title
+- publication date when known
+- language
+- transcript provenance class
+- ASR engine/model when applicable
+- timestamped segments when available
+- normalized readable text
+
+The durable format should be Git-friendly and human-readable. Markdown with structured front matter is the baseline design candidate.
+
+## Update And Prune
+
+`vessel update` should converge toward the desired corpus set without destroying previously acquired material.
+
+If existing material falls outside current policy:
+
+- leave it in place during update
+- report it as no longer selected when useful
+- remove it only through an explicit prune operation
+
+## Rust And Runtime Policy
+
+Rust-native remains the preferred implementation strategy.
+
+Supported native features must not silently invoke Python or `yt-dlp`.
+
+FFmpeg remains acceptable media plumbing.
+
+ASR should default to a CPU-capable Rust-facing backend. The transcript interface must not depend on one implementation, model family, or accelerator.
+
+## Source Extensibility
+
+Vessel is media-oriented.
+
+The external corpus can be heterogeneous. That does not imply Vessel itself must ingest every textual source type.
+
+For example, tweets may belong in the same corpus as YouTube transcripts while being populated by an entirely different acquisition tool. The shared contract is provenance-preserving text, not a single universal scraper.
