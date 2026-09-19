@@ -19,9 +19,10 @@ pub use sourcearium::{
 };
 pub use sourcearium_repo::{
     ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumInventoryReport,
-    SourceariumValidationReport, SourceariumYoutubeSource, discover_youtube_sources,
+    SourceariumPruneCandidate, SourceariumPrunePlan, SourceariumValidationReport,
+    SourceariumYoutubeSource, apply_sourcearium_prune, discover_youtube_sources,
     inventory_sourcearium_repository, load_youtube_transcript_artifact,
-    materialize_youtube_transcript, validate_sourcearium_repository,
+    materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
 };
 pub use transcript::{
     TranscriptCandidate, TranscriptDerivation, TranscriptProvider, TranscriptRequest,

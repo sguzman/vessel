@@ -262,6 +262,151 @@ fn parse_sourcearium_timestamp(line: &str) -> Option<u64> {
     Some(hours * 3_600 + minutes * 60 + seconds)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceariumPruneCandidate {
+    pub source_key: String,
+    pub video_id: String,
+    pub artifact_id: String,
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceariumPrunePlan {
+    pub configured_sources: usize,
+    pub inspected_artifacts: usize,
+    pub preserved_unresolved: usize,
+    pub candidates: Vec<SourceariumPruneCandidate>,
+}
+
+pub fn plan_sourcearium_prune(sourcearium_root: &Path) -> Result<SourceariumPrunePlan> {
+    let sources = discover_youtube_sources(sourcearium_root)?;
+    let mut inspected_artifacts = 0usize;
+    let mut preserved_unresolved = 0usize;
+    let mut candidates = Vec::new();
+
+    for source in &sources {
+        let transcripts_dir = source.source_dir.join("transcripts");
+        if !transcripts_dir.exists() {
+            continue;
+        }
+
+        let mut paths = fs::read_dir(&transcripts_dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+
+        for path in paths {
+            if !path.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("md")
+            {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("README.md"))
+            {
+                continue;
+            }
+
+            let raw = fs::read_to_string(&path)?;
+            let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
+                .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
+
+            if artifact.source.family != "youtube"
+                || artifact.source.kind != "video"
+                || artifact.kind != "transcript"
+            {
+                return Err(corpus_error(format!(
+                    "{} is under a YouTube transcript directory but is not a YouTube video transcript",
+                    path.display()
+                )));
+            }
+
+            let expected_artifact_id =
+                format!("youtube:video:{}:transcript", artifact.source.id);
+            if artifact.artifact_id != expected_artifact_id {
+                return Err(corpus_error(format!(
+                    "{} has artifact_id {:?}; expected {:?}",
+                    path.display(),
+                    artifact.artifact_id,
+                    expected_artifact_id
+                )));
+            }
+
+            inspected_artifacts += 1;
+            let selection = source
+                .policy
+                .select_video(&artifact.source.id, artifact.source.published.as_deref())?;
+
+            let reason = match selection {
+                VideoSelection::ExplicitlyExcluded => Some("explicitly_excluded"),
+                VideoSelection::BeforeCutoff => Some("before_cutoff"),
+                VideoSelection::PublicationDateUnresolved => {
+                    preserved_unresolved += 1;
+                    None
+                }
+                VideoSelection::Included | VideoSelection::ExplicitlyIncluded => None,
+            };
+
+            if let Some(reason) = reason {
+                candidates.push(SourceariumPruneCandidate {
+                    source_key: source.policy.source_key.clone(),
+                    video_id: artifact.source.id.clone(),
+                    artifact_id: artifact.artifact_id,
+                    path,
+                    reason: reason.into(),
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+
+    Ok(SourceariumPrunePlan {
+        configured_sources: sources.len(),
+        inspected_artifacts,
+        preserved_unresolved,
+        candidates,
+    })
+}
+
+pub fn apply_sourcearium_prune(
+    sourcearium_root: &Path,
+    plan: &SourceariumPrunePlan,
+) -> Result<usize> {
+    let sources_root = sourcearium_root.join("sources").canonicalize()?;
+    let mut removed = 0usize;
+
+    for candidate in &plan.candidates {
+        let canonical_path = candidate.path.canonicalize()?;
+        if !canonical_path.starts_with(&sources_root) {
+            return Err(corpus_error(format!(
+                "refusing to prune path outside Sourcearium sources tree: {}",
+                candidate.path.display()
+            )));
+        }
+
+        let raw = fs::read_to_string(&canonical_path)?;
+        let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
+            .map_err(|error| corpus_error(format!("{}: {error}", canonical_path.display())))?;
+        if artifact.artifact_id != candidate.artifact_id
+            || artifact.source.id != candidate.video_id
+        {
+            return Err(corpus_error(format!(
+                "refusing stale prune candidate {}; artifact identity changed",
+                candidate.path.display()
+            )));
+        }
+
+        fs::remove_file(&canonical_path)?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceariumYoutubeSource {
     pub source_dir: PathBuf,
@@ -871,6 +1016,129 @@ input = "https://www.youtube.com/@{key}"
         let second = materialize_youtube_transcript(&root, &source, &video, None, &weak).unwrap();
         assert_eq!(second.status, MaterializeStatus::PreservedStronger);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn write_policy_with_selection(
+        root: &Path,
+        key: &str,
+        cutoff: Option<&str>,
+        include: &[&str],
+        exclude: &[&str],
+    ) {
+        let dir = root.join("sources").join("youtube").join(key);
+        fs::create_dir_all(&dir).expect("create source dir");
+
+        let cutoff = cutoff
+            .map(|value| format!("published_on_or_after = \"{value}\"\n"))
+            .unwrap_or_default();
+        let include = include
+            .iter()
+            .map(|value| format!("\"{value}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let exclude = exclude
+            .iter()
+            .map(|value| format!("\"{value}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        fs::write(
+            dir.join("source.toml"),
+            format!(
+                r#"schema = 1
+family = "youtube"
+source_key = "{key}"
+
+[channel]
+input = "https://www.youtube.com/@{key}"
+
+[selection]
+{cutoff}include_video_ids = [{include}]
+exclude_video_ids = [{exclude}]
+"#
+            ),
+        )
+        .expect("write policy");
+    }
+
+    #[test]
+    fn prune_plan_only_includes_locally_provable_policy_exclusions() {
+        let root = temp_sourcearium();
+        write_policy_with_selection(
+            &root,
+            "alpha",
+            Some("2026-09-19"),
+            &["explicit-keep"],
+            &["explicit-drop"],
+        );
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+
+        let mut old_video = sample_video();
+        old_video.video_id = "old-video".into();
+        old_video.url = "https://www.youtube.com/watch?v=old-video".into();
+        old_video.upload_date = Some("20260918".into());
+
+        let mut explicit_keep = sample_video();
+        explicit_keep.video_id = "explicit-keep".into();
+        explicit_keep.url = "https://www.youtube.com/watch?v=explicit-keep".into();
+        explicit_keep.upload_date = Some("20200101".into());
+
+        let mut explicit_drop = sample_video();
+        explicit_drop.video_id = "explicit-drop".into();
+        explicit_drop.url = "https://www.youtube.com/watch?v=explicit-drop".into();
+        explicit_drop.upload_date = None;
+
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        materialize_youtube_transcript(&root, &source, &old_video, None, &candidate).unwrap();
+        materialize_youtube_transcript(&root, &source, &explicit_keep, None, &candidate).unwrap();
+        materialize_youtube_transcript(&root, &source, &explicit_drop, None, &candidate).unwrap();
+
+        let plan = plan_sourcearium_prune(&root).expect("plan");
+        assert_eq!(plan.inspected_artifacts, 3);
+        assert_eq!(plan.preserved_unresolved, 0);
+        assert_eq!(plan.candidates.len(), 2);
+        assert!(plan.candidates.iter().any(|candidate| {
+            candidate.video_id == "old-video" && candidate.reason == "before_cutoff"
+        }));
+        assert!(plan.candidates.iter().any(|candidate| {
+            candidate.video_id == "explicit-drop"
+                && candidate.reason == "explicitly_excluded"
+        }));
+        assert!(!plan
+            .candidates
+            .iter()
+            .any(|candidate| candidate.video_id == "explicit-keep"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn prune_apply_removes_only_planned_artifacts() {
+        let root = temp_sourcearium();
+        write_policy_with_selection(&root, "alpha", None, &[], &["drop"]);
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+
+        let mut drop_video = sample_video();
+        drop_video.video_id = "drop".into();
+        drop_video.url = "https://www.youtube.com/watch?v=drop".into();
+
+        let mut keep_video = sample_video();
+        keep_video.video_id = "keep".into();
+        keep_video.url = "https://www.youtube.com/watch?v=keep".into();
+
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        let drop_result =
+            materialize_youtube_transcript(&root, &source, &drop_video, None, &candidate).unwrap();
+        let keep_result =
+            materialize_youtube_transcript(&root, &source, &keep_video, None, &candidate).unwrap();
+
+        let plan = plan_sourcearium_prune(&root).expect("plan");
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(apply_sourcearium_prune(&root, &plan).expect("apply"), 1);
+        assert!(!drop_result.path.exists());
+        assert!(keep_result.path.exists());
 
         fs::remove_dir_all(root).expect("cleanup");
     }

@@ -11,9 +11,10 @@ use vessel_asr::{AsrConfig, WhisperCandleBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
-    VesselError, VideoSelection, discover_youtube_sources, inventory_sourcearium_repository,
-    load_config, load_youtube_transcript_artifact, materialize_youtube_transcript,
-    resolve_runtime_layout, validate_sourcearium_repository,
+    VesselError, VideoSelection, apply_sourcearium_prune, discover_youtube_sources,
+    inventory_sourcearium_repository, load_config, load_youtube_transcript_artifact,
+    materialize_youtube_transcript, plan_sourcearium_prune, resolve_runtime_layout,
+    validate_sourcearium_repository,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -54,6 +55,7 @@ enum Commands {
     Update(UpdateArgs),
     Validate(ValidateArgs),
     Inventory(InventoryArgs),
+    Prune(PruneArgs),
     Config(ConfigCommand),
     Dataset(DatasetCommand),
     Channel(ChannelCommand),
@@ -63,6 +65,14 @@ enum Commands {
     Formats(UrlArg),
     Download(DownloadArgs),
     Plugin(PluginCommand),
+}
+
+#[derive(Debug, Args)]
+struct PruneArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Args)]
@@ -307,6 +317,7 @@ async fn main() -> Result<()> {
         Commands::Update(args) => sourcearium_update(args).await,
         Commands::Validate(args) => sourcearium_validate(args),
         Commands::Inventory(args) => sourcearium_inventory(args),
+        Commands::Prune(args) => sourcearium_prune(args),
         Commands::Config(cmd) => match cmd.command {
             ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from, &layout),
         },
@@ -1237,6 +1248,39 @@ fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: Ves
             "video_id": video_id,
             "message": error.to_string(),
         }));
+}
+
+fn sourcearium_prune(args: PruneArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+
+    let plan = plan_sourcearium_prune(&sourcearium_root)?;
+    if args.apply {
+        let removed = apply_sourcearium_prune(&sourcearium_root, &plan)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": "apply",
+                "removed": removed,
+                "plan": plan,
+            }))
+            .map_err(|error| VesselError::Config(error.to_string()))?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": "plan",
+                "removed": 0,
+                "plan": plan,
+            }))
+            .map_err(|error| VesselError::Config(error.to_string()))?
+        );
+    }
+    Ok(())
 }
 
 fn sourcearium_inventory(args: InventoryArgs) -> Result<()> {
