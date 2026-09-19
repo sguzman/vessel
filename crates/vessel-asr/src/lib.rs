@@ -3,7 +3,7 @@ use std::path::Path;
 use vessel_core::{
     Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
 };
-use whisper_core::{TranscribeOptions, device, load_model, transcribe_file};
+use whisper_core::{TranscribeOptions, WhisperModel, device, load_model, transcribe_file};
 
 pub const ENGINE_NAME: &str = "whisper-candle";
 
@@ -34,18 +34,31 @@ struct AsrSegment {
 
 pub struct WhisperCandleBackend {
     config: AsrConfig,
+    model: WhisperModel,
 }
 
 impl WhisperCandleBackend {
-    pub fn new(config: AsrConfig) -> Self {
-        Self { config }
+    pub fn load(config: AsrConfig) -> Result<Self> {
+        let device = device(&config.device).map_err(|error| {
+            asr_error(format!(
+                "failed to initialize ASR device {:?}: {error}",
+                config.device
+            ))
+        })?;
+        let model = load_model(&config.model, &device).map_err(|error| {
+            asr_error(format!(
+                "failed to load Whisper model {:?}: {error}",
+                config.model
+            ))
+        })?;
+        Ok(Self { config, model })
     }
 
     pub fn config(&self) -> &AsrConfig {
         &self.config
     }
 
-    pub fn transcribe_path(&self, path: &Path) -> Result<TranscriptCandidate> {
+    pub fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
         if !path.is_file() {
             return Err(asr_error(format!(
                 "ASR input does not exist or is not a file: {}",
@@ -53,26 +66,13 @@ impl WhisperCandleBackend {
             )));
         }
 
-        let device = device(&self.config.device).map_err(|error| {
-            asr_error(format!(
-                "failed to initialize ASR device {:?}: {error}",
-                self.config.device
-            ))
-        })?;
-        let mut model = load_model(&self.config.model, &device).map_err(|error| {
-            asr_error(format!(
-                "failed to load Whisper model {:?}: {error}",
-                self.config.model
-            ))
-        })?;
-
         let mut options = TranscribeOptions::default();
         options.word_timestamps = self.config.word_timestamps;
         options.decode_options.language = self.config.language.clone();
         options.decode_options.without_timestamps = false;
         options.verbose = None;
 
-        let result = transcribe_file(&mut model, path, &options).map_err(|error| {
+        let result = transcribe_file(&mut self.model, path, &options).map_err(|error| {
             asr_error(format!(
                 "Whisper transcription failed for {}: {error}",
                 path.display()
@@ -138,6 +138,12 @@ fn asr_error(message: impl Into<String>) -> VesselError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loaded_backend_is_safe_to_move_to_blocking_worker() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<WhisperCandleBackend>();
+    }
 
     #[test]
     fn defaults_are_cpu_first_and_multilingual() {

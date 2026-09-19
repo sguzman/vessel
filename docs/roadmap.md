@@ -164,12 +164,15 @@ Implemented additionally:
 - temporary ASR media retained on failure and deleted after successful materialization
 - CLI overrides for ASR model, device, and language
 
+Implemented additionally:
+
+- one Whisper model is loaded lazily and reused across ASR fallbacks in the same update run
+- validator is available through `vessel validate` for offline corpus checks
+
 Remaining:
 
-- reuse one loaded model across many fallback videos in a single update run
 - optional acceleration
 - real-world corpus smoke test against a configured Sourcearium channel
-- validator is now available through `vessel validate` for offline corpus checks
 
 ## Milestone 17: Safe Prune
 

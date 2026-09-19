@@ -82,6 +82,14 @@ The selected Whisper model may be downloaded by the ASR backend on first use and
 
 Model files are operational dependencies, not Sourcearium artifacts.
 
+## Model Lifetime
+
+Whisper is loaded lazily on the first video that actually needs local ASR.
+
+The loaded model is then reused for later ASR fallbacks in the same `vessel update` run. Channels fully covered by creator/platform captions never pay model-load cost.
+
+Inference remains on Tokio's blocking pool rather than the async runtime.
+
 ## Future Acceleration
 
 GPU support may be added as an operational flag/configuration without changing Sourcearium artifact schema or transcript-provider semantics.

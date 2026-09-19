@@ -346,6 +346,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
 
     let sources = discover_youtube_sources(&sourcearium_root)?;
     let asr_config = resolve_asr_config(&args);
+    let mut asr_backend: Option<WhisperCandleBackend> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
     let mut limit_reached = false;
@@ -541,8 +542,18 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             } else if policy.transcripts.allow_local_asr {
                 increment_summary(&mut summary, "requires_local_asr", 1);
                 increment_summary(&mut summary, "local_asr_attempted", 1);
-                match acquire_local_asr_candidate(&sourcearium_root, &video, &asr_config).await {
-                    Ok((candidate, cache_dir)) => (candidate, Some(cache_dir)),
+                match acquire_local_asr_candidate(
+                    &sourcearium_root,
+                    &video,
+                    asr_backend.take(),
+                    &asr_config,
+                )
+                .await
+                {
+                    Ok((candidate, cache_dir, backend)) => {
+                        asr_backend = Some(backend);
+                        (candidate, Some(cache_dir))
+                    }
                     Err(error) => {
                         push_update_error(&mut summary, &video.video_id, error);
                         continue;
@@ -606,6 +617,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "model": asr_config.model,
             "device": asr_config.device,
             "language": asr_config.language,
+            "model_loaded": asr_backend.is_some(),
         },
     });
     println!(
@@ -633,8 +645,9 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
 async fn acquire_local_asr_candidate(
     sourcearium_root: &Path,
     video: &VideoMetadata,
+    backend: Option<WhisperCandleBackend>,
     config: &AsrConfig,
-) -> Result<(TranscriptCandidate, PathBuf)> {
+) -> Result<(TranscriptCandidate, PathBuf, WhisperCandleBackend)> {
     let cache_dir = sourcearium_root
         .join(".cache")
         .join("vessel")
@@ -668,15 +681,22 @@ async fn acquire_local_asr_candidate(
         transcode_asr_audio(&source_audio, &whisper_wav).await?;
     }
 
-    let backend = WhisperCandleBackend::new(config.clone());
+    let config = config.clone();
     let wav_for_worker = whisper_wav.clone();
-    let candidate = tokio::task::spawn_blocking(move || backend.transcribe_path(&wav_for_worker))
-        .await
-        .map_err(|error| {
-            VesselError::Extractor(format!("local ASR worker failed to join: {error}"))
-        })??;
+    let (candidate, backend) = tokio::task::spawn_blocking(move || {
+        let mut backend = match backend {
+            Some(backend) => backend,
+            None => WhisperCandleBackend::load(config)?,
+        };
+        let candidate = backend.transcribe_path(&wav_for_worker)?;
+        Ok::<_, VesselError>((candidate, backend))
+    })
+    .await
+    .map_err(|error| {
+        VesselError::Extractor(format!("local ASR worker failed to join: {error}"))
+    })??;
 
-    Ok((candidate, cache_dir))
+    Ok((candidate, cache_dir, backend))
 }
 
 async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
