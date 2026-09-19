@@ -676,7 +676,8 @@ async fn crawl_channel_tabs(
     existing_cursors: &[ChannelTabCursor],
 ) -> Result<ChannelVideoCrawlReport> {
     let tabs = ["videos", "shorts", "streams"];
-    let mut videos_by_id = BTreeMap::<String, ChannelVideoRef>::new();
+    let mut videos = Vec::<ChannelVideoRef>::new();
+    let mut seen_video_ids = HashSet::<String>::new();
     let mut cursors_out = Vec::new();
     let mut videos_per_tab = BTreeMap::new();
     let mut tabs_visited = Vec::new();
@@ -773,12 +774,8 @@ async fn crawl_channel_tabs(
         }
 
         let discovered_total = tab_videos.len();
-        let mut unique_for_tab = 0usize;
-        for video in tab_videos {
-            if videos_by_id.insert(video.video_id.clone(), video).is_none() {
-                unique_for_tab += 1;
-            }
-        }
+        let unique_for_tab =
+            append_unique_channel_videos(&mut videos, &mut seen_video_ids, tab_videos);
         videos_per_tab.insert(tab_name.to_owned(), unique_for_tab);
         let backfill_complete = next_continuation.is_none();
         debug!(
@@ -802,7 +799,7 @@ async fn crawl_channel_tabs(
     }
 
     Ok(ChannelVideoCrawlReport {
-        videos: videos_by_id.into_values().collect(),
+        videos,
         cursors: cursors_out,
         videos_per_tab,
         tabs_visited,
@@ -879,6 +876,21 @@ fn find_tab_browse_endpoint(value: &Value, target_tab: &str) -> Option<(String, 
             .map(ToOwned::to_owned);
         Some((browse_id, params))
     })
+}
+
+fn append_unique_channel_videos(
+    output: &mut Vec<ChannelVideoRef>,
+    seen_video_ids: &mut HashSet<String>,
+    candidates: Vec<ChannelVideoRef>,
+) -> usize {
+    let mut inserted = 0usize;
+    for video in candidates {
+        if seen_video_ids.insert(video.video_id.clone()) {
+            output.push(video);
+            inserted += 1;
+        }
+    }
+    inserted
 }
 
 fn collect_channel_video_refs(value: &Value, tab_name: &str, output: &mut Vec<ChannelVideoRef>) {
@@ -1613,11 +1625,16 @@ fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_channel_video_refs, extract_embedded_json, find_next_comment_continuation,
+        append_unique_channel_videos, collect_channel_video_refs, extract_embedded_json,
+        find_next_comment_continuation,
         merge_streaming_data, parse_channel_metadata, parse_comment_page, parse_compact_count,
         parse_video_id_from_url, parse_video_metadata,
     };
+    use std::collections::HashSet;
+
     use time::OffsetDateTime;
+
+    use super::ChannelVideoRef;
 
     #[test]
     fn parses_watch_url_video_id() {
@@ -1710,6 +1727,57 @@ mod tests {
         assert_eq!(videos[0].video_id, "abc123");
         assert_eq!(videos[0].tab_name, "videos");
         assert_eq!(videos[1].title.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn channel_video_deduplication_preserves_discovery_order() {
+        let mut output = Vec::new();
+        let mut seen = HashSet::new();
+
+        let first = vec![
+            ChannelVideoRef {
+                video_id: "newest".into(),
+                tab_name: "videos".into(),
+                title: None,
+                published_at: None,
+            },
+            ChannelVideoRef {
+                video_id: "middle".into(),
+                tab_name: "videos".into(),
+                title: None,
+                published_at: None,
+            },
+        ];
+        let second = vec![
+            ChannelVideoRef {
+                video_id: "middle".into(),
+                tab_name: "shorts".into(),
+                title: None,
+                published_at: None,
+            },
+            ChannelVideoRef {
+                video_id: "oldest".into(),
+                tab_name: "videos".into(),
+                title: None,
+                published_at: None,
+            },
+        ];
+
+        assert_eq!(
+            append_unique_channel_videos(&mut output, &mut seen, first),
+            2
+        );
+        assert_eq!(
+            append_unique_channel_videos(&mut output, &mut seen, second),
+            1
+        );
+        assert_eq!(
+            output
+                .iter()
+                .map(|video| video.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newest", "middle", "oldest"]
+        );
     }
 
     #[test]

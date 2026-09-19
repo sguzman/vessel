@@ -405,7 +405,7 @@ SELECT video_id
 FROM channel_video_membership
 WHERE channel_id = ?1
 GROUP BY video_id
-ORDER BY MAX(discovered_at) DESC, video_id ASC
+ORDER BY MIN(discovered_at) ASC, video_id ASC
 "#,
         )
         .bind(channel_id)

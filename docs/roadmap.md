@@ -126,6 +126,7 @@ Implemented:
 - completed backfills refresh first pages without recrawling full history
 - discovered channel/video membership stays operational rather than entering corpus files
 - membership table is used as a persistent processing backlog, so `--max-videos` cannot strand older discovered videos
+- channel discovery order is preserved instead of sorting by opaque video IDs, making limited runs process the upstream order predictably
 - cursor advancement is gated on durable membership persistence, so an operational-state failure causes safe rediscovery instead of silent loss
 - upgrade probes for weaker existing transcripts are operationally throttled (30 days by default) instead of refetching every historical watch page on every run
 - exact resolved publication dates are cached as replaceable operational state, so date-cutoff exclusions do not require repeated watch-page fetches
