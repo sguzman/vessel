@@ -61,6 +61,13 @@ pub fn validate_sourcearium_repository(
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("README.md"))
+        {
+            continue;
+        }
 
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -725,6 +732,22 @@ input = "https://www.youtube.com/@{key}"
         let second = materialize_youtube_transcript(&root, &source, &video, None, &weak).unwrap();
         assert_eq!(second.status, MaterializeStatus::PreservedStronger);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_validator_ignores_source_tree_readmes() {
+        let root = temp_sourcearium();
+        fs::write(
+            root.join("sources").join("README.md"),
+            "# Source documentation\n",
+        )
+        .unwrap();
+
+        let report = validate_sourcearium_repository(&root).unwrap();
+        assert!(report.valid);
+        assert_eq!(report.artifacts_validated, 0);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
