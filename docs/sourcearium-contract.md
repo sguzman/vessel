@@ -240,7 +240,9 @@ Prune must preserve:
 - artifacts merely because transcript acquisition was disabled
 - artifacts whose upstream source is missing/private/unreachable
 
-Before removal, Vessel reparses the file, confirms artifact identity, canonicalizes the path, and refuses any path outside the Sourcearium `sources/` tree.
+Before removal, Vessel reparses every candidate, confirms artifact identity, canonicalizes every path, and refuses any path outside the Sourcearium `sources/` tree.
+
+The complete prune plan is validated before the first deletion occurs. A stale or invalid candidate therefore aborts the apply phase with zero removals rather than producing a partially applied prune.
 
 ## Compatibility Rule
 
