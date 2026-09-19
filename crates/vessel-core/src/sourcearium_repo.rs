@@ -12,6 +12,91 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SourceariumInventoryReport {
+    pub youtube_policies: usize,
+    pub artifacts: usize,
+    pub by_family: BTreeMap<String, usize>,
+    pub by_kind: BTreeMap<String, usize>,
+    pub by_derivation: BTreeMap<String, usize>,
+    pub by_language: BTreeMap<String, usize>,
+    pub invalid_artifacts: Vec<String>,
+}
+
+pub fn inventory_sourcearium_repository(
+    sourcearium_root: &Path,
+) -> Result<SourceariumInventoryReport> {
+    let sources_root = sourcearium_root.join("sources");
+    if !sources_root.is_dir() {
+        return Err(corpus_error(format!(
+            "Sourcearium sources directory is missing: {}",
+            sources_root.display()
+        )));
+    }
+
+    let youtube_policies = discover_youtube_sources(sourcearium_root)?.len();
+    let mut files = Vec::new();
+    collect_files(&sources_root, &mut files)?;
+    files.sort();
+
+    let mut artifacts = 0usize;
+    let mut by_family = BTreeMap::new();
+    let mut by_kind = BTreeMap::new();
+    let mut by_derivation = BTreeMap::new();
+    let mut by_language = BTreeMap::new();
+    let mut invalid_artifacts = Vec::new();
+
+    for path in files {
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("README.md"))
+        {
+            continue;
+        }
+
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                invalid_artifacts.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        let (artifact, _) = match SourceariumArtifactV1::parse_markdown(&raw) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                invalid_artifacts.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+
+        artifacts += 1;
+        increment_inventory(&mut by_family, &artifact.source.family);
+        increment_inventory(&mut by_kind, &artifact.kind);
+        increment_inventory(&mut by_derivation, &artifact.representation.derivation);
+        if let Some(language) = artifact.representation.language.as_deref() {
+            increment_inventory(&mut by_language, language);
+        }
+    }
+
+    Ok(SourceariumInventoryReport {
+        youtube_policies,
+        artifacts,
+        by_family,
+        by_kind,
+        by_derivation,
+        by_language,
+        invalid_artifacts,
+    })
+}
+
+fn increment_inventory(map: &mut BTreeMap<String, usize>, key: &str) {
+    *map.entry(key.to_owned()).or_insert(0) += 1;
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SourceariumValidationReport {
     pub valid: bool,
     pub policies_validated: usize,
@@ -786,6 +871,32 @@ input = "https://www.youtube.com/@{key}"
         let second = materialize_youtube_transcript(&root, &source, &video, None, &weak).unwrap();
         assert_eq!(second.status, MaterializeStatus::PreservedStronger);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_inventory_summarizes_materialized_artifacts() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::PlatformAutoCaption);
+
+        materialize_youtube_transcript(&root, &source, &video, None, &candidate)
+            .expect("materialize");
+
+        let inventory = inventory_sourcearium_repository(&root).expect("inventory");
+        assert_eq!(inventory.youtube_policies, 1);
+        assert_eq!(inventory.artifacts, 1);
+        assert_eq!(inventory.by_family.get("youtube"), Some(&1));
+        assert_eq!(inventory.by_kind.get("transcript"), Some(&1));
+        assert_eq!(
+            inventory.by_derivation.get("platform_auto_caption"),
+            Some(&1)
+        );
+        assert_eq!(inventory.by_language.get("en"), Some(&1));
+        assert!(inventory.invalid_artifacts.is_empty());
 
         fs::remove_dir_all(root).expect("cleanup");
     }

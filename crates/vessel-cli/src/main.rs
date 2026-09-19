@@ -11,9 +11,9 @@ use vessel_asr::{AsrConfig, WhisperCandleBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
-    VesselError, VideoSelection, discover_youtube_sources, load_config,
-    load_youtube_transcript_artifact, materialize_youtube_transcript, resolve_runtime_layout,
-    validate_sourcearium_repository,
+    VesselError, VideoSelection, discover_youtube_sources, inventory_sourcearium_repository,
+    load_config, load_youtube_transcript_artifact, materialize_youtube_transcript,
+    resolve_runtime_layout, validate_sourcearium_repository,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -53,6 +53,7 @@ enum Commands {
     Doctor,
     Update(UpdateArgs),
     Validate(ValidateArgs),
+    Inventory(InventoryArgs),
     Config(ConfigCommand),
     Dataset(DatasetCommand),
     Channel(ChannelCommand),
@@ -62,6 +63,12 @@ enum Commands {
     Formats(UrlArg),
     Download(DownloadArgs),
     Plugin(PluginCommand),
+}
+
+#[derive(Debug, Args)]
+struct InventoryArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -84,6 +91,8 @@ struct UpdateArgs {
     asr_language: Option<String>,
     #[arg(long = "upgrade-check-days", default_value_t = 30)]
     upgrade_check_days: u64,
+    #[arg(long = "report-items")]
+    report_items: bool,
 }
 
 #[derive(Debug, Args)]
@@ -295,6 +304,7 @@ async fn main() -> Result<()> {
         Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
         Commands::Update(args) => sourcearium_update(args).await,
         Commands::Validate(args) => sourcearium_validate(args),
+        Commands::Inventory(args) => sourcearium_inventory(args),
         Commands::Config(cmd) => match cmd.command {
             ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from, &layout),
         },
@@ -384,6 +394,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "unresolved_no_provider": 0,
             "errors": [],
         });
+        if args.report_items {
+            summary["items"] = serde_json::json!([]);
+        }
 
         if !policy.transcripts.enabled {
             summary["status"] = serde_json::Value::String("transcripts_disabled".into());
@@ -602,10 +615,24 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             match initial_selection {
                 VideoSelection::ExplicitlyExcluded => {
                     increment_summary(&mut summary, "explicitly_excluded", 1);
+                    push_update_item(
+                        &mut summary,
+                        args.report_items,
+                        &video_ref.video_id,
+                        "excluded_explicit",
+                        serde_json::json!({}),
+                    );
                     continue;
                 }
                 VideoSelection::BeforeCutoff => {
                     increment_summary(&mut summary, "outside_date_policy", 1);
+                    push_update_item(
+                        &mut summary,
+                        args.report_items,
+                        &video_ref.video_id,
+                        "excluded_before_cutoff",
+                        serde_json::json!({"published_on": known_date}),
+                    );
                     continue;
                 }
                 VideoSelection::Included
@@ -617,6 +644,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 match existing_artifact.artifact.representation.derivation.as_str() {
                     "creator_subtitles" => {
                         increment_summary(&mut summary, "already_strongest", 1);
+                        push_update_item(
+                            &mut summary,
+                            args.report_items,
+                            &video_ref.video_id,
+                            "already_strongest",
+                            serde_json::json!({"derivation": "creator_subtitles"}),
+                        );
                         continue;
                     }
                     "platform_auto_caption" | "local_asr" => {
@@ -636,11 +670,25 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                             OffsetDateTime::now_utc(),
                         ) {
                             increment_summary(&mut summary, "upgrade_check_deferred", 1);
+                            push_update_item(
+                                &mut summary,
+                                args.report_items,
+                                &video_ref.video_id,
+                                "upgrade_check_deferred",
+                                serde_json::json!({"derivation": existing_artifact.artifact.representation.derivation}),
+                            );
                             continue;
                         }
                     }
                     _ => {
                         increment_summary(&mut summary, "existing_unmanaged", 1);
+                        push_update_item(
+                            &mut summary,
+                            args.report_items,
+                            &video_ref.video_id,
+                            "existing_unmanaged",
+                            serde_json::json!({"derivation": existing_artifact.artifact.representation.derivation}),
+                        );
                         continue;
                     }
                 }
@@ -713,6 +761,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 }
                 VideoSelection::PublicationDateUnresolved => {
                     increment_summary(&mut summary, "unresolved_date", 1);
+                    push_update_item(
+                        &mut summary,
+                        args.report_items,
+                        &video.video_id,
+                        "unresolved_publication_date",
+                        serde_json::json!({}),
+                    );
                     continue;
                 }
                 VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {}
@@ -730,6 +785,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 (candidate, None)
             } else if existing.is_some() {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
+                push_update_item(
+                    &mut summary,
+                    args.report_items,
+                    &video.video_id,
+                    "preserved_without_better_caption",
+                    serde_json::json!({}),
+                );
                 match operational_store
                     .mark_transcript_probed(&video.video_id)
                     .await
@@ -760,6 +822,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 }
             } else {
                 increment_summary(&mut summary, "unresolved_no_provider", 1);
+                push_update_item(
+                    &mut summary,
+                    args.report_items,
+                    &video.video_id,
+                    "unresolved_no_provider",
+                    serde_json::json!({}),
+                );
                 continue;
             };
 
@@ -771,19 +840,38 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 &candidate,
             ) {
                 Ok(result) => {
-                    match result.status {
-                        MaterializeStatus::Created => increment_summary(&mut summary, "created", 1),
-                        MaterializeStatus::Updated => increment_summary(&mut summary, "updated", 1),
+                    let materialize_action = match result.status {
+                        MaterializeStatus::Created => {
+                            increment_summary(&mut summary, "created", 1);
+                            "created"
+                        }
+                        MaterializeStatus::Updated => {
+                            increment_summary(&mut summary, "updated", 1);
+                            "updated"
+                        }
                         MaterializeStatus::Unchanged => {
-                            increment_summary(&mut summary, "unchanged", 1)
+                            increment_summary(&mut summary, "unchanged", 1);
+                            "unchanged"
                         }
                         MaterializeStatus::PreservedStronger => {
-                            increment_summary(&mut summary, "preserved_stronger", 1)
+                            increment_summary(&mut summary, "preserved_stronger", 1);
+                            "preserved_stronger"
                         }
                         MaterializeStatus::PreservedUnknownDerivation => {
-                            increment_summary(&mut summary, "preserved_unknown_derivation", 1)
+                            increment_summary(&mut summary, "preserved_unknown_derivation", 1);
+                            "preserved_unknown_derivation"
                         }
-                    }
+                    };
+                    push_update_item(
+                        &mut summary,
+                        args.report_items,
+                        &video.video_id,
+                        materialize_action,
+                        serde_json::json!({
+                            "derivation": candidate.derivation.as_str(),
+                            "path": result.path,
+                        }),
+                    );
 
                     match operational_store
                         .mark_transcript_probed(&video.video_id)
@@ -1039,6 +1127,26 @@ fn normalize_update_publication_date(value: Option<&str>) -> Option<String> {
     None
 }
 
+fn push_update_item(
+    summary: &mut serde_json::Value,
+    enabled: bool,
+    video_id: &str,
+    action: &str,
+    details: serde_json::Value,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(items) = summary.get_mut("items").and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    items.push(serde_json::json!({
+        "video_id": video_id,
+        "action": action,
+        "details": details,
+    }));
+}
+
 fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: VesselError) {
     summary["errors"]
         .as_array_mut()
@@ -1047,6 +1155,21 @@ fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: Ves
             "video_id": video_id,
             "message": error.to_string(),
         }));
+}
+
+fn sourcearium_inventory(args: InventoryArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+    let report = inventory_sourcearium_repository(&sourcearium_root)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
 }
 
 fn sourcearium_validate(args: ValidateArgs) -> Result<()> {
@@ -2865,7 +2988,8 @@ mod tests {
 
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
-        resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
+        push_update_item, resolve_asr_config, resolve_configured_channels,
+        transcript_upgrade_probe_due,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
@@ -2904,6 +3028,7 @@ mod tests {
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
             upgrade_check_days: 30,
+            report_items: false,
         };
         let config = resolve_asr_config(&args);
         assert_eq!(config.model, "base");
@@ -2926,6 +3051,30 @@ mod tests {
         assert!(transcript_upgrade_probe_due(None, 30, now));
         assert!(transcript_upgrade_probe_due(Some(&recent), 0, now));
         assert!(transcript_upgrade_probe_due(Some("invalid"), 30, now));
+    }
+
+    #[test]
+    fn report_items_are_opt_in_and_structured() {
+        let mut summary = serde_json::json!({"items": []});
+        push_update_item(
+            &mut summary,
+            true,
+            "abc123",
+            "created",
+            serde_json::json!({"derivation": "creator_subtitles"}),
+        );
+        assert_eq!(summary["items"][0]["video_id"], "abc123");
+        assert_eq!(summary["items"][0]["action"], "created");
+
+        let mut disabled = serde_json::json!({"items": []});
+        push_update_item(
+            &mut disabled,
+            false,
+            "abc123",
+            "created",
+            serde_json::json!({}),
+        );
+        assert_eq!(disabled["items"].as_array().unwrap().len(), 0);
     }
 
     #[test]
