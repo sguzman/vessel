@@ -9,6 +9,8 @@ pub enum VesselError {
     Config(String),
     #[error("extractor error: {0}")]
     Extractor(String),
+    #[error("corpus error: {0}")]
+    Corpus(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]
