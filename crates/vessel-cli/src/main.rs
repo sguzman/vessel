@@ -809,7 +809,12 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             }
         }
 
-        summary["status"] = serde_json::Value::String("ok".into());
+        let source_has_errors = summary["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty());
+        summary["status"] = serde_json::Value::String(
+            if source_has_errors { "partial" } else { "ok" }.into(),
+        );
         source_reports.push(summary);
 
         if limit_reached {
@@ -817,8 +822,22 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         }
     }
 
+    let total_errors = source_reports
+        .iter()
+        .filter_map(|source| source["errors"].as_array())
+        .map(Vec::len)
+        .sum::<usize>();
+    let report_status = if total_errors > 0 {
+        "partial"
+    } else if limit_reached {
+        "limited"
+    } else {
+        "ok"
+    };
+
     let report = serde_json::json!({
-        "status": "ok",
+        "status": report_status,
+        "error_count": total_errors,
         "sourcearium_root": sourcearium_root,
         "operational_state": {
             "sqlite": operational_db_path,
