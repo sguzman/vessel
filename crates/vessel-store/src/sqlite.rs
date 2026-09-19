@@ -849,6 +849,35 @@ ORDER BY recorded_at DESC
     }
 }
 
+pub async fn init_sqlite_database_path(path: &Path) -> Result<(SqliteStore, DatabasePaths)> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(|err| VesselError::Database(err.to_string()))?;
+    apply_schema(&pool).await?;
+
+    let requested = path.to_string_lossy().into_owned();
+    let sqlite_url = format!("sqlite://{}", requested.replace('\\', "/"));
+    info!(database = %requested, "sqlite initialized from filesystem path");
+
+    Ok((
+        SqliteStore::new(pool),
+        DatabasePaths {
+            requested,
+            sqlite_url,
+        },
+    ))
+}
+
 pub async fn init_sqlite_database(target: &str) -> Result<(SqliteStore, DatabasePaths)> {
     let sqlite_url = normalize_sqlite_target(target);
     ensure_sqlite_parent_dir(&sqlite_url)?;
@@ -1826,6 +1855,22 @@ mod tests {
             fetched_at,
             raw: serde_json::json!({ "text": text }),
         }
+    }
+
+    #[tokio::test]
+    async fn filesystem_path_database_initialization_avoids_url_parsing() {
+        let path = temp_db_path("filesystem-path");
+        let (store, paths) = super::init_sqlite_database_path(&path)
+            .await
+            .expect("path db init");
+
+        assert_eq!(paths.requested, path.to_string_lossy());
+        assert!(store.list_tracked_channels().await.is_ok());
+
+        drop(store);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[tokio::test]

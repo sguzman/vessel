@@ -27,7 +27,7 @@ use vessel_extractors::{
 use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
 use vessel_postprocess::{PostprocessRequest, build_plan, execute_plan};
-use vessel_store::init_sqlite_database;
+use vessel_store::{init_sqlite_database, init_sqlite_database_path};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -353,8 +353,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         .join(".cache")
         .join("vessel")
         .join("vessel.sqlite");
-    let operational_db_url = format!("sqlite://{}", operational_db_path.display());
-    let (operational_store, _) = init_sqlite_database(&operational_db_url).await?;
+    let (operational_store, _) = init_sqlite_database_path(&operational_db_path).await?;
     let mut asr_backend: Option<WhisperCandleBackend> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;

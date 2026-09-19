@@ -50,6 +50,8 @@ When `vessel update` operates directly on a Sourcearium checkout, its disposable
 
 The SQLite database stores crawl cursors, discovered backlog, transcript upgrade-probe timestamps, and other acquisition memory. It is explicitly not corpus authority.
 
+Sourcearium-local SQLite is opened through SQLx's filesystem-path API rather than by constructing a URL from the path. This is intentional for native Windows paths such as `C:\...\sourcearium\.cache\vessel\vessel.sqlite`.
+
 Deleting `.cache/vessel/` must not delete or invalidate existing Sourcearium artifacts; it only makes future acquisition more expensive because Vessel must rediscover state.
 
 A completed YouTube backfill still refreshes each tab's initial page on later runs so new uploads are noticed, while old continuation pages are not repeatedly traversed.

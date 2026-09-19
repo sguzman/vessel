@@ -7,4 +7,5 @@ pub use sqlite::{
     CommentRevision, DatabasePaths, SqliteStore, StoredChannelTabCursor, StoredComment,
     StoredSubtitleTrack, StoredTrackedChannel, StoredVideoLatest, SubtitleHistory,
     SubtitleRevision, VideoHistory, VideoMetricSample, VideoRevision, init_sqlite_database,
+    init_sqlite_database_path,
 };
