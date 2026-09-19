@@ -83,6 +83,16 @@ The artifact ID must not depend on:
 - fetch date
 - local database IDs
 
+## Channel Provenance
+
+When channel metadata is available during update:
+
+- channel display title is written to `source.creator`
+- stable channel ID is written to `source.creator_id`
+- current handle may be written under `[extensions.youtube]` as `channel_handle`
+
+The stable ID remains identity. Display title and handle are provenance/convenience and may change upstream.
+
 ## Recommended Path
 
 ```text

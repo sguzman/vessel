@@ -742,7 +742,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 continue;
             };
 
-            match materialize_youtube_transcript(&sourcearium_root, &source, &video, &candidate) {
+            match materialize_youtube_transcript(
+                &sourcearium_root,
+                &source,
+                &video,
+                Some(&channel),
+                &candidate,
+            ) {
                 Ok(result) => {
                     match result.status {
                         MaterializeStatus::Created => increment_summary(&mut summary, "created", 1),

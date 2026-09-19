@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::models::VideoMetadata;
+use crate::models::{ChannelMetadata, VideoMetadata};
 use crate::{
     AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, TranscriptCandidate,
     TranscriptDerivation, VesselError, YoutubeSourcePolicyV1,
@@ -275,6 +275,7 @@ pub fn materialize_youtube_transcript(
     sourcearium_root: &Path,
     source: &SourceariumYoutubeSource,
     video: &VideoMetadata,
+    channel: Option<&ChannelMetadata>,
     candidate: &TranscriptCandidate,
 ) -> Result<MaterializeResult> {
     candidate.validate()?;
@@ -298,6 +299,13 @@ pub fn materialize_youtube_transcript(
         TranscriptDerivation::LocalAsr => "local_asr",
     };
 
+    let mut extensions = BTreeMap::new();
+    if let Some(handle) = channel.and_then(|channel| channel.handle.as_deref()) {
+        let mut youtube = toml::Table::new();
+        youtube.insert("channel_handle".into(), toml::Value::String(handle.to_owned()));
+        extensions.insert("youtube".into(), youtube);
+    }
+
     let artifact = SourceariumArtifactV1 {
         schema: 1,
         artifact_id: artifact_id.clone(),
@@ -308,8 +316,11 @@ pub fn materialize_youtube_transcript(
             kind: "video".into(),
             id: video.video_id.clone(),
             url: Some(video.url.clone()),
-            creator: None,
-            creator_id: video.channel_id.clone(),
+            creator: channel.and_then(|channel| channel.title.clone()),
+            creator_id: video
+                .channel_id
+                .clone()
+                .or_else(|| channel.map(|channel| channel.channel_id.clone())),
             published: normalized_publication_date(video.upload_date.as_deref()),
         },
         representation,
@@ -319,7 +330,7 @@ pub fn materialize_youtube_transcript(
             acquired_at: None,
             method: Some(acquisition_method.into()),
         },
-        extensions: Default::default(),
+        extensions,
     };
     let rendered = artifact.to_markdown(&body)?;
 
@@ -594,6 +605,24 @@ input = "https://www.youtube.com/@{key}"
         }
     }
 
+    fn sample_channel() -> ChannelMetadata {
+        ChannelMetadata {
+            platform: Platform::YouTube,
+            channel_id: "UCexample".into(),
+            handle: Some("@example".into()),
+            url: "https://www.youtube.com/@example".into(),
+            title: Some("Example Channel".into()),
+            description: None,
+            subscriber_count: None,
+            video_count: None,
+            view_count: None,
+            avatar_url: None,
+            banner_url: None,
+            fetched_at: OffsetDateTime::UNIX_EPOCH,
+            raw: Value::Null,
+        }
+    }
+
     fn sample_candidate(derivation: TranscriptDerivation) -> TranscriptCandidate {
         TranscriptCandidate {
             derivation,
@@ -609,6 +638,31 @@ input = "https://www.youtube.com/@{key}"
     }
 
     #[test]
+    fn materialization_preserves_channel_creator_provenance() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let channel = sample_channel();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+
+        let result =
+            materialize_youtube_transcript(&root, &source, &video, Some(&channel), &candidate)
+                .expect("materialize");
+        let raw = fs::read_to_string(&result.path).unwrap();
+        let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw).unwrap();
+
+        assert_eq!(artifact.source.creator.as_deref(), Some("Example Channel"));
+        assert_eq!(artifact.source.creator_id.as_deref(), Some("UCexample"));
+        assert_eq!(
+            artifact.extensions["youtube"]["channel_handle"].as_str(),
+            Some("@example")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn materialization_is_noop_when_bytes_are_unchanged() {
         let root = temp_sourcearium();
         write_policy(&root, "alpha", "alpha");
@@ -617,7 +671,7 @@ input = "https://www.youtube.com/@{key}"
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
 
         let first =
-            materialize_youtube_transcript(&root, &source, &video, &candidate).expect("first");
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).expect("first");
         assert_eq!(first.status, MaterializeStatus::Created);
         assert!(
             first
@@ -626,7 +680,7 @@ input = "https://www.youtube.com/@{key}"
         );
 
         let second =
-            materialize_youtube_transcript(&root, &source, &video, &candidate).expect("second");
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).expect("second");
         assert_eq!(second.status, MaterializeStatus::Unchanged);
         assert_eq!(second.path, first.path);
 
@@ -641,11 +695,11 @@ input = "https://www.youtube.com/@{key}"
         let mut video = sample_video();
 
         let weak = sample_candidate(TranscriptDerivation::LocalAsr);
-        let first = materialize_youtube_transcript(&root, &source, &video, &weak).unwrap();
+        let first = materialize_youtube_transcript(&root, &source, &video, None, &weak).unwrap();
 
         video.title = Some("Renamed Upstream Title".into());
         let strong = sample_candidate(TranscriptDerivation::CreatorSubtitles);
-        let second = materialize_youtube_transcript(&root, &source, &video, &strong).unwrap();
+        let second = materialize_youtube_transcript(&root, &source, &video, None, &strong).unwrap();
 
         assert_eq!(second.status, MaterializeStatus::Updated);
         assert_eq!(second.path, first.path);
@@ -664,11 +718,11 @@ input = "https://www.youtube.com/@{key}"
         let video = sample_video();
 
         let strong = sample_candidate(TranscriptDerivation::CreatorSubtitles);
-        let first = materialize_youtube_transcript(&root, &source, &video, &strong).unwrap();
+        let first = materialize_youtube_transcript(&root, &source, &video, None, &strong).unwrap();
         let original = fs::read_to_string(&first.path).unwrap();
 
         let weak = sample_candidate(TranscriptDerivation::LocalAsr);
-        let second = materialize_youtube_transcript(&root, &source, &video, &weak).unwrap();
+        let second = materialize_youtube_transcript(&root, &source, &video, None, &weak).unwrap();
         assert_eq!(second.status, MaterializeStatus::PreservedStronger);
         assert_eq!(fs::read_to_string(&second.path).unwrap(), original);
 
@@ -682,7 +736,7 @@ input = "https://www.youtube.com/@{key}"
         let source = discover_youtube_sources(&root).unwrap().remove(0);
         let video = sample_video();
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
-        let first = materialize_youtube_transcript(&root, &source, &video, &candidate).unwrap();
+        let first = materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
 
         let duplicate = source.source_dir.join("transcripts").join("duplicate.md");
         fs::copy(&first.path, &duplicate).unwrap();
@@ -707,7 +761,7 @@ input = "https://www.youtube.com/@{key}"
         let video = sample_video();
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
         let materialized =
-            materialize_youtube_transcript(&root, &source, &video, &candidate).unwrap();
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
         let raw = fs::read_to_string(&materialized.path).unwrap();
         let raw = raw.replace(
             "[00:00:03] Hello corpus.",
