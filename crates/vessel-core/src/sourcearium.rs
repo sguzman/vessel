@@ -137,13 +137,13 @@ impl SourceariumArtifactV1 {
 
     pub fn parse_markdown(input: &str) -> Result<(Self, String)> {
         let normalized = normalize_line_endings(input);
-        let rest = normalized
-            .strip_prefix("+++\n")
-            .ok_or_else(|| corpus_error("Sourcearium artifact is missing opening TOML delimiter"))?;
+        let rest = normalized.strip_prefix("+++\n").ok_or_else(|| {
+            corpus_error("Sourcearium artifact is missing opening TOML delimiter")
+        })?;
         let marker = "\n+++\n";
-        let end = rest
-            .find(marker)
-            .ok_or_else(|| corpus_error("Sourcearium artifact is missing closing TOML delimiter"))?;
+        let end = rest.find(marker).ok_or_else(|| {
+            corpus_error("Sourcearium artifact is missing closing TOML delimiter")
+        })?;
         let front_matter = &rest[..end];
         let body = rest[end + marker.len()..]
             .strip_prefix('\n')
@@ -498,9 +498,7 @@ mod tests {
     #[test]
     fn artifact_round_trips_through_markdown_parser() {
         let artifact = base_artifact();
-        let rendered = artifact
-            .to_markdown("[00:00:03] Hello.\n")
-            .expect("render");
+        let rendered = artifact.to_markdown("[00:00:03] Hello.\n").expect("render");
         let (parsed, body) = SourceariumArtifactV1::parse_markdown(&rendered).expect("parse");
         assert_eq!(parsed, artifact);
         assert_eq!(body, "[00:00:03] Hello.\n");
