@@ -8,13 +8,14 @@ use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, Result, RuntimeLayout, VesselError, load_config,
-    resolve_runtime_layout,
+    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, VesselError,
+    VideoSelection, discover_youtube_sources, load_config, load_youtube_transcript_artifact,
+    materialize_youtube_transcript, resolve_runtime_layout,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, crawl_channel_videos, extract_channel,
-    extract_comments, extract_video,
+    ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, acquire_best_caption_candidate,
+    crawl_channel_videos, extract_channel, extract_comments, extract_video,
 };
 use vessel_extractors::{
     ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog,
@@ -47,6 +48,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Doctor,
+    Update(UpdateArgs),
     Config(ConfigCommand),
     Dataset(DatasetCommand),
     Channel(ChannelCommand),
@@ -56,6 +58,14 @@ enum Commands {
     Formats(UrlArg),
     Download(DownloadArgs),
     Plugin(PluginCommand),
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "max-videos")]
+    max_videos: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -265,6 +275,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
+        Commands::Update(args) => sourcearium_update(args).await,
         Commands::Config(cmd) => match cmd.command {
             ConfigSubcommand::Show => show_config(&config, &paths, &loaded_from, &layout),
         },
@@ -301,6 +312,314 @@ async fn main() -> Result<()> {
             PluginSubcommand::Install(args) => plugin_install(args, &paths, &layout).await,
         },
     }
+}
+
+async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+
+    if !sourcearium_root.join("sourcearium.toml").is_file() {
+        return Err(VesselError::Corpus(format!(
+            "{} does not look like a Sourcearium root; sourcearium.toml is missing",
+            sourcearium_root.display()
+        )));
+    }
+
+    let sources = discover_youtube_sources(&sourcearium_root)?;
+    let mut source_reports = Vec::new();
+    let mut remote_videos_processed = 0usize;
+    let mut limit_reached = false;
+
+    for source in sources {
+        let policy = &source.policy;
+        let mut summary = serde_json::json!({
+            "source_key": policy.source_key,
+            "channel": policy.channel.input,
+            "discovered": 0,
+            "explicitly_excluded": 0,
+            "outside_date_policy": 0,
+            "already_strongest": 0,
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "preserved_stronger": 0,
+            "preserved_unknown_derivation": 0,
+            "preserved_without_better_caption": 0,
+            "unresolved_date": 0,
+            "requires_local_asr": 0,
+            "unresolved_no_provider": 0,
+            "errors": [],
+        });
+
+        if !policy.transcripts.enabled {
+            summary["status"] = serde_json::Value::String("transcripts_disabled".into());
+            source_reports.push(summary);
+            continue;
+        }
+
+        let channel_input = parse_sourcearium_channel_input(&policy.channel.input)?;
+
+        if let Some(expected_channel_id) = policy.channel.id.as_deref() {
+            match extract_channel(&channel_input).await {
+                Ok(channel) if channel.channel_id == expected_channel_id => {}
+                Ok(channel) => {
+                    summary["status"] = serde_json::Value::String("channel_identity_mismatch".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({
+                            "message": "resolved channel id does not match Sourcearium policy",
+                            "expected": expected_channel_id,
+                            "actual": channel.channel_id,
+                        }));
+                    source_reports.push(summary);
+                    continue;
+                }
+                Err(error) => {
+                    summary["status"] = serde_json::Value::String("channel_resolution_failed".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                    source_reports.push(summary);
+                    continue;
+                }
+            }
+        }
+
+        let crawl = match crawl_channel_videos(&channel_input, &[]).await {
+            Ok(crawl) => crawl,
+            Err(error) => {
+                summary["status"] = serde_json::Value::String("channel_crawl_failed".into());
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+                source_reports.push(summary);
+                continue;
+            }
+        };
+        summary["discovered"] = serde_json::Value::from(crawl.videos.len() as u64);
+
+        for video_ref in crawl.videos {
+            let existing = match load_youtube_transcript_artifact(&source, &video_ref.video_id) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    push_update_error(&mut summary, &video_ref.video_id, error);
+                    continue;
+                }
+            };
+
+            let known_date = existing
+                .as_ref()
+                .and_then(|existing| existing.artifact.source.published.as_deref());
+
+            let initial_selection = match policy.select_video(&video_ref.video_id, known_date) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    push_update_error(&mut summary, &video_ref.video_id, error);
+                    continue;
+                }
+            };
+
+            match initial_selection {
+                VideoSelection::ExplicitlyExcluded => {
+                    increment_summary(&mut summary, "explicitly_excluded", 1);
+                    continue;
+                }
+                VideoSelection::BeforeCutoff => {
+                    increment_summary(&mut summary, "outside_date_policy", 1);
+                    continue;
+                }
+                VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {
+                    if existing.as_ref().is_some_and(|existing| {
+                        existing.artifact.representation.derivation == "creator_subtitles"
+                    }) {
+                        increment_summary(&mut summary, "already_strongest", 1);
+                        continue;
+                    }
+                }
+                VideoSelection::PublicationDateUnresolved => {}
+            }
+
+            if args
+                .max_videos
+                .is_some_and(|limit| remote_videos_processed >= limit)
+            {
+                limit_reached = true;
+                break;
+            }
+            remote_videos_processed += 1;
+
+            let video = match extract_video(&InputRef {
+                raw: video_ref.video_id.clone(),
+                kind: InputKind::VideoId,
+            })
+            .await
+            {
+                Ok(video) => video,
+                Err(error) => {
+                    push_update_error(&mut summary, &video_ref.video_id, error);
+                    continue;
+                }
+            };
+
+            if let Some(expected_channel_id) = policy.channel.id.as_deref()
+                && video.channel_id.as_deref() != Some(expected_channel_id)
+            {
+                push_update_error(
+                    &mut summary,
+                    &video_ref.video_id,
+                    VesselError::Corpus(format!(
+                        "video belongs to channel {:?}, expected {expected_channel_id}",
+                        video.channel_id
+                    )),
+                );
+                continue;
+            }
+
+            let publication_date = normalize_update_publication_date(video.upload_date.as_deref());
+            let selection = match policy.select_video(&video.video_id, publication_date.as_deref()) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    push_update_error(&mut summary, &video.video_id, error);
+                    continue;
+                }
+            };
+
+            match selection {
+                VideoSelection::ExplicitlyExcluded => {
+                    increment_summary(&mut summary, "explicitly_excluded", 1);
+                    continue;
+                }
+                VideoSelection::BeforeCutoff => {
+                    increment_summary(&mut summary, "outside_date_policy", 1);
+                    continue;
+                }
+                VideoSelection::PublicationDateUnresolved => {
+                    increment_summary(&mut summary, "unresolved_date", 1);
+                    continue;
+                }
+                VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {}
+            }
+
+            let candidate = match acquire_best_caption_candidate(&video, &policy.transcripts).await {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    push_update_error(&mut summary, &video.video_id, error);
+                    continue;
+                }
+            };
+
+            let Some(candidate) = candidate else {
+                if existing.is_some() {
+                    increment_summary(&mut summary, "preserved_without_better_caption", 1);
+                } else if policy.transcripts.allow_local_asr {
+                    increment_summary(&mut summary, "requires_local_asr", 1);
+                } else {
+                    increment_summary(&mut summary, "unresolved_no_provider", 1);
+                }
+                continue;
+            };
+
+            match materialize_youtube_transcript(&sourcearium_root, &source, &video, &candidate) {
+                Ok(result) => match result.status {
+                    MaterializeStatus::Created => increment_summary(&mut summary, "created", 1),
+                    MaterializeStatus::Updated => increment_summary(&mut summary, "updated", 1),
+                    MaterializeStatus::Unchanged => increment_summary(&mut summary, "unchanged", 1),
+                    MaterializeStatus::PreservedStronger => {
+                        increment_summary(&mut summary, "preserved_stronger", 1)
+                    }
+                    MaterializeStatus::PreservedUnknownDerivation => {
+                        increment_summary(&mut summary, "preserved_unknown_derivation", 1)
+                    }
+                },
+                Err(error) => push_update_error(&mut summary, &video.video_id, error),
+            }
+        }
+
+        summary["status"] = serde_json::Value::String("ok".into());
+        source_reports.push(summary);
+
+        if limit_reached {
+            break;
+        }
+    }
+
+    let report = serde_json::json!({
+        "status": "ok",
+        "sourcearium_root": sourcearium_root,
+        "sources": source_reports,
+        "remote_videos_processed": remote_videos_processed,
+        "max_videos": args.max_videos,
+        "limit_reached": limit_reached,
+        "local_asr_implemented": false,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn parse_sourcearium_channel_input(raw: &str) -> Result<InputRef> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(VesselError::Corpus(
+            "Sourcearium channel input must not be empty".into(),
+        ));
+    }
+
+    if raw.starts_with("https://") || raw.starts_with("http://") {
+        return Ok(InputRef {
+            raw: raw.to_owned(),
+            kind: InputKind::Url,
+        });
+    }
+    if raw.starts_with('@') {
+        return Ok(InputRef {
+            raw: format!("https://www.youtube.com/{raw}"),
+            kind: InputKind::Url,
+        });
+    }
+    if raw.starts_with("UC") {
+        return Ok(InputRef {
+            raw: raw.to_owned(),
+            kind: InputKind::ChannelId,
+        });
+    }
+
+    Err(VesselError::Corpus(format!(
+        "unsupported Sourcearium YouTube channel input {raw:?}; use a channel URL, @handle, or channel id"
+    )))
+}
+
+fn normalize_update_publication_date(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if value.len() >= 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+    {
+        return Some(value[..10].to_owned());
+    }
+    if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..8]));
+    }
+    None
+}
+
+fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: VesselError) {
+    summary["errors"]
+        .as_array_mut()
+        .expect("errors array")
+        .push(serde_json::json!({
+            "video_id": video_id,
+            "message": error.to_string(),
+        }));
 }
 
 fn init_logging(config: &Config, cli: &Cli) -> Result<()> {
@@ -2090,7 +2409,11 @@ fn binary_available(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_configured_channels;
+    use super::{
+        normalize_update_publication_date, parse_sourcearium_channel_input,
+        resolve_configured_channels,
+    };
+    use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
 
     #[test]
@@ -2116,6 +2439,30 @@ mod tests {
             resolve_configured_channels(&config, &["gaming".to_owned()]).expect("gaming");
         assert_eq!(gaming.len(), 1);
         assert_eq!(gaming[0].category, "gaming");
+    }
+
+    #[test]
+    fn sourcearium_channel_handles_are_normalized_to_urls() {
+        let input = parse_sourcearium_channel_input("@example").expect("handle");
+        assert!(matches!(input.kind, InputKind::Url));
+        assert_eq!(input.raw, "https://www.youtube.com/@example");
+
+        let input = parse_sourcearium_channel_input("UC123").expect("id");
+        assert!(matches!(input.kind, InputKind::ChannelId));
+        assert_eq!(input.raw, "UC123");
+    }
+
+    #[test]
+    fn update_publication_dates_accept_youtube_compact_dates() {
+        assert_eq!(
+            normalize_update_publication_date(Some("20260918")),
+            Some("2026-09-18".into())
+        );
+        assert_eq!(
+            normalize_update_publication_date(Some("2026-09-18")),
+            Some("2026-09-18".into())
+        );
+        assert_eq!(normalize_update_publication_date(Some("2 years ago")), None);
     }
 
     #[test]
