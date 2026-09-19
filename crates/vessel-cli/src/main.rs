@@ -1241,13 +1241,27 @@ fn push_update_item(
 }
 
 fn push_update_error(summary: &mut serde_json::Value, video_id: &str, error: VesselError) {
+    let message = error.to_string();
     summary["errors"]
         .as_array_mut()
         .expect("errors array")
         .push(serde_json::json!({
             "video_id": video_id,
-            "message": error.to_string(),
+            "message": message,
         }));
+
+    if let Some(items) = summary
+        .get_mut("items")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        items.push(serde_json::json!({
+            "video_id": video_id,
+            "action": "failed",
+            "details": {
+                "message": message,
+            },
+        }));
+    }
 }
 
 fn sourcearium_prune(args: PruneArgs) -> Result<()> {
@@ -3114,8 +3128,8 @@ mod tests {
 
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
-        preview_materialization_action, push_update_item, resolve_asr_config,
-        resolve_configured_channels, transcript_upgrade_probe_due,
+        preview_materialization_action, push_update_error, push_update_item,
+        resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config};
@@ -3208,6 +3222,29 @@ mod tests {
                 TranscriptDerivation::PlatformAutoCaption,
             ),
             "would_compare_content"
+        );
+    }
+
+    #[test]
+    fn update_errors_also_enter_item_trace_when_enabled() {
+        let mut summary = serde_json::json!({
+            "errors": [],
+            "items": [],
+        });
+        push_update_error(
+            &mut summary,
+            "abc123",
+            VesselError::Extractor("youtube anti-bot gate".into()),
+        );
+
+        assert_eq!(summary["errors"][0]["video_id"], "abc123");
+        assert_eq!(summary["items"][0]["video_id"], "abc123");
+        assert_eq!(summary["items"][0]["action"], "failed");
+        assert!(
+            summary["items"][0]["details"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("anti-bot gate")
         );
     }
 
