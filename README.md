@@ -99,12 +99,16 @@ Normal update:
 - avoids metadata-only transcript churn
 - never deletes already acquired text merely because policy narrowed or upstream disappeared
 
-Destructive cleanup belongs behind explicit operations such as:
+Destructive cleanup is explicit and offline:
 
 ```bash
-vessel prune --dry-run
 vessel prune
+vessel prune --apply
 ```
+
+Bare `vessel prune` only prints a plan. Deletion requires `--apply`.
+
+Prune never deletes because an upstream source disappeared, became private, or stopped resolving. It only targets artifacts locally proven outside current Sourcearium policy by explicit exclusion or a known publication date before the configured cutoff.
 
 ## Current Capabilities
 

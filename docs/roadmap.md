@@ -57,7 +57,7 @@ These capabilities should not force future work to continue the old parity campa
 | 14 | `vessel update` Reconcile Loop | In Progress |
 | 15 | Subtitle Provider Integration | Completed |
 | 16 | Local ASR Fallback | In Progress |
-| 17 | Safe Prune + Replacement Semantics | Planned |
+| 17 | Safe Prune + Replacement Semantics | Completed |
 | 18 | Additional Media Sources | Deferred |
 
 ## Milestone 10: Sourcearium Artifact Contract
@@ -202,16 +202,33 @@ Optional acceleration is deferred until CPU behavior is proven and performance j
 
 ## Milestone 17: Safe Prune
 
-`update` is non-destructive.
+Status: **Completed**
 
-Explicit cleanup:
+`update` remains non-destructive.
+
+Offline cleanup is explicit:
 
 ```bash
-vessel prune --dry-run
 vessel prune
+vessel prune --apply
 ```
 
-Upstream deletion or policy narrowing must not silently erase acquired research material.
+Semantics:
+
+- bare `vessel prune` is plan-only
+- `--apply` is required for deletion
+- only configured YouTube source directories are considered
+- explicit `exclude_video_ids` can produce prune candidates
+- a known artifact publication date before `published_on_or_after` can produce a prune candidate
+- explicit include still overrides the date cutoff
+- missing/uncertain publication dates are preserved
+- disabled transcript acquisition does not imply deletion
+- removed/missing source policy does not imply deletion
+- upstream disappearance/private state never implies deletion
+- artifact identity is revalidated immediately before removal
+- candidate paths are canonicalized and must remain inside Sourcearium's `sources/` tree
+
+This keeps deletion policy local, inspectable, and independent of volatile upstream availability.
 
 ## Deprioritized Work
 

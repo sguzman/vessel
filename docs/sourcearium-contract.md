@@ -217,6 +217,31 @@ The following stay in Vessel state and must not leak into Sourcearium durable fi
 - HTTP details
 - local database primary keys
 
+## Prune Contract
+
+Sourcearium cleanup is intentionally separate from update.
+
+```bash
+vessel prune
+vessel prune --apply
+```
+
+The plan is computed entirely from local Sourcearium policy and artifact provenance.
+
+An artifact may be proposed for pruning only when the current configured policy proves it outside the desired set:
+
+- its video ID is explicitly excluded; or
+- its known publication date is before the configured inclusive cutoff and it is not explicitly included
+
+Prune must preserve:
+
+- artifacts with uncertain/missing publication date
+- artifacts under source directories with no active policy
+- artifacts merely because transcript acquisition was disabled
+- artifacts whose upstream source is missing/private/unreachable
+
+Before removal, Vessel reparses the file, confirms artifact identity, canonicalizes the path, and refuses any path outside the Sourcearium `sources/` tree.
+
 ## Compatibility Rule
 
 Sourcearium `schema = 1` is frozen.

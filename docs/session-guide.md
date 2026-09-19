@@ -103,6 +103,8 @@ Before implementation:
 - Validate candidate artifacts before replacement.
 - Replace durable artifacts atomically.
 - Normal update must be non-destructive.
+- Bare `vessel prune` must never delete; deletion requires `--apply`.
+- Prune must never infer deletion from upstream disappearance or an absent source policy.
 - Do not introduce a generalized DSL where the frozen policy is enough.
 - Do not create new time-series collection merely because fields are available.
 - Tests should target reconciliation, idempotency, provenance, deterministic output, and safe failure.
@@ -145,6 +147,7 @@ The following are already implemented and CI-tested:
 - metadata-only no-churn semantics
 - opt-in per-video decision reporting
 - non-materializing `--preview` mode
+- explicit offline safe prune: plan by default, delete only with `--apply`
 - Linux full-workspace CI
 - native Windows path/store/ASR tests and CLI compile
 - locked Cargo dependency resolution
@@ -159,7 +162,7 @@ Highest-value next steps:
 2. materialize a deliberately tiny real corpus
 3. inspect creator-caption, auto-caption, and local-ASR behavior
 4. rerun and verify no-op Git behavior
-5. implement explicit safe prune semantics
+5. exercise prune planning against a deliberate real policy change
 6. consider optional ASR acceleration only after CPU behavior is proven
 
 Do not add more generalized acquisition abstractions before real Sourcearium data demonstrates a need.
