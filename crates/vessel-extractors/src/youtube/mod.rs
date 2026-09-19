@@ -103,7 +103,7 @@ pub async fn extract_video(input: &InputRef) -> Result<VideoMetadata> {
         })?;
     if let Some(api_key) = extract_config_string(&html, "\"INNERTUBE_API_KEY\":\"") {
         if let Ok(android_response) = fetch_android_player_response(&api_key, &video_id).await {
-            merge_streaming_data(&mut player_response, &android_response);
+            merge_player_fallback(&mut player_response, &android_response);
         }
     }
     let video = parse_video_metadata(
@@ -387,13 +387,38 @@ async fn fetch_android_player_response(api_key: &str, video_id: &str) -> Result<
     })
 }
 
-fn merge_streaming_data(into: &mut Value, from: &Value) {
-    let Some(streaming_data) = from.get("streamingData").cloned() else {
+fn merge_player_fallback(into: &mut Value, from: &Value) {
+    let Some(into) = into.as_object_mut() else {
+        return;
+    };
+    let Some(from) = from.as_object() else {
         return;
     };
 
-    if let Some(into) = into.as_object_mut() {
+    for key in ["videoDetails", "microformat", "captions"] {
+        if !into.contains_key(key)
+            && let Some(value) = from.get(key).cloned()
+        {
+            into.insert(key.to_owned(), value);
+        }
+    }
+
+    if let Some(streaming_data) = from.get("streamingData").cloned() {
         into.insert("streamingData".to_owned(), streaming_data);
+    }
+
+    let current_status = into
+        .get("playabilityStatus")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    let fallback_status = from
+        .get("playabilityStatus")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    if current_status != Some("OK") && fallback_status == Some("OK")
+        && let Some(playability) = from.get("playabilityStatus").cloned()
+    {
+        into.insert("playabilityStatus".to_owned(), playability);
     }
 }
 
@@ -1667,8 +1692,8 @@ fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<Strin
 mod tests {
     use super::{
         append_unique_channel_videos, collect_channel_video_refs, extract_embedded_json,
-        find_next_comment_continuation,
-        merge_streaming_data, missing_video_details_error, parse_channel_metadata,
+        find_next_comment_continuation, merge_player_fallback, missing_video_details_error,
+        parse_channel_metadata,
         parse_comment_page, parse_compact_count, parse_video_id_from_url, parse_video_metadata,
     };
     use std::collections::HashSet;
@@ -1744,6 +1769,79 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("status=ERROR"));
         assert!(message.contains("This video is unavailable"));
+    }
+
+    #[test]
+    fn player_fallback_supplies_missing_metadata_without_overwriting_watch_details() {
+        let mut watch = serde_json::json!({
+            "videoDetails": {
+                "videoId": "abc123",
+                "title": "Watch title"
+            },
+            "playabilityStatus": {
+                "status": "LOGIN_REQUIRED",
+                "reason": "Sign in to confirm you’re not a bot"
+            }
+        });
+        let android = serde_json::json!({
+            "videoDetails": {
+                "videoId": "abc123",
+                "title": "Android title"
+            },
+            "microformat": {
+                "playerMicroformatRenderer": {
+                    "uploadDate": "2026-09-19"
+                }
+            },
+            "captions": {
+                "playerCaptionsTracklistRenderer": {
+                    "captionTracks": []
+                }
+            },
+            "streamingData": {
+                "adaptiveFormats": []
+            },
+            "playabilityStatus": {
+                "status": "OK"
+            }
+        });
+
+        merge_player_fallback(&mut watch, &android);
+
+        assert_eq!(
+            watch["videoDetails"]["title"].as_str(),
+            Some("Watch title")
+        );
+        assert_eq!(
+            watch["microformat"]["playerMicroformatRenderer"]["uploadDate"].as_str(),
+            Some("2026-09-19")
+        );
+        assert!(watch.get("captions").is_some());
+        assert!(watch.get("streamingData").is_some());
+        assert_eq!(watch["playabilityStatus"]["status"].as_str(), Some("OK"));
+    }
+
+    #[test]
+    fn player_fallback_can_supply_video_details_when_watch_response_is_gated() {
+        let mut watch = serde_json::json!({
+            "playabilityStatus": {
+                "status": "LOGIN_REQUIRED"
+            }
+        });
+        let android = serde_json::json!({
+            "videoDetails": {
+                "videoId": "abc123",
+                "title": "Recovered"
+            },
+            "playabilityStatus": {
+                "status": "OK"
+            }
+        });
+
+        merge_player_fallback(&mut watch, &android);
+
+        assert_eq!(watch["videoDetails"]["videoId"].as_str(), Some("abc123"));
+        assert_eq!(watch["playabilityStatus"]["status"].as_str(), Some("OK"));
     }
 
     #[test]
