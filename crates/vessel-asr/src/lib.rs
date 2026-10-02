@@ -55,10 +55,10 @@ impl LoadedAsrBackend {
                 Ok(Self::WhisperCandle(WhisperCandleBackend::load(config)?))
             }
             "whisperx" => Err(asr_error(
-                "ASR backend "whisperx" is reserved but not implemented yet",
+                "ASR backend \"whisperx\" is reserved but not implemented yet",
             )),
             "phonon-2" => Err(asr_error(
-                "ASR backend "phonon-2" is reserved but not implemented yet",
+                "ASR backend \"phonon-2\" is reserved but not implemented yet",
             )),
             other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
         }
@@ -76,7 +76,7 @@ impl LoadedAsrBackend {
         }
     }
 
-    fn transcribe_internal(&mut self, path: &Path) -> Result<TranscriptCandidate> {
+    pub fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
         match self {
             Self::WhisperCandle(backend) => backend.transcribe_path(path),
         }
@@ -235,7 +235,7 @@ impl LocalAsrBackend for WhisperCandleBackend {
     }
 
     fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
-        self.transcribe_internal(path)
+        WhisperCandleBackend::transcribe_path(self, path)
     }
 }
 
