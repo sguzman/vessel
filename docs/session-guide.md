@@ -222,6 +222,8 @@ vessel diarization doctor
 
 After installation, Vessel writes local BLAKE3 receipts for the sherpa runtime library and inference models. `vessel diarization doctor` verifies those receipts entirely offline. A receipt mismatch makes the fetched default installation not ready for diarization; explicitly supplied local model paths remain usable without requiring a Vessel-generated receipt.
 
+Fetch/install is transactional. Completed archives are reusable after a later extraction failure, downloads resume from `.download` partials when the server supports ranges, runtime/model archives extract into staging directories, and the staged sherpa runtime must load and expose the required symbols before it replaces the live runtime directory. A failed extraction or probe therefore does not turn a partial tree into the active installation.
+
 Vessel does not depend on the `sherpa-onnx` or `sherpa-onnx-sys` Cargo crates. `cargo build` therefore does not run sherpa's downloader or fetch sherpa native runtime/model artifacts. At execution time Vessel dynamically loads the already-fetched sherpa C runtime from the user-data directory. If the runtime or models are missing, `--diarize` fails with an explicit instruction to run `vessel diarization fetch`; it does not silently download them.
 
 Model acquisition is always explicit:
