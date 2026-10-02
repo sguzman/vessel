@@ -24,9 +24,9 @@ pub use sourcearium_repo::{
     SourceariumPruneCandidate, SourceariumPrunePlan, SourceariumValidationReport,
     SourceariumYoutubeSource, SpeakerAttributionApplyResult, TranscriptDiarizationApplyResult,
     apply_sourcearium_prune, apply_speaker_match_report, apply_youtube_transcript_diarization,
-    discover_youtube_sources, inventory_sourcearium_repository,
-    load_youtube_transcript_artifact, materialize_youtube_transcript, plan_sourcearium_prune,
-    render_speaker_attributed_transcript, validate_sourcearium_repository,
+    discover_youtube_sources, inventory_sourcearium_repository, load_youtube_transcript_artifact,
+    materialize_youtube_transcript, plan_sourcearium_prune, render_speaker_attributed_transcript,
+    validate_sourcearium_repository,
 };
 pub use speaker_match::{
     AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1,

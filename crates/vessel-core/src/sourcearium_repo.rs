@@ -584,8 +584,8 @@ pub fn apply_youtube_transcript_diarization(
         .extensions
         .insert("diarization".into(), diarization_table);
 
-    let speaker_attribution_cleared =
-        (diarization_changed || body_changed) && artifact.extensions.remove("speaker_attribution").is_some();
+    let speaker_attribution_cleared = (diarization_changed || body_changed)
+        && artifact.extensions.remove("speaker_attribution").is_some();
 
     let rendered = artifact.to_markdown(&next_body)?;
     let updated = rendered != raw;
@@ -1343,7 +1343,10 @@ input = "https://www.youtube.com/@{key}"
 
         let after = fs::read_to_string(&materialized.path).unwrap();
         let (after_artifact, after_body) = SourceariumArtifactV1::parse_markdown(&after).unwrap();
-        assert_eq!(after_artifact.representation, before_artifact.representation);
+        assert_eq!(
+            after_artifact.representation,
+            before_artifact.representation
+        );
         assert_eq!(
             after_artifact.extensions["diarization"]["engine"].as_str(),
             Some("sherpa-onnx")
@@ -1388,8 +1391,7 @@ input = "https://www.youtube.com/@{key}"
         fs::write(&materialized.path, raw).unwrap();
 
         let mut changed = first_candidate.clone();
-        changed.diarization.as_mut().unwrap().model =
-            "segmentation=x2;embedding=y".into();
+        changed.diarization.as_mut().unwrap().model = "segmentation=x2;embedding=y".into();
         let result =
             apply_youtube_transcript_diarization(&source, &video.video_id, &changed).unwrap();
         assert!(result.updated);

@@ -97,10 +97,7 @@ pub struct TranscriptCandidate {
 }
 
 impl TranscriptCandidate {
-    pub fn from_sourcearium_artifact(
-        artifact: &SourceariumArtifactV1,
-        body: &str,
-    ) -> Result<Self> {
+    pub fn from_sourcearium_artifact(artifact: &SourceariumArtifactV1, body: &str) -> Result<Self> {
         if artifact.kind != "transcript" {
             return Err(corpus_error(format!(
                 "Sourcearium artifact {:?} is not a transcript",
@@ -422,13 +419,9 @@ mod tests {
                 acquired_at: None,
                 method: Some("local_asr".into()),
             },
-            extensions: std::collections::BTreeMap::from([(
-                "diarization".into(),
-                diarization,
-            )]),
+            extensions: std::collections::BTreeMap::from([("diarization".into(), diarization)]),
         };
-        let body =
-            "[00:00:03] <speaker:SPEAKER_00> Hello.\n\n[00:01:05] World.\n";
+        let body = "[00:00:03] <speaker:SPEAKER_00> Hello.\n\n[00:01:05] World.\n";
         let candidate =
             TranscriptCandidate::from_sourcearium_artifact(&artifact, body).expect("candidate");
         assert_eq!(candidate.derivation, TranscriptDerivation::LocalAsr);
