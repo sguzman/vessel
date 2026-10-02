@@ -215,7 +215,9 @@ vessel diarization fetch
 vessel diarization doctor
 ```
 
-`vessel diarization fetch` downloads the official sherpa-onnx Pyannote segmentation and 3D-Speaker embedding model pair into the user cache with visible progress. Normal `--diarize` runs reuse those cached files automatically; explicit local model paths remain supported for fully manual/offline layouts.
+`vessel diarization fetch` downloads the official sherpa-onnx Pyannote segmentation and 3D-Speaker embedding model pair into durable user data with visible progress. Normal `--diarize` runs reuse those files automatically; explicit local model paths remain supported for fully manual/offline layouts.
+
+The sherpa Rust crate also links upstream native sherpa/ONNX Runtime libraries. That build-time native runtime package is distinct from the inference models above. Cargo/sherpa may download the appropriate prebuilt runtime package on the first build unless `SHERPA_ONNX_LIB_DIR` or `SHERPA_ONNX_ARCHIVE_DIR` supplies it locally. Once built/cached, ordinary Vessel inference does not require Python.
 
 Model acquisition supports both:
 
