@@ -21,6 +21,8 @@ edition = "2024"
 license = "Unlicense"
 
 [workspace.dependencies]
+bzip2 = "0.4"
+tar = "0.4"
 anyhow = "1.0"
 async-trait = "0.1"
 blake3 = "1.8"
