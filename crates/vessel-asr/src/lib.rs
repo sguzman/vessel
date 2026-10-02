@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -5,7 +6,8 @@ use std::time::Instant;
 use serde_json::Value;
 
 use vessel_core::{
-    Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
+    DiarizationProvenance, Result, SpeakerAttribution, TranscriptCandidate, TranscriptDerivation,
+    TranscriptSegment, TranscriptSpeaker, VesselError,
 };
 use whisper_core::{
     TranscribeOptions, WhisperModel, WhichModel, device, fetch_model as fetch_whisper_model,
@@ -15,6 +17,9 @@ use whisper_core::{
 pub const WHISPER_CANDLE_ENGINE_NAME: &str = "whisper-candle";
 pub const PHONON2_BACKEND_NAME: &str = "phonon-2";
 pub const PHONON_ENGINE_NAME: &str = "fermion-phonon";
+pub const WHISPERX_BACKEND_NAME: &str = "whisperx";
+pub const WHISPERX_ENGINE_NAME: &str = "whisperx-faster-whisper";
+pub const DEFAULT_DIARIZATION_MODEL: &str = "pyannote/speaker-diarization-community-1";
 pub const ENGINE_NAME: &str = WHISPER_CANDLE_ENGINE_NAME;
 pub const WHISPER_MODEL_NAMES: &[&str] = &[
     "tiny",
@@ -44,7 +49,7 @@ pub fn default_model_for_backend(backend: &str) -> Result<&'static str> {
     match backend {
         WHISPER_CANDLE_ENGINE_NAME => Ok("small"),
         PHONON2_BACKEND_NAME => Ok("phonon-2"),
-        "whisperx" => Ok("large-v3"),
+        WHISPERX_BACKEND_NAME => Ok("large-v3"),
         other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
     }
 }
@@ -140,8 +145,8 @@ pub fn fetch_asr_model(
                 directory,
             })
         }
-        "whisperx" => Err(asr_error(
-            "ASR backend \"whisperx\" model fetching is reserved but not implemented yet",
+        WHISPERX_BACKEND_NAME => Err(asr_error(
+            "WhisperX model prefetch is not implemented yet; install/cache WhisperX models explicitly and use --asr-model-dir",
         )),
         other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
     }
@@ -156,6 +161,12 @@ pub struct AsrConfig {
     pub device: String,
     pub language: Option<String>,
     pub word_timestamps: bool,
+    pub diarize: bool,
+    pub diarization_model: String,
+    pub min_speakers: Option<usize>,
+    pub max_speakers: Option<usize>,
+    pub speaker_embeddings: bool,
+    pub hf_token_env: String,
 }
 
 impl Default for AsrConfig {
@@ -168,6 +179,12 @@ impl Default for AsrConfig {
             device: "cpu".into(),
             language: None,
             word_timestamps: false,
+            diarize: false,
+            diarization_model: DEFAULT_DIARIZATION_MODEL.into(),
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            hf_token_env: "HF_TOKEN".into(),
         }
     }
 }
@@ -187,6 +204,7 @@ pub trait LocalAsrBackend: Send + Sync {
 pub enum LoadedAsrBackend {
     WhisperCandle(WhisperCandleBackend),
     Phonon2(Phonon2Backend),
+    WhisperX(WhisperXBackend),
 }
 
 impl LoadedAsrBackend {
@@ -195,9 +213,7 @@ impl LoadedAsrBackend {
             WHISPER_CANDLE_ENGINE_NAME => {
                 Ok(Self::WhisperCandle(WhisperCandleBackend::load(config)?))
             }
-            "whisperx" => Err(asr_error(
-                "ASR backend \"whisperx\" is reserved but not implemented yet",
-            )),
+            WHISPERX_BACKEND_NAME => Ok(Self::WhisperX(WhisperXBackend::load(config)?)),
             PHONON2_BACKEND_NAME => Ok(Self::Phonon2(Phonon2Backend::load(config)?)),
             other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
         }
@@ -207,6 +223,7 @@ impl LoadedAsrBackend {
         match self {
             Self::WhisperCandle(backend) => backend.engine_name(),
             Self::Phonon2(backend) => backend.engine_name(),
+            Self::WhisperX(backend) => backend.engine_name(),
         }
     }
 
@@ -214,6 +231,7 @@ impl LoadedAsrBackend {
         match self {
             Self::WhisperCandle(backend) => backend.model_name(),
             Self::Phonon2(backend) => backend.model_name(),
+            Self::WhisperX(backend) => backend.model_name(),
         }
     }
 
@@ -221,6 +239,7 @@ impl LoadedAsrBackend {
         match self {
             Self::WhisperCandle(backend) => backend.transcribe_path(path),
             Self::Phonon2(backend) => backend.transcribe_path(path),
+            Self::WhisperX(backend) => backend.transcribe_path(path),
         }
     }
 }
@@ -384,6 +403,238 @@ impl LocalAsrBackend for WhisperCandleBackend {
     fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
         WhisperCandleBackend::transcribe_path(self, path)
     }
+}
+
+pub struct WhisperXBackend {
+    config: AsrConfig,
+}
+
+impl WhisperXBackend {
+    pub fn load(config: AsrConfig) -> Result<Self> {
+        if config.diarize
+            && config
+                .min_speakers
+                .zip(config.max_speakers)
+                .is_some_and(|(min, max)| min > max)
+        {
+            return Err(asr_error(
+                "WhisperX minimum speaker count cannot exceed maximum speaker count",
+            ));
+        }
+        Ok(Self { config })
+    }
+
+    fn executable(&self) -> &Path {
+        self.config
+            .executable
+            .as_deref()
+            .unwrap_or_else(|| Path::new("whisperx"))
+    }
+
+    pub fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
+        if !path.is_file() {
+            return Err(asr_error(format!(
+                "ASR input does not exist or is not a file: {}",
+                path.display()
+            )));
+        }
+
+        let parent = path.parent().ok_or_else(|| {
+            asr_error(format!("WhisperX input has no parent directory: {}", path.display()))
+        })?;
+        let output_dir = parent.join("whisperx-output");
+        fs::create_dir_all(&output_dir).map_err(|error| {
+            asr_error(format!(
+                "failed to create WhisperX output directory {}: {error}",
+                output_dir.display()
+            ))
+        })?;
+
+        let stem = path.file_stem().and_then(|value| value.to_str()).ok_or_else(|| {
+            asr_error(format!("WhisperX input has no UTF-8 file stem: {}", path.display()))
+        })?;
+        let output_json = output_dir.join(format!("{stem}.json"));
+        if output_json.exists() {
+            fs::remove_file(&output_json).map_err(|error| {
+                asr_error(format!(
+                    "failed to remove stale WhisperX output {}: {error}",
+                    output_json.display()
+                ))
+            })?;
+        }
+
+        let mut command = Command::new(self.executable());
+        command
+            .arg(path)
+            .arg("--model")
+            .arg(&self.config.model)
+            .arg("--device")
+            .arg(&self.config.device)
+            .arg("--output_dir")
+            .arg(&output_dir)
+            .arg("--output_format")
+            .arg("json")
+            .arg("--verbose")
+            .arg("True")
+            .arg("--print_progress")
+            .arg("True")
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        if self.config.device == "cpu" {
+            command.arg("--compute_type").arg("int8");
+        }
+        if let Some(language) = self.config.language.as_deref() {
+            command.arg("--language").arg(language);
+        }
+        if let Some(model_dir) = self.config.model_dir.as_deref() {
+            command
+                .arg("--model_dir")
+                .arg(model_dir)
+                .arg("--model_cache_only")
+                .arg("True");
+        }
+
+        if self.config.diarize {
+            command
+                .arg("--diarize")
+                .arg("--diarize_model")
+                .arg(&self.config.diarization_model);
+            if let Some(min) = self.config.min_speakers {
+                command.arg("--min_speakers").arg(min.to_string());
+            }
+            if let Some(max) = self.config.max_speakers {
+                command.arg("--max_speakers").arg(max.to_string());
+            }
+            if self.config.speaker_embeddings {
+                command.arg("--speaker_embeddings");
+            }
+            if let Ok(token) = std::env::var(&self.config.hf_token_env)
+                && !token.trim().is_empty()
+            {
+                command.arg("--hf_token").arg(token);
+            }
+        }
+
+        let started = Instant::now();
+        eprintln!(
+            "[asr] transcription started engine={} model={} diarize={} input={}",
+            WHISPERX_ENGINE_NAME,
+            self.config.model,
+            self.config.diarize,
+            path.display(),
+        );
+        let status = command.status().map_err(|error| {
+            asr_error(format!(
+                "failed to start WhisperX executable {:?}: {error}; install whisperx or use --asr-executable",
+                self.executable()
+            ))
+        })?;
+        if !status.success() {
+            return Err(asr_error(format!(
+                "WhisperX exited unsuccessfully with status {status}"
+            )));
+        }
+
+        let raw = fs::read_to_string(&output_json).map_err(|error| {
+            asr_error(format!(
+                "failed to read WhisperX JSON output {}: {error}",
+                output_json.display()
+            ))
+        })?;
+        let candidate = parse_whisperx_json(&raw, &self.config)?;
+
+        eprintln!(
+            "[asr] transcription completed engine={} model={} diarize={} elapsed={:.1}s segments={}",
+            WHISPERX_ENGINE_NAME,
+            self.config.model,
+            self.config.diarize,
+            started.elapsed().as_secs_f64(),
+            candidate.segments.len(),
+        );
+        Ok(candidate)
+    }
+}
+
+impl LocalAsrBackend for WhisperXBackend {
+    fn engine_name(&self) -> &'static str {
+        WHISPERX_ENGINE_NAME
+    }
+
+    fn model_name(&self) -> &str {
+        &self.config.model
+    }
+
+    fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
+        WhisperXBackend::transcribe_path(self, path)
+    }
+}
+
+fn parse_whisperx_json(raw: &str, config: &AsrConfig) -> Result<TranscriptCandidate> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|error| asr_error(format!("invalid WhisperX JSON output: {error}")))?;
+    let language = value
+        .get("language")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| config.language.clone());
+
+    let raw_segments = value
+        .get("segments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| asr_error("WhisperX JSON output is missing segments"))?;
+    let mut segments = Vec::new();
+    for segment in raw_segments {
+        let start_seconds = segment
+            .get("start")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| asr_error("WhisperX segment is missing start timestamp"))?;
+        if !start_seconds.is_finite() || start_seconds < 0.0 {
+            return Err(asr_error(format!(
+                "WhisperX emitted invalid segment timestamp {start_seconds}"
+            )));
+        }
+        let text = segment
+            .get("text")
+            .and_then(Value::as_str)
+            .map(normalize_text)
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let speaker = segment
+            .get("speaker")
+            .and_then(Value::as_str)
+            .filter(|label| !label.trim().is_empty())
+            .map(|label| TranscriptSpeaker {
+                diarization_label: label.to_owned(),
+                identity: None,
+                attribution: SpeakerAttribution::Unresolved,
+            });
+
+        segments.push(TranscriptSegment {
+            start_seconds: Some(start_seconds.floor() as u64),
+            text,
+            speaker,
+        });
+    }
+
+    let candidate = TranscriptCandidate {
+        derivation: TranscriptDerivation::LocalAsr,
+        language,
+        timestamps: true,
+        engine: Some(WHISPERX_ENGINE_NAME.into()),
+        model: Some(config.model.clone()),
+        diarization: config.diarize.then(|| DiarizationProvenance {
+            engine: "pyannote-audio".into(),
+            model: config.diarization_model.clone(),
+            registry_revision: None,
+        }),
+        segments,
+    };
+    candidate.validate()?;
+    Ok(candidate)
 }
 
 pub struct Phonon2Backend {
@@ -633,6 +884,12 @@ mod tests {
         assert_eq!(config.executable, None);
         assert_eq!(config.language, None);
         assert!(!config.word_timestamps);
+        assert!(!config.diarize);
+        assert_eq!(config.diarization_model, DEFAULT_DIARIZATION_MODEL);
+        assert_eq!(config.min_speakers, None);
+        assert_eq!(config.max_speakers, None);
+        assert!(!config.speaker_embeddings);
+        assert_eq!(config.hf_token_env, "HF_TOKEN");
     }
 
     #[test]
@@ -642,15 +899,32 @@ mod tests {
     }
 
     #[test]
-    fn future_backend_names_fail_explicitly_until_implemented() {
-        for backend in ["whisperx"] {
-            let mut config = AsrConfig::default();
-            config.backend = backend.into();
-            let error = LoadedAsrBackend::load(config)
-                .err()
-                .expect("reserved backend should not silently fall back");
-            assert!(error.to_string().contains("reserved"));
-        }
+    fn parses_whisperx_diarized_segments_without_inventing_identity() {
+        let mut config = AsrConfig::default();
+        config.backend = WHISPERX_BACKEND_NAME.into();
+        config.model = "large-v3".into();
+        config.diarize = true;
+
+        let raw = r#"{
+          "language": "en",
+          "segments": [
+            {"start": 1.25, "end": 4.0, "text": " First voice. ", "speaker": "SPEAKER_00"},
+            {"start": 4.1, "end": 8.0, "text": "Second voice.", "speaker": "SPEAKER_01"}
+          ]
+        }"#;
+
+        let candidate = parse_whisperx_json(raw, &config).expect("parse whisperx");
+        assert_eq!(candidate.engine.as_deref(), Some(WHISPERX_ENGINE_NAME));
+        assert_eq!(candidate.model.as_deref(), Some("large-v3"));
+        assert_eq!(candidate.language.as_deref(), Some("en"));
+        assert_eq!(
+            candidate.diarization.as_ref().map(|value| value.engine.as_str()),
+            Some("pyannote-audio")
+        );
+        let first = candidate.segments[0].speaker.as_ref().expect("speaker");
+        assert_eq!(first.diarization_label, "SPEAKER_00");
+        assert_eq!(first.identity, None);
+        assert_eq!(first.attribution, SpeakerAttribution::Unresolved);
     }
 
     #[test]
