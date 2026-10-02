@@ -26,7 +26,7 @@ Backend selection is operational. The Sourcearium artifact must preserve the bac
 
 Primary:
 
-- `sherpa-onnx`: Rust API, offline diarization, Pyannote segmentation ONNX plus speaker-embedding ONNX, no Python runtime
+- `sherpa-onnx`: Rust integration over sherpa's C ABI, offline diarization, Pyannote segmentation ONNX plus speaker-embedding ONNX, no Python runtime
 
 Optional compatibility:
 
