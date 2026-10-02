@@ -43,6 +43,20 @@ jobs:
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
 
+      - name: Prove diarization planning and doctor are offline
+        shell: bash
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+        run: |
+          cargo run --locked --offline -q -p vessel-cli -- diarization fetch --plan > /tmp/diarization-plan.json
+          grep -q '"network_io": false' /tmp/diarization-plan.json
+          grep -q '"build_time_fetch": false' /tmp/diarization-plan.json
+          cargo run --locked --offline -q -p vessel-cli -- diarization doctor > /tmp/diarization-doctor.json
+          grep -q '"build_time_fetch": false' /tmp/diarization-doctor.json
+
       - name: Format active corpus files
         if: always()
         run: |
