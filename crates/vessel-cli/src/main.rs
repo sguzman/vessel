@@ -596,8 +596,10 @@ const SHERPA_SEGMENTATION_ARCHIVE_URL: &str =
 const SHERPA_EMBEDDING_MODEL_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const SHERPA_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
+const SHERPA_SEGMENTATION_ARCHIVE_BYTES: u64 = 6_958_444;
 const SHERPA_EMBEDDING_FILENAME: &str =
     "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const SHERPA_EMBEDDING_BYTES: u64 = 39_593_761;
 
 fn default_vessel_data_root() -> PathBuf {
     env::var_os("XDG_DATA_HOME")
@@ -628,27 +630,32 @@ fn default_diarization_runtime_root() -> PathBuf {
         .join(format!("v{SHERPA_ONNX_RUNTIME_VERSION}"))
 }
 
-fn sherpa_runtime_archive_name() -> Result<String> {
+fn sherpa_runtime_archive() -> Result<(String, u64)> {
     let version = SHERPA_ONNX_RUNTIME_VERSION;
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Ok(format!(
-            "sherpa-onnx-v{version}-linux-x64-shared-lib.tar.bz2"
+        Ok((
+            format!("sherpa-onnx-v{version}-linux-x64-shared-lib.tar.bz2"),
+            9_547_977,
         ))
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Ok(format!(
-            "sherpa-onnx-v{version}-linux-aarch64-shared-cpu-lib.tar.bz2"
+        Ok((
+            format!("sherpa-onnx-v{version}-linux-aarch64-shared-cpu-lib.tar.bz2"),
+            12_331_011,
         ))
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        Ok(format!(
-            "sherpa-onnx-v{version}-win-x64-shared-MT-Release-lib.tar.bz2"
+        Ok((
+            format!("sherpa-onnx-v{version}-win-x64-shared-MT-Release-lib.tar.bz2"),
+            7_890_278,
         ))
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Ok(format!(
-            "sherpa-onnx-v{version}-osx-x64-shared-lib.tar.bz2"
+        Ok((
+            format!("sherpa-onnx-v{version}-osx-x64-shared-lib.tar.bz2"),
+            9_770_199,
         ))
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Ok(format!(
-            "sherpa-onnx-v{version}-osx-arm64-shared-lib.tar.bz2"
+        Ok((
+            format!("sherpa-onnx-v{version}-osx-arm64-shared-lib.tar.bz2"),
+            8_512_718,
         ))
     } else {
         Err(VesselError::Config(format!(
@@ -693,7 +700,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             path
         }
         Err(_) => {
-            let archive_name = sherpa_runtime_archive_name()?;
+            let (archive_name, runtime_archive_bytes) = sherpa_runtime_archive()?;
             let runtime_url = format!(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
                 SHERPA_ONNX_RUNTIME_VERSION, archive_name
@@ -704,6 +711,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                 &runtime_url,
                 &archive_path,
                 "sherpa native runtime",
+                Some(runtime_archive_bytes),
             )
             .await?;
 
@@ -734,6 +742,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             SHERPA_SEGMENTATION_ARCHIVE_URL,
             &archive_path,
             "sherpa segmentation model",
+            Some(SHERPA_SEGMENTATION_ARCHIVE_BYTES),
         )
         .await?;
 
@@ -766,6 +775,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             SHERPA_EMBEDDING_MODEL_URL,
             &embedding_model,
             "sherpa speaker embedding model",
+            Some(SHERPA_EMBEDDING_BYTES),
         )
         .await?;
     } else {
@@ -814,6 +824,7 @@ async fn download_with_progress(
     url: &str,
     destination: &Path,
     label: &str,
+    expected_bytes: Option<u64>,
 ) -> Result<()> {
     let parent = destination.parent().ok_or_else(|| {
         VesselError::Config(format!(
@@ -929,6 +940,17 @@ async fn download_with_progress(
     }
     file.flush().await?;
     drop(file);
+
+    let actual_bytes = tokio::fs::metadata(&temp).await?.len();
+    if let Some(expected_bytes) = expected_bytes
+        && actual_bytes != expected_bytes
+    {
+        return Err(VesselError::Extractor(format!(
+            "{label} download size mismatch: expected {expected_bytes} bytes, got {actual_bytes}; partial data was kept at {} for retry/resume",
+            temp.display()
+        )));
+    }
+
     tokio::fs::rename(&temp, destination).await?;
     eprintln!(
         "[diarization] download completed label={} bytes={} path={}",
@@ -953,6 +975,9 @@ fn diarization_models() -> Result<()> {
                 "runtime_loading": "dynamic_at_execution",
                 "build_time_fetch": false,
                 "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
+                "runtime_archive_bytes": sherpa_runtime_archive().ok().map(|(_, bytes)| bytes),
+                "segmentation_archive_bytes": SHERPA_SEGMENTATION_ARCHIVE_BYTES,
+                "embedding_model_bytes": SHERPA_EMBEDDING_BYTES,
                 "segmentation_model": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
                 "embedding_model": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
                 "provider": "cpu",
