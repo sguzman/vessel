@@ -12,37 +12,39 @@ These must never be collapsed into one opaque "transcription" step.
 
 ## ASR Backends
 
-Local ASR is backend-pluggable.
+Local ASR and speaker diarization are separate backend choices.
 
-Current:
+Implemented ASR:
 
 - `whisper-candle`: Rust-native Whisper backend
-
-Implemented:
-
-- `whisperx`: external/optional pipeline using faster-whisper, forced alignment, and pyannote diarization
-- `phonon-2`: fast English CPU-oriented backend
+- `phonon-2`: fast English CPU-oriented external backend
+- `whisperx`: optional external compatibility backend using faster-whisper
 
 Backend selection is operational. The Sourcearium artifact must preserve the backend/model that actually produced the text.
 
+## Diarization Backends
+
+Primary:
+
+- `sherpa-onnx`: Rust API, offline diarization, Pyannote segmentation ONNX plus speaker-embedding ONNX, no Python runtime
+
+Optional compatibility:
+
+- `whisperx`: Python pipeline retained for users who explicitly choose it
+
+Diarization does not choose or replace the ASR backend. The normal architecture supports, for example:
+
+```text
+whisper-candle -> sherpa-onnx
+phonon-2       -> sherpa-onnx
+whisperx       -> sherpa-onnx
+```
+
+and the older bundled WhisperX diarization path remains available only when explicitly requested.
+
 ## WhisperX Role
 
-WhisperX is not merely a different Whisper checkpoint.
-
-Its useful capabilities for Vessel are:
-
-- batched faster-whisper ASR
-- VAD
-- word-level forced alignment
-- speaker diarization
-- optional speaker embeddings
-
-WhisperX may therefore serve either as:
-
-- a complete ASR + alignment + diarization backend; or
-- a diarization/alignment stage layered onto text produced by another ASR backend
-
-Vessel must keep those provenance roles separate.
+WhisperX is useful for faster-whisper ASR, VAD, forced word alignment, and its own diarization pipeline. It remains an optional compatibility backend because that implementation requires a Python environment. Vessel's primary diarization and speaker-identity path must not depend on it.
 
 ## Speaker Labels Versus Identity
 
@@ -146,7 +148,7 @@ Long-running stages must emit progress or heartbeat information. A silent multi-
 
 ## Implemented Operational Evidence
 
-When WhisperX runs with diarization, Vessel keeps compact non-corpus evidence under:
+When a diarization backend runs, Vessel keeps compact non-corpus evidence under:
 
 ```text
 .cache/vessel/speaker-evidence/<video-id>.json
@@ -194,7 +196,7 @@ The matcher does not rewrite transcripts or `speakers.toml`.
 It uses:
 
 - human-confirmed registry anchors from `speakers.toml`
-- persisted WhisperX speaker evidence from `.cache/vessel/speaker-evidence/<video-id>.json`
+- persisted backend-neutral speaker evidence from `.cache/vessel/speaker-evidence/<video-id>.json`
 
 For each human-confirmed anchor:
 
@@ -318,24 +320,33 @@ Projection is read-only. It does not rewrite the Sourcearium artifact.
 
 ## Integrated Update Mode
 
-Speaker attribution can also be requested as part of a normal bounded Sourcearium update:
+Speaker attribution can also be requested as part of a normal bounded Sourcearium update.
+
+First cache the default Rust diarization models when network access is available:
+
+```text
+vessel diarization fetch
+```
+
+Then any supported ASR backend can feed the primary Rust diarization path:
 
 ```text
 vessel update \
   --sourcearium <root> \
-  --asr-backend whisperx \
+  --asr-backend whisper-candle \
   --diarize \
   --speaker-embeddings \
   --attribute-speakers
 ```
 
-`--attribute-speakers` is deliberately opt-in. It requires all of:
+`--attribute-speakers` is deliberately opt-in. It requires:
 
-- `--asr-backend whisperx`
 - `--diarize`
 - `--speaker-embeddings`
 - a valid `speakers.toml` for the source
 - compatible cached speaker evidence for the human-confirmed anchor videos
+
+The default diarization backend is `sherpa-onnx`. WhisperX only becomes a requirement if `--diarization-backend whisperx` is explicitly selected.
 
 The update path reuses the same matching and metadata-application functions as `vessel speakers match` and `vessel speakers apply`; it does not have a second hidden attribution algorithm.
 
@@ -360,4 +371,4 @@ Integrated matching uses the same calibration controls as the standalone matcher
 
 Defaults remain `0.80`, `0.05`, and `0.80` respectively. The selected values are emitted in the update report.
 
-Native creator/platform caption artifacts are not relabeled by this path because they do not carry WhisperX diarization evidence.
+At present the Rust-native update path diarizes the normalized local-ASR audio path. Caption-backed artifacts are explicitly skipped until shared audio preparation is wired for them; this is an implementation boundary, not a conceptual restriction.
