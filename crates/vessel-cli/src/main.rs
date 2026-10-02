@@ -243,6 +243,8 @@ struct DiarizationFetchArgs {
     dir: Option<PathBuf>,
     #[arg(long = "runtime-dir")]
     runtime_dir: Option<PathBuf>,
+    #[arg(long)]
+    plan: bool,
 }
 
 #[derive(Debug, Args)]
@@ -686,10 +688,56 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     let runtime_root = args
         .runtime_dir
         .unwrap_or_else(default_diarization_runtime_root);
+    let (segmentation_model, embedding_model) = sherpa_model_paths(&model_root);
+    let (runtime_archive_name, runtime_archive_bytes) = sherpa_runtime_archive()?;
+    let runtime_url = format!(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
+        SHERPA_ONNX_RUNTIME_VERSION, runtime_archive_name
+    );
+
+    if args.plan {
+        let plan = serde_json::json!({
+            "status": "plan",
+            "network_io": false,
+            "backend": SHERPA_ONNX_BACKEND_NAME,
+            "build_time_fetch": false,
+            "downloads": [
+                {
+                    "kind": "native_runtime",
+                    "url": runtime_url,
+                    "expected_bytes": runtime_archive_bytes,
+                    "destination_root": runtime_root,
+                    "already_available": find_sherpa_runtime_library(&runtime_root).is_ok(),
+                },
+                {
+                    "kind": "segmentation_model",
+                    "url": SHERPA_SEGMENTATION_ARCHIVE_URL,
+                    "expected_bytes": SHERPA_SEGMENTATION_ARCHIVE_BYTES,
+                    "destination": segmentation_model,
+                    "already_available": segmentation_model.is_file(),
+                },
+                {
+                    "kind": "speaker_embedding_model",
+                    "url": SHERPA_EMBEDDING_MODEL_URL,
+                    "expected_bytes": SHERPA_EMBEDDING_BYTES,
+                    "destination": embedding_model,
+                    "already_available": embedding_model.is_file(),
+                }
+            ],
+            "total_expected_bytes": runtime_archive_bytes
+                + SHERPA_SEGMENTATION_ARCHIVE_BYTES
+                + SHERPA_EMBEDDING_BYTES,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan)
+                .map_err(|error| VesselError::Config(error.to_string()))?
+        );
+        return Ok(());
+    }
+
     tokio::fs::create_dir_all(&model_root).await?;
     tokio::fs::create_dir_all(&runtime_root).await?;
-
-    let (segmentation_model, embedding_model) = sherpa_model_paths(&model_root);
     let client = Client::new();
 
     let runtime_library = match find_sherpa_runtime_library(&runtime_root) {
@@ -701,12 +749,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             path
         }
         Err(_) => {
-            let (archive_name, runtime_archive_bytes) = sherpa_runtime_archive()?;
-            let runtime_url = format!(
-                "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
-                SHERPA_ONNX_RUNTIME_VERSION, archive_name
-            );
-            let archive_path = runtime_root.join(&archive_name);
+            let archive_path = runtime_root.join(&runtime_archive_name);
             download_with_progress(
                 &client,
                 &runtime_url,
