@@ -25,6 +25,7 @@ use vessel_diarization::{
     DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
     DiarizationResult, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION,
     SherpaOnnxDiarizer, find_sherpa_runtime_library, persist_speaker_evidence,
+    probe_sherpa_runtime,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -792,6 +793,8 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         )));
     }
 
+    probe_sherpa_runtime(&runtime_library)?;
+
     let report = serde_json::json!({
         "status": "ok",
         "backend": SHERPA_ONNX_BACKEND_NAME,
@@ -1014,7 +1017,13 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 .runtime_dir
                 .unwrap_or_else(default_diarization_runtime_root);
             let runtime_library = find_sherpa_runtime_library(&runtime_root).ok();
-            let ready = runtime_library.is_some()
+            let runtime_probe = runtime_library
+                .as_deref()
+                .map(probe_sherpa_runtime)
+                .transpose();
+            let runtime_loadable = runtime_probe.as_ref().is_ok_and(|_| runtime_library.is_some());
+            let runtime_error = runtime_probe.err().map(|error| error.to_string());
+            let ready = runtime_loadable
                 && segmentation_path.is_file()
                 && embedding_path.is_file()
                 && !args.provider.trim().is_empty();
@@ -1030,6 +1039,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "provider": args.provider,
                 "runtime_directory": runtime_root,
                 "runtime_library": runtime_library,
+                "runtime_loadable": runtime_loadable,
+                "runtime_error": runtime_error,
                 "segmentation_model": {
                     "path": segmentation_path,
                     "exists": segmentation_path.is_file(),
