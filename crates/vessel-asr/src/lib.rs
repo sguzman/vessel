@@ -16,6 +16,22 @@ pub const WHISPER_CANDLE_ENGINE_NAME: &str = "whisper-candle";
 pub const PHONON2_BACKEND_NAME: &str = "phonon-2";
 pub const PHONON_ENGINE_NAME: &str = "fermion-phonon";
 pub const ENGINE_NAME: &str = WHISPER_CANDLE_ENGINE_NAME;
+pub const WHISPER_MODEL_NAMES: &[&str] = &[
+    "tiny",
+    "tiny.en",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "medium",
+    "medium.en",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large-v3-turbo",
+];
+pub const PHONON_MODEL_NAMES: &[&str] =
+    &["phonon-2", "phonon-1", "phonon-1-big", "phonon-1-micro"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsrModelLocation {
