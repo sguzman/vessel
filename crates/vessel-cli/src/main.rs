@@ -669,18 +669,66 @@ fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
 async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     if args.backend != SHERPA_ONNX_BACKEND_NAME {
         return Err(VesselError::Config(format!(
-            "model fetching is not implemented for diarization backend {:?}",
+            "model/runtime fetching is not implemented for diarization backend {:?}",
             args.backend
         )));
     }
 
-    let root = args.dir.unwrap_or_else(default_diarization_model_root);
-    tokio::fs::create_dir_all(&root).await?;
-    let (segmentation_model, embedding_model) = sherpa_model_paths(&root);
+    let model_root = args.dir.unwrap_or_else(default_diarization_model_root);
+    let runtime_root = args
+        .runtime_dir
+        .unwrap_or_else(default_diarization_runtime_root);
+    tokio::fs::create_dir_all(&model_root).await?;
+    tokio::fs::create_dir_all(&runtime_root).await?;
+
+    let (segmentation_model, embedding_model) = sherpa_model_paths(&model_root);
     let client = Client::new();
 
+    let runtime_library = match find_sherpa_runtime_library(&runtime_root) {
+        Ok(path) => {
+            eprintln!(
+                "[diarization] sherpa runtime already available path={}",
+                path.display()
+            );
+            path
+        }
+        Err(_) => {
+            let archive_name = sherpa_runtime_archive_name()?;
+            let runtime_url = format!(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
+                SHERPA_ONNX_RUNTIME_VERSION, archive_name
+            );
+            let archive_path = runtime_root.join(&archive_name);
+            download_with_progress(
+                &client,
+                &runtime_url,
+                &archive_path,
+                "sherpa native runtime",
+            )
+            .await?;
+
+            let unpack_root = runtime_root.clone();
+            let archive_for_worker = archive_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let file = std::fs::File::open(&archive_for_worker)?;
+                let decoder = bzip2::read::BzDecoder::new(file);
+                let mut archive = tar::Archive::new(decoder);
+                archive.unpack(&unpack_root)?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                VesselError::Extractor(format!(
+                    "sherpa runtime archive worker failed to join: {error}"
+                ))
+            })??;
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            find_sherpa_runtime_library(&runtime_root)?
+        }
+    };
+
     if !segmentation_model.is_file() {
-        let archive_path = root.join("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2");
+        let archive_path = model_root.join("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2");
         download_with_progress(
             &client,
             SHERPA_SEGMENTATION_ARCHIVE_URL,
@@ -689,7 +737,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         )
         .await?;
 
-        let unpack_root = root.clone();
+        let unpack_root = model_root.clone();
         let archive_for_worker = archive_path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let file = std::fs::File::open(&archive_for_worker)?;
@@ -730,19 +778,25 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     if !segmentation_model.is_file() || !embedding_model.is_file() {
         return Err(VesselError::Extractor(format!(
             "sherpa model fetch completed without expected files under {}",
-            root.display()
+            model_root.display()
         )));
     }
 
     let report = serde_json::json!({
         "status": "ok",
         "backend": SHERPA_ONNX_BACKEND_NAME,
-        "directory": root,
+        "network_phase": "explicit_runtime_command",
+        "build_time_fetch": false,
+        "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
+        "runtime_directory": runtime_root,
+        "runtime_library": runtime_library,
+        "model_directory": model_root,
         "segmentation_model": segmentation_model,
         "embedding_model": embedding_model,
         "python_required": false,
         "reuse_with": {
             "diarization_backend": SHERPA_ONNX_BACKEND_NAME,
+            "diarization_runtime_dir": runtime_root,
             "diarization_segmentation_model": segmentation_model,
             "diarization_embedding_model": embedding_model,
         }
