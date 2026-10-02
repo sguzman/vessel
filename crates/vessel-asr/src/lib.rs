@@ -145,11 +145,95 @@ pub fn fetch_asr_model(
                 directory,
             })
         }
-        WHISPERX_BACKEND_NAME => Err(asr_error(
-            "WhisperX model prefetch is not implemented yet; install/cache WhisperX models explicitly and use --asr-model-dir",
-        )),
+        WHISPERX_BACKEND_NAME => {
+            let python = whisperx_python_executable(executable);
+            let script = r#"
+import sys
+from faster_whisper.utils import _MODELS
+from huggingface_hub import snapshot_download
+
+model = sys.argv[1]
+repo = model if "/" in model else _MODELS.get(model)
+if repo is None:
+    raise SystemExit(f"unknown faster-whisper model: {model}")
+path = snapshot_download(
+    repo_id=repo,
+    allow_patterns=[
+        "config.json",
+        "preprocessor_config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.*",
+    ],
+)
+print(path)
+"#;
+            eprintln!(
+                "[asr] model download/cache check started backend={} model={} python={}",
+                backend,
+                model,
+                python.display()
+            );
+            let output = Command::new(&python)
+                .arg("-c")
+                .arg(script)
+                .arg(model)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .output()
+                .map_err(|error| {
+                    asr_error(format!(
+                        "failed to start WhisperX Python environment {:?}: {error}; install whisperx/faster-whisper or use --executable with the WhisperX venv binary",
+                        python
+                    ))
+                })?;
+            if !output.status.success() {
+                return Err(asr_error(format!(
+                    "WhisperX model download failed with status {}",
+                    output.status
+                )));
+            }
+            let stdout = String::from_utf8(output.stdout).map_err(|error| {
+                asr_error(format!("WhisperX model download output was not UTF-8: {error}"))
+            })?;
+            let directory = PathBuf::from(stdout.trim());
+            if stdout.trim().is_empty() || !directory.is_dir() {
+                return Err(asr_error(format!(
+                    "WhisperX model download did not return a valid model directory: {:?}",
+                    stdout.trim()
+                )));
+            }
+            eprintln!(
+                "[asr] model available backend={} model={} directory={}",
+                backend,
+                model,
+                directory.display()
+            );
+            Ok(AsrModelLocation {
+                backend: backend.to_owned(),
+                model: model.to_owned(),
+                directory,
+            })
+        }
         other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
     }
+}
+
+fn whisperx_python_executable(executable: Option<&Path>) -> PathBuf {
+    if let Some(executable) = executable
+        && let Some(parent) = executable.parent()
+    {
+        let python = parent.join("python");
+        if python.is_file() {
+            return python;
+        }
+        let python3 = parent.join("python3");
+        if python3.is_file() {
+            return python3;
+        }
+    }
+    PathBuf::from("python3")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -982,6 +1066,24 @@ fn asr_error(message: impl Into<String>) -> VesselError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whisperx_python_prefers_sibling_virtualenv_interpreter() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-whisperx-python-{}",
+            std::process::id()
+        ));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("bin");
+        fs::write(bin.join("python"), b"").expect("python marker");
+
+        assert_eq!(
+            whisperx_python_executable(Some(&bin.join("whisperx"))),
+            bin.join("python")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn backend_default_models_are_explicit() {
