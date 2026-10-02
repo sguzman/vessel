@@ -2220,6 +2220,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "backend": args.diarization_backend,
             "segmentation_model": args.diarization_segmentation_model,
             "embedding_model": args.diarization_embedding_model,
+            "runtime_dir": args.diarization_runtime_dir,
+            "runtime_loading": "dynamic_at_execution",
+            "build_time_fetch": false,
             "provider": args.diarization_provider,
             "num_threads": args.diarization_num_threads,
             "speaker_embeddings": args.speaker_embeddings,
@@ -4623,6 +4626,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4677,6 +4681,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4715,6 +4720,7 @@ mod tests {
             diarization_backend: "whisperx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4754,6 +4760,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4792,6 +4799,7 @@ mod tests {
             diarization_backend: "whisperx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4831,6 +4839,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
@@ -4878,8 +4887,16 @@ mod tests {
         fs::create_dir_all(&root).expect("temp model dir");
         let segmentation = root.join("segmentation.onnx");
         let embedding = root.join("embedding.onnx");
+        let runtime = root.join(if cfg!(target_os = "windows") {
+            "sherpa-onnx-c-api.dll"
+        } else if cfg!(target_os = "macos") {
+            "libsherpa-onnx-c-api.dylib"
+        } else {
+            "libsherpa-onnx-c-api.so"
+        });
         fs::write(&segmentation, b"model").expect("segmentation model");
         fs::write(&embedding, b"model").expect("embedding model");
+        fs::write(&runtime, b"runtime").expect("runtime library");
 
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
@@ -4895,6 +4912,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: Some(segmentation.clone()),
             diarization_embedding_model: Some(embedding.clone()),
+            diarization_runtime_dir: Some(root.clone()),
             diarization_provider: "cpu".into(),
             diarization_num_threads: 6,
             diarization_clustering_threshold: 0.57,
@@ -4921,6 +4939,7 @@ mod tests {
             .expect("resolve diarization")
             .expect("configured");
         assert_eq!(diarization.backend, "sherpa-onnx");
+        assert_eq!(diarization.runtime_library, runtime);
         assert_eq!(diarization.segmentation_model, segmentation);
         assert_eq!(diarization.embedding_model, embedding);
         assert_eq!(diarization.provider, "cpu");
@@ -4949,6 +4968,7 @@ mod tests {
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
             diarization_embedding_model: None,
+            diarization_runtime_dir: None,
             diarization_provider: "cpu".into(),
             diarization_num_threads: 4,
             diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
