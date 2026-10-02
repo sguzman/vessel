@@ -124,6 +124,12 @@ struct UpdateArgs {
     speaker_embeddings: bool,
     #[arg(long = "attribute-speakers")]
     attribute_speakers: bool,
+    #[arg(long = "speaker-min-similarity", default_value_t = 0.80)]
+    speaker_min_similarity: f64,
+    #[arg(long = "speaker-min-margin", default_value_t = 0.05)]
+    speaker_min_margin: f64,
+    #[arg(long = "speaker-min-anchor-dominance", default_value_t = 0.80)]
+    speaker_min_anchor_dominance: f64,
     #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
     hf_token_env: String,
     #[arg(long = "upgrade-check-days", default_value_t = 30)]
@@ -735,7 +741,12 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
     validate_update_speaker_attribution(&args, &asr_config)?;
-    let speaker_match_config = SpeakerMatchConfig::default();
+    let speaker_match_config = SpeakerMatchConfig {
+        min_similarity: args.speaker_min_similarity,
+        min_margin: args.speaker_min_margin,
+        min_anchor_dominance: args.speaker_min_anchor_dominance,
+    }
+    .validate()?;
     let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
@@ -3784,7 +3795,7 @@ mod tests {
         validate_update_speaker_attribution,
     };
     use vessel_core::models::InputKind;
-    use vessel_core::{ChannelCategoryConfig, Config, VesselError};
+    use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
 
     #[test]
     fn configured_channels_select_all_or_requested_categories() {
@@ -3829,6 +3840,9 @@ mod tests {
             max_speakers: Some(3),
             speaker_embeddings: true,
             attribute_speakers: false,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "TEST_HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3873,6 +3887,9 @@ mod tests {
             max_speakers: None,
             speaker_embeddings: false,
             attribute_speakers: false,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3901,6 +3918,9 @@ mod tests {
             max_speakers: None,
             speaker_embeddings: false,
             attribute_speakers: false,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3930,6 +3950,9 @@ mod tests {
             max_speakers: None,
             speaker_embeddings: true,
             attribute_speakers: true,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3963,6 +3986,9 @@ mod tests {
             max_speakers: None,
             speaker_embeddings: false,
             attribute_speakers: true,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3986,6 +4012,45 @@ mod tests {
         let config = resolve_asr_config(&args);
         validate_update_speaker_attribution(&args, &config)
             .expect("complete attribution configuration");
+    }
+
+    #[test]
+    fn speaker_matching_thresholds_are_operational_update_controls() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("whisperx".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: true,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: true,
+            attribute_speakers: true,
+            speaker_min_similarity: 0.91,
+            speaker_min_margin: 0.12,
+            speaker_min_anchor_dominance: 0.88,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+        let config = SpeakerMatchConfig {
+            min_similarity: args.speaker_min_similarity,
+            min_margin: args.speaker_min_margin,
+            min_anchor_dominance: args.speaker_min_anchor_dominance,
+        }
+        .validate()
+        .expect("valid thresholds");
+
+        assert_eq!(config.min_similarity, 0.91);
+        assert_eq!(config.min_margin, 0.12);
+        assert_eq!(config.min_anchor_dominance, 0.88);
     }
 
     #[test]
