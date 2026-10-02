@@ -734,18 +734,7 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
-    if args.attribute_speakers {
-        if asr_config.backend != vessel_asr::WHISPERX_BACKEND_NAME {
-            return Err(VesselError::Config(
-                "--attribute-speakers requires --asr-backend whisperx".into(),
-            ));
-        }
-        if !asr_config.diarize || !asr_config.speaker_embeddings {
-            return Err(VesselError::Config(
-                "--attribute-speakers requires --diarize and --speaker-embeddings".into(),
-            ));
-        }
-    }
+    validate_update_speaker_attribution(&args, &asr_config)?;
     let speaker_match_config = SpeakerMatchConfig::default();
     let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
@@ -1640,6 +1629,23 @@ fn transcript_upgrade_probe_due(
         .saturating_sub(last_probed_at.unix_timestamp());
     elapsed_seconds >= 0
         && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
+}
+
+fn validate_update_speaker_attribution(args: &UpdateArgs, config: &AsrConfig) -> Result<()> {
+    if !args.attribute_speakers {
+        return Ok(());
+    }
+    if config.backend != vessel_asr::WHISPERX_BACKEND_NAME {
+        return Err(VesselError::Config(
+            "--attribute-speakers requires --asr-backend whisperx".into(),
+        ));
+    }
+    if !config.diarize || !config.speaker_embeddings {
+        return Err(VesselError::Config(
+            "--attribute-speakers requires --diarize and --speaker-embeddings".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
@@ -3775,6 +3781,7 @@ mod tests {
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
         resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
+        validate_update_speaker_attribution,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, VesselError};
@@ -3903,6 +3910,82 @@ mod tests {
         assert_eq!(config.backend, "whisperx");
         assert_eq!(config.model, "large-v3");
         assert!(config.diarize);
+    }
+
+    #[test]
+    fn speaker_attribution_update_requires_whisperx() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("whisper-candle".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: true,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: true,
+            attribute_speakers: true,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+        let config = resolve_asr_config(&args);
+        let error = validate_update_speaker_attribution(&args, &config)
+            .expect_err("non-WhisperX attribution must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires --asr-backend whisperx")
+        );
+    }
+
+    #[test]
+    fn speaker_attribution_update_requires_diarization_and_embeddings() {
+        let mut args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("whisperx".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: false,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            attribute_speakers: true,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+
+        let config = resolve_asr_config(&args);
+        let error = validate_update_speaker_attribution(&args, &config)
+            .expect_err("missing diarization must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires --diarize and --speaker-embeddings")
+        );
+
+        args.diarize = true;
+        let config = resolve_asr_config(&args);
+        assert!(validate_update_speaker_attribution(&args, &config).is_err());
+
+        args.speaker_embeddings = true;
+        let config = resolve_asr_config(&args);
+        validate_update_speaker_attribution(&args, &config)
+            .expect("complete attribution configuration");
     }
 
     #[test]
