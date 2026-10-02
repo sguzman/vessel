@@ -233,3 +233,40 @@ A result can be:
 The report also preserves per-anchor diagnostics such as missing evidence, incompatible provenance, low dominance, missing embeddings, or incompatible dimensions.
 
 A read-only `matched` result is still evidence, not durable identity. Automatic transcript identity application remains a separate later step.
+
+
+## Applying Model-Matched Identity
+
+After reviewing a read-only match report, Vessel can persist the accepted `matched` decisions:
+
+```text
+vessel speakers apply \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <target-video-id>
+```
+
+`apply` recomputes the match report using the supplied thresholds and refuses to apply it if the target artifact's diarization engine/model differs from the evidence.
+
+Model-matched identity is stored under the Sourcearium `speaker_attribution` extension. The raw transcript body is **not rewritten**.
+
+This is intentional:
+
+- `<speaker:SPEAKER_00>` remains the raw file-local diarization observation.
+- the extension records that `SPEAKER_00` matched stable identity `creator` under a particular registry revision and threshold configuration.
+- rerunning the same application is idempotent.
+- if the registry or calibration changes later, the attribution layer can be replaced without destroying the original diarization labels.
+
+Each persisted assignment records:
+
+- diarization label
+- stable identity key
+- `attribution = "model_matched"`
+- cosine similarity
+- runner-up identity/similarity when present
+- similarity margin when present
+- number of compatible human anchor samples
+
+The extension also records the registry revision, diarization engine/model, and all matching thresholds.
+
+A future projection/rendering layer may display stable identity names in a human-facing transcript without mutating the canonical raw diarization body.
