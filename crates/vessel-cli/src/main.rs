@@ -405,6 +405,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "requires_local_asr": 0,
             "local_asr_attempted": 0,
             "local_asr_materialized": 0,
+            "caption_access_degraded": 0,
+            "caption_empty_response_tracks": 0,
             "unresolved_no_provider": 0,
             "errors": [],
         });
@@ -807,15 +809,33 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {}
             }
 
-            let candidate = match acquire_best_caption_candidate(&video, &policy.transcripts).await {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    push_update_error(&mut summary, &video.video_id, error);
-                    continue;
-                }
-            };
+            let caption_acquisition =
+                match acquire_best_caption_candidate(&video, &policy.transcripts).await {
+                    Ok(acquisition) => acquisition,
+                    Err(error) => {
+                        push_update_error(&mut summary, &video.video_id, error);
+                        continue;
+                    }
+                };
+            let empty_response_derivations = caption_acquisition
+                .empty_response_derivations
+                .iter()
+                .map(|derivation| derivation.as_str())
+                .collect::<Vec<_>>();
+            if !empty_response_derivations.is_empty() {
+                increment_summary(&mut summary, "caption_access_degraded", 1);
+                increment_summary(
+                    &mut summary,
+                    "caption_empty_response_tracks",
+                    empty_response_derivations.len(),
+                );
+            }
+            let caption_probe = serde_json::json!({
+                "advertised_tracks": video.subtitles.len(),
+                "empty_response_derivations": empty_response_derivations,
+            });
 
-            let (candidate, asr_cache_dir) = if let Some(candidate) = candidate {
+            let (candidate, asr_cache_dir) = if let Some(candidate) = caption_acquisition.candidate {
                 (candidate, None)
             } else if existing.is_some() {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
@@ -828,7 +848,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     } else {
                         "preserved_without_better_caption"
                     },
-                    serde_json::json!({}),
+                    serde_json::json!({
+                        "caption_probe": caption_probe,
+                    }),
                 );
                 if !args.preview {
                     match operational_store
@@ -851,6 +873,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         serde_json::json!({
                             "model": &asr_config.model,
                             "device": &asr_config.device,
+                            "caption_probe": caption_probe,
                         }),
                     );
                     continue;
@@ -880,7 +903,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     report_items,
                     &video.video_id,
                     "unresolved_no_provider",
-                    serde_json::json!({}),
+                    serde_json::json!({
+                        "caption_probe": caption_probe,
+                    }),
                 );
                 continue;
             };
