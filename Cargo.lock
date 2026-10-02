@@ -3909,9 +3909,11 @@ name = "vessel-cli"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bzip2",
  "clap",
  "reqwest",
  "serde_json",
+ "tar",
  "time",
  "tokio",
  "toml",
