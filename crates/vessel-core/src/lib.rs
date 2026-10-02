@@ -27,10 +27,10 @@ pub use sourcearium_repo::{
     materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
 };
 pub use speaker_match::{
-    AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1, SpeakerEvidenceDiarization,
-    SpeakerEvidenceProvenance, SpeakerEvidenceSegment, SpeakerEvidenceV1, SpeakerMatch,
-    SpeakerMatchConfig, SpeakerMatchReport, SpeakerMatchStatus, load_speaker_evidence,
-    match_speakers_from_evidence,
+    AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1,
+    SpeakerEvidenceDiarization, SpeakerEvidenceProvenance, SpeakerEvidenceSegment,
+    SpeakerEvidenceV1, SpeakerMatch, SpeakerMatchConfig, SpeakerMatchReport, SpeakerMatchStatus,
+    load_speaker_evidence, match_speakers_from_evidence,
 };
 pub use speaker_registry::{
     SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,
