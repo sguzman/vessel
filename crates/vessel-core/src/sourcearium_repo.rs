@@ -46,6 +46,12 @@ pub fn inventory_sourcearium_repository(
     let mut invalid_artifacts = Vec::new();
 
     for path in files {
+        if path.file_name().and_then(|value| value.to_str()) == Some("speakers.toml") {
+            if let Err(error) = crate::speaker_registry::load_speaker_registry(&path) {
+                invalid_artifacts.push(format!("{}: {error}", path.display()));
+            }
+            continue;
+        }
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
@@ -132,6 +138,13 @@ pub fn validate_sourcearium_repository(
     let mut artifacts_validated = 0usize;
 
     for path in files {
+        if path.file_name().and_then(|value| value.to_str()) == Some("speakers.toml") {
+            if let Err(error) = crate::speaker_registry::load_speaker_registry(&path) {
+                errors.push(format!("{}: {error}", path.display()));
+            }
+            continue;
+        }
+
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             let extension = extension.to_ascii_lowercase();
             if matches!(extension.as_str(), "pdf" | "epub" | "doc" | "docx") {
