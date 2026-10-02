@@ -1,6 +1,6 @@
 mod transcript;
 
-pub use transcript::{acquire_best_caption_candidate, parse_youtube_json3};
+pub use transcript::{CaptionAcquisition, acquire_best_caption_candidate, parse_youtube_json3};
 
 use async_trait::async_trait;
 use reqwest::Client;
