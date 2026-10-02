@@ -22,9 +22,10 @@ pub use sourcearium::{
 pub use sourcearium_repo::{
     ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumInventoryReport,
     SourceariumPruneCandidate, SourceariumPrunePlan, SourceariumValidationReport,
-    SourceariumYoutubeSource, apply_sourcearium_prune, discover_youtube_sources,
-    inventory_sourcearium_repository, load_youtube_transcript_artifact,
-    materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
+    SourceariumYoutubeSource, SpeakerAttributionApplyResult, apply_sourcearium_prune,
+    apply_speaker_match_report, discover_youtube_sources, inventory_sourcearium_repository,
+    load_youtube_transcript_artifact, materialize_youtube_transcript, plan_sourcearium_prune,
+    validate_sourcearium_repository,
 };
 pub use speaker_match::{
     AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1,
