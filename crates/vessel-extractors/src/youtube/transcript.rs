@@ -255,12 +255,8 @@ mod tests {
 
     #[test]
     fn empty_caption_response_is_treated_as_unavailable() {
-        let candidate = parse_caption_response(
-            "",
-            TranscriptDerivation::CreatorSubtitles,
-            "en",
-        )
-        .expect("empty response should not be fatal");
+        let candidate = parse_caption_response("", TranscriptDerivation::CreatorSubtitles, "en")
+            .expect("empty response should not be fatal");
 
         assert!(candidate.is_none());
     }
