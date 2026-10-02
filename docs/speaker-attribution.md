@@ -176,3 +176,60 @@ vessel speakers anchor --sourcearium <root> --source-key <key> --speaker creator
 ```
 
 The next matching layer will compare file-local embeddings against embeddings supported by these human-confirmed anchor ranges. Similarity is evidence; it will not be silently promoted to identity without an explicit calibrated attribution rule.
+
+
+## Read-Only Cross-Video Matching
+
+Vessel now has a read-only matching stage:
+
+```text
+vessel speakers match \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <target-video-id>
+```
+
+The matcher does not rewrite transcripts or `speakers.toml`.
+
+It uses:
+
+- human-confirmed registry anchors from `speakers.toml`
+- persisted WhisperX speaker evidence from `.cache/vessel/speaker-evidence/<video-id>.json`
+
+For each human-confirmed anchor:
+
+1. find diarized segments that overlap the anchor time range
+2. require one file-local diarization label to dominate the speech overlap
+3. require that label to have a speaker embedding
+4. require compatible diarization engine/model and embedding dimension with the target
+5. normalize the embedding and use it as one sample for the stable identity
+
+Multiple compatible anchor samples for one identity are normalized, averaged, and normalized again to produce an operational identity centroid.
+
+For each anonymous target speaker cluster, Vessel computes cosine similarity against compatible identity centroids.
+
+Default read-only acceptance gates are deliberately conservative and are **not yet calibrated as universal truth**:
+
+- minimum cosine similarity: `0.80`
+- minimum margin above the runner-up identity: `0.05`
+- minimum anchor cluster dominance: `0.80`
+
+All three can be changed explicitly:
+
+```text
+--min-similarity <value>
+--min-margin <value>
+--min-anchor-dominance <value>
+```
+
+A result can be:
+
+- `matched`
+- `below_similarity`
+- `ambiguous_margin`
+- `missing_embedding`
+- `no_compatible_anchors`
+
+The report also preserves per-anchor diagnostics such as missing evidence, incompatible provenance, low dominance, missing embeddings, or incompatible dimensions.
+
+A read-only `matched` result is still evidence, not durable identity. Automatic transcript identity application remains a separate later step.
