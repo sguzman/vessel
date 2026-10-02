@@ -4,6 +4,7 @@ pub mod events;
 pub mod models;
 pub mod sourcearium;
 pub mod sourcearium_repo;
+pub mod speaker_registry;
 pub mod transcript;
 
 pub use config::{
@@ -16,6 +17,10 @@ pub use sourcearium::{
     AcquisitionV1, SourceIdentityV1, SourceariumArtifactV1, TextRepresentationV1, VideoSelection,
     YoutubeChannelPolicyV1, YoutubeSelectionPolicyV1, YoutubeSourcePolicyV1,
     YoutubeTranscriptPolicyV1,
+};
+pub use speaker_registry::{
+    SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,
+    load_speaker_registry, write_speaker_registry,
 };
 pub use sourcearium_repo::{
     ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumInventoryReport,
