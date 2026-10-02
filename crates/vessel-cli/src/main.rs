@@ -4915,10 +4915,51 @@ mod tests {
         preview_materialization_action, push_update_error, push_update_item,
         resolve_asr_config, resolve_configured_channels, resolve_diarization_config,
         transcript_upgrade_probe_due, validate_update_speaker_attribution,
+        verify_integrity_receipt, write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
+
+    #[test]
+    fn diarization_integrity_receipt_detects_post_fetch_corruption() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-diarization-integrity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("integrity temp root");
+
+        let artifact = root.join("model.onnx");
+        let receipt = root.join("receipt.json");
+        fs::write(&artifact, b"abc123").expect("artifact");
+
+        write_integrity_receipt(
+            &receipt,
+            &root,
+            "test_artifact",
+            &[("model", artifact.as_path())],
+        )
+        .expect("write receipt");
+
+        let clean = verify_integrity_receipt(&receipt, &root);
+        assert!(clean.present);
+        assert!(clean.verified);
+        assert!(clean.errors.is_empty());
+
+        fs::write(&artifact, b"abc124").expect("corrupt artifact with same byte count");
+        let corrupted = verify_integrity_receipt(&receipt, &root);
+        assert!(corrupted.present);
+        assert!(!corrupted.verified);
+        assert!(
+            corrupted
+                .errors
+                .iter()
+                .any(|error| error.contains("BLAKE3 mismatch"))
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn configured_channels_select_all_or_requested_categories() {
