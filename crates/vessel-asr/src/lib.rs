@@ -62,7 +62,32 @@ impl WhisperCandleBackend {
         })?;
 
         let mut model = if let Some(model_dir) = config.model_dir.as_deref() {
-            load_local_model(model_dir, &device)?
+            if !model_dir.is_dir() {
+                return Err(asr_error(format!(
+                    "ASR model directory does not exist: {}",
+                    model_dir.display()
+                )));
+            }
+            let config_path = model_dir.join("config.json");
+            let weights_path = model_dir.join("model.safetensors");
+            if !config_path.is_file() {
+                return Err(asr_error(format!(
+                    "ASR model directory is missing config.json: {}",
+                    model_dir.display()
+                )));
+            }
+            if !weights_path.is_file() {
+                return Err(asr_error(format!(
+                    "ASR model directory is missing model.safetensors: {}",
+                    model_dir.display()
+                )));
+            }
+            WhisperModel::load(&config_path, &weights_path, &device).map_err(|error| {
+                asr_error(format!(
+                    "failed to load local Whisper model from {}: {error}",
+                    model_dir.display()
+                ))
+            })?
         } else {
             load_model(&config.model, &device).map_err(|error| {
                 asr_error(format!(
@@ -152,37 +177,6 @@ impl WhisperCandleBackend {
 
         candidate_from_segments(&self.config.model, Some(result.language), segments)
     }
-}
-
-fn load_local_model(model_dir: &Path, device: &candle_core::Device) -> Result<WhisperModel> {
-    if !model_dir.is_dir() {
-        return Err(asr_error(format!(
-            "ASR model directory does not exist: {}",
-            model_dir.display()
-        )));
-    }
-
-    let config_path = model_dir.join("config.json");
-    let weights_path = model_dir.join("model.safetensors");
-    if !config_path.is_file() {
-        return Err(asr_error(format!(
-            "ASR model directory is missing config.json: {}",
-            model_dir.display()
-        )));
-    }
-    if !weights_path.is_file() {
-        return Err(asr_error(format!(
-            "ASR model directory is missing model.safetensors: {}",
-            model_dir.display()
-        )));
-    }
-
-    WhisperModel::load(&config_path, &weights_path, device).map_err(|error| {
-        asr_error(format!(
-            "failed to load local Whisper model from {}: {error}",
-            model_dir.display()
-        ))
-    })
 }
 
 fn candidate_from_segments(
