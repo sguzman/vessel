@@ -156,6 +156,37 @@ The following are already implemented and CI-tested:
 - native Windows path/store/ASR tests and CLI compile
 - locked Cargo dependency resolution
 
+## Local ASR Choice And Provenance
+
+Local ASR is not synonymous with Whisper.
+
+The user must be able to choose the speed/accuracy/resource tradeoff per run without changing durable Sourcearium source policy. Backend/model selection is operational configuration; the resulting representation provenance is durable.
+
+Required provenance for every local-ASR artifact:
+
+- `representation.derivation = "local_asr"`
+- `representation.engine` identifies the inference engine/backend
+- `representation.model` identifies the model that produced the text
+
+A transcript produced by one backend/model must never be presented as if another backend/model produced it.
+
+Current backend:
+
+- `whisper-candle`: pure-Rust Whisper, multilingual, timestamp-capable, CPU-first
+
+Planned backend:
+
+- Phonon-2 / Fermion Research: English-only fast path, substantially smaller/faster on CPU, with no claim that it replaces Whisper for multilingual, translation, or timestamp-rich work
+
+Model acquisition must support both:
+
+1. automatic first-use download/cache when network access is acceptable
+2. explicit offline/local model paths when the model has been downloaded ahead of time
+
+Long-running ASR work must never be silent. At minimum Vessel must report model loading, audio normalization, transcription start, transcription progress when the backend exposes it, and completion/error.
+
+Real ASR acceptance should use an optimized release binary, not `target/debug/vessel`.
+
 ## Current Next Work
 
 The architecture is no longer the main uncertainty.
