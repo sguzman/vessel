@@ -489,6 +489,7 @@ pub fn discover_youtube_sources(sourcearium_root: &Path) -> Result<Vec<Sourceari
 pub struct ExistingSourceariumArtifact {
     pub path: PathBuf,
     pub artifact: SourceariumArtifactV1,
+    pub body: String,
 }
 
 pub fn load_youtube_transcript_artifact(
@@ -501,9 +502,102 @@ pub fn load_youtube_transcript_artifact(
         return Ok(None);
     };
     let raw = fs::read_to_string(&path)?;
-    let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
+    let (artifact, body) = SourceariumArtifactV1::parse_markdown(&raw)
         .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
-    Ok(Some(ExistingSourceariumArtifact { path, artifact }))
+    Ok(Some(ExistingSourceariumArtifact {
+        path,
+        artifact,
+        body,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscriptDiarizationApplyResult {
+    pub path: PathBuf,
+    pub updated: bool,
+    pub speaker_attribution_cleared: bool,
+}
+
+pub fn apply_youtube_transcript_diarization(
+    source: &SourceariumYoutubeSource,
+    video_id: &str,
+    candidate: &TranscriptCandidate,
+) -> Result<TranscriptDiarizationApplyResult> {
+    candidate.validate()?;
+    let diarization = candidate.diarization.as_ref().ok_or_else(|| {
+        corpus_error("cannot apply transcript diarization without diarization provenance")
+    })?;
+
+    let artifact_id = format!("youtube:video:{video_id}:transcript");
+    let transcripts_dir = source.source_dir.join("transcripts");
+    let path = find_artifact_path(&transcripts_dir, &artifact_id)?.ok_or_else(|| {
+        corpus_error(format!(
+            "Sourcearium transcript artifact does not exist for video {video_id:?}"
+        ))
+    })?;
+    let raw = fs::read_to_string(&path)?;
+    let (mut artifact, current_body) = SourceariumArtifactV1::parse_markdown(&raw)
+        .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
+
+    if artifact.source.family != "youtube"
+        || artifact.source.kind != "video"
+        || artifact.source.id != video_id
+        || artifact.kind != "transcript"
+    {
+        return Err(corpus_error(format!(
+            "{} is not the expected YouTube transcript artifact for {video_id:?}",
+            path.display()
+        )));
+    }
+
+    let candidate_representation = candidate.to_sourcearium_representation()?;
+    if candidate_representation != artifact.representation {
+        return Err(corpus_error(format!(
+            "refusing diarization enrichment that changes transcript representation for {video_id:?}"
+        )));
+    }
+
+    let mut diarization_table = toml::Table::new();
+    diarization_table.insert(
+        "engine".into(),
+        toml::Value::String(diarization.engine.clone()),
+    );
+    diarization_table.insert(
+        "model".into(),
+        toml::Value::String(diarization.model.clone()),
+    );
+    diarization_table.insert(
+        "label_scope".into(),
+        toml::Value::String("file_local".into()),
+    );
+    if let Some(revision) = diarization.registry_revision {
+        diarization_table.insert(
+            "registry_revision".into(),
+            toml::Value::Integer(revision as i64),
+        );
+    }
+
+    let next_body = candidate.render_body()?;
+    let diarization_changed = artifact.extensions.get("diarization") != Some(&diarization_table);
+    let body_changed = current_body != next_body;
+    artifact
+        .extensions
+        .insert("diarization".into(), diarization_table);
+
+    let speaker_attribution_cleared =
+        (diarization_changed || body_changed) && artifact.extensions.remove("speaker_attribution").is_some();
+
+    let rendered = artifact.to_markdown(&next_body)?;
+    let updated = rendered != raw;
+    if updated {
+        atomic_write(&path, rendered.as_bytes())?;
+    }
+
+    Ok(TranscriptDiarizationApplyResult {
+        path,
+        updated,
+        speaker_attribution_cleared,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

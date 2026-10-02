@@ -16,8 +16,9 @@ use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, SpeakerIdentityV1,
-    SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, VesselError, VideoSelection,
-    apply_sourcearium_prune, apply_speaker_match_report, discover_youtube_sources,
+    SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
+    VideoSelection, apply_sourcearium_prune, apply_speaker_match_report,
+    apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
     plan_sourcearium_prune, render_speaker_attributed_transcript,
@@ -237,6 +238,7 @@ enum DiarizationSubcommand {
     Doctor(DiarizationDoctorArgs),
     Seed(DiarizationSeedArgs),
     Run(DiarizationRunArgs),
+    Apply(DiarizationApplyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +306,38 @@ struct DiarizationRunArgs {
     window_shift_ratio: f32,
     #[arg(long = "speaker-embeddings")]
     speaker_embeddings: bool,
+}
+
+#[derive(Debug, Args)]
+struct DiarizationApplyArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
+    #[arg(long = "segmentation-model")]
+    segmentation_model: Option<PathBuf>,
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<PathBuf>,
+    #[arg(long = "provider", default_value = "cpu")]
+    provider: String,
+    #[arg(long = "num-threads", default_value_t = 4)]
+    num_threads: i32,
+    #[arg(long = "num-speakers")]
+    num_speakers: Option<usize>,
+    #[arg(
+        long = "clustering-threshold",
+        default_value_t = DEFAULT_CLUSTERING_THRESHOLD
+    )]
+    clustering_threshold: f32,
+    #[arg(
+        long = "window-shift-ratio",
+        default_value_t = DEFAULT_WINDOW_SHIFT_RATIO
+    )]
+    window_shift_ratio: f32,
 }
 
 #[derive(Debug, Args)]
@@ -622,6 +656,7 @@ async fn main() -> Result<()> {
             DiarizationSubcommand::Doctor(args) => diarization_doctor(args),
             DiarizationSubcommand::Seed(args) => diarization_seed(args).await,
             DiarizationSubcommand::Run(args) => diarization_run(args).await,
+            DiarizationSubcommand::Apply(args) => diarization_apply(args).await,
         },
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
@@ -1854,6 +1889,135 @@ async fn diarization_seed(args: DiarizationSeedArgs) -> Result<()> {
                 video.video_id
             ),
         },
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+    let source = discover_youtube_sources(&sourcearium_root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == args.source_key)
+        .ok_or_else(|| {
+            VesselError::Config(format!(
+                "Sourcearium source key {:?} was not found under {}",
+                args.source_key,
+                sourcearium_root.display()
+            ))
+        })?;
+
+    let existing = load_youtube_transcript_artifact(&source, &args.video_id)?
+        .ok_or_else(|| {
+            VesselError::Config(format!(
+                "Sourcearium transcript does not exist for video {:?}",
+                args.video_id
+            ))
+        })?;
+    let mut candidate =
+        TranscriptCandidate::from_sourcearium_artifact(&existing.artifact, &existing.body)?;
+    if candidate.derivation != TranscriptDerivation::LocalAsr {
+        return Err(VesselError::Config(format!(
+            "standalone diarization enrichment currently requires a local_asr transcript; {} uses {}",
+            existing.path.display(),
+            candidate.derivation.as_str()
+        )));
+    }
+    if !candidate.timestamps {
+        return Err(VesselError::Config(format!(
+            "standalone diarization enrichment requires timestamped transcript segments: {}",
+            existing.path.display()
+        )));
+    }
+
+    let input = diarization_fixture_wav(&args.video_id)?;
+    if !input.is_file() {
+        return Err(VesselError::Config(format!(
+            "durable diarization fixture is missing for {}; seed it first with: vessel diarization seed --video-id {}",
+            args.video_id, args.video_id
+        )));
+    }
+
+    let default_model_root = default_diarization_model_root();
+    let (default_segmentation, default_embedding) = sherpa_model_paths(&default_model_root);
+    let segmentation_model = args.segmentation_model.unwrap_or(default_segmentation);
+    let embedding_model = args.embedding_model.unwrap_or(default_embedding);
+    let runtime_root = args
+        .runtime_dir
+        .unwrap_or_else(default_diarization_runtime_root);
+    let runtime_library = find_sherpa_runtime_library(&runtime_root).map_err(|_| {
+        VesselError::Config(format!(
+            "sherpa-onnx runtime is missing; run vessel diarization fetch or pass --runtime-dir explicitly (expected default under {})",
+            runtime_root.display()
+        ))
+    })?;
+    if !segmentation_model.is_file() || !embedding_model.is_file() {
+        return Err(VesselError::Config(format!(
+            "sherpa-onnx diarization models are missing; run vessel diarization fetch or pass explicit model paths (expected defaults under {})",
+            default_model_root.display()
+        )));
+    }
+
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library,
+        segmentation_model,
+        embedding_model,
+        provider: args.provider,
+        num_threads: args.num_threads,
+        num_speakers: args.num_speakers,
+        clustering_threshold: args.clustering_threshold,
+        window_shift_ratio: args.window_shift_ratio,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: true,
+    };
+    config.validate()?;
+
+    let started = Instant::now();
+    let (result, _backend) = acquire_local_diarization(&input, None, &config).await?;
+    result.apply_to_candidate(&mut candidate)?;
+    let evidence = result.to_speaker_evidence(&args.video_id, &candidate)?;
+    let evidence_dir = sourcearium_root
+        .join(".cache")
+        .join("vessel")
+        .join("speaker-evidence");
+    let evidence_path = persist_speaker_evidence(&evidence_dir, &evidence)?;
+    let applied =
+        apply_youtube_transcript_diarization(&source, &args.video_id, &candidate)?;
+
+    let speaker_count = result
+        .segments
+        .iter()
+        .map(|segment| segment.speaker.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let report = serde_json::json!({
+        "status": "ok",
+        "sourcearium_root": sourcearium_root,
+        "source_key": args.source_key,
+        "video_id": args.video_id,
+        "transcript": applied.path,
+        "transcript_updated": applied.updated,
+        "speaker_attribution_cleared": applied.speaker_attribution_cleared,
+        "evidence": evidence_path,
+        "engine": result.engine,
+        "model": result.model,
+        "elapsed_seconds": started.elapsed().as_secs_f64(),
+        "speaker_count": speaker_count,
+        "segment_count": result.segments.len(),
+        "speaker_embedding_count": result.speaker_embeddings.len(),
+        "network_io": false,
+        "asr_invoked": false,
+        "sourcearium_mutation": true,
     });
     println!(
         "{}",

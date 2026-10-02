@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, TextRepresentationV1, VesselError, YoutubeTranscriptPolicyV1};
+use crate::{
+    Result, SourceariumArtifactV1, TextRepresentationV1, VesselError, YoutubeTranscriptPolicyV1,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +97,49 @@ pub struct TranscriptCandidate {
 }
 
 impl TranscriptCandidate {
+    pub fn from_sourcearium_artifact(
+        artifact: &SourceariumArtifactV1,
+        body: &str,
+    ) -> Result<Self> {
+        if artifact.kind != "transcript" {
+            return Err(corpus_error(format!(
+                "Sourcearium artifact {:?} is not a transcript",
+                artifact.artifact_id
+            )));
+        }
+        let derivation = match artifact.representation.derivation.as_str() {
+            "creator_subtitles" => TranscriptDerivation::CreatorSubtitles,
+            "platform_auto_caption" => TranscriptDerivation::PlatformAutoCaption,
+            "local_asr" => TranscriptDerivation::LocalAsr,
+            other => {
+                return Err(corpus_error(format!(
+                    "unsupported transcript derivation {other:?}"
+                )));
+            }
+        };
+        let timestamps = artifact.representation.timestamps.ok_or_else(|| {
+            corpus_error("transcript artifact is missing representation.timestamps")
+        })?;
+        let diarization = artifact
+            .extensions
+            .get("diarization")
+            .map(parse_diarization_extension)
+            .transpose()?;
+        let segments = parse_sourcearium_transcript_body(body, timestamps)?;
+
+        let candidate = Self {
+            derivation,
+            language: artifact.representation.language.clone(),
+            timestamps,
+            engine: artifact.representation.engine.clone(),
+            model: artifact.representation.model.clone(),
+            diarization,
+            segments,
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.segments.is_empty() {
             return Err(corpus_error("transcript contains no segments"));
@@ -200,6 +245,109 @@ impl TranscriptCandidate {
     }
 }
 
+fn parse_diarization_extension(table: &toml::Table) -> Result<DiarizationProvenance> {
+    let engine = table
+        .get("engine")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| corpus_error("diarization extension is missing engine"))?;
+    let model = table
+        .get("model")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| corpus_error("diarization extension is missing model"))?;
+    let registry_revision = table
+        .get("registry_revision")
+        .and_then(toml::Value::as_integer)
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| corpus_error("diarization registry_revision must be non-negative"))
+        })
+        .transpose()?;
+    Ok(DiarizationProvenance {
+        engine: engine.to_owned(),
+        model: model.to_owned(),
+        registry_revision,
+    })
+}
+
+fn parse_sourcearium_transcript_body(
+    body: &str,
+    timestamps: bool,
+) -> Result<Vec<TranscriptSegment>> {
+    let mut segments = Vec::new();
+    for raw_segment in body.split("\n\n") {
+        let raw_segment = raw_segment.trim_end_matches('\n');
+        if raw_segment.trim().is_empty() {
+            continue;
+        }
+
+        let (start_seconds, rest) = if timestamps {
+            let tag = raw_segment.get(..10).ok_or_else(|| {
+                corpus_error("timestamped transcript segment is shorter than [HH:MM:SS]")
+            })?;
+            let start = parse_rendered_timestamp(tag).ok_or_else(|| {
+                corpus_error(format!("invalid transcript timestamp prefix {tag:?}"))
+            })?;
+            let rest = raw_segment
+                .get(10..)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .ok_or_else(|| {
+                    corpus_error("timestamped transcript segment must have a space after timestamp")
+                })?;
+            (Some(start), rest)
+        } else {
+            (None, raw_segment)
+        };
+
+        let (speaker, text) = if let Some(rest) = rest.strip_prefix("<speaker:") {
+            let end = rest.find("> ").ok_or_else(|| {
+                corpus_error("speaker-tagged transcript segment is missing closing '> '")
+            })?;
+            let label = &rest[..end];
+            if label.trim().is_empty() {
+                return Err(corpus_error("speaker tag must not be empty"));
+            }
+            (
+                Some(TranscriptSpeaker {
+                    diarization_label: label.to_owned(),
+                    identity: None,
+                    attribution: SpeakerAttribution::Unresolved,
+                }),
+                &rest[end + 2..],
+            )
+        } else {
+            (None, rest)
+        };
+
+        if text.is_empty() {
+            return Err(corpus_error("transcript segment text must not be empty"));
+        }
+        segments.push(TranscriptSegment {
+            start_seconds,
+            text: text.to_owned(),
+            speaker,
+        });
+    }
+    if segments.is_empty() {
+        return Err(corpus_error("transcript contains no segments"));
+    }
+    Ok(segments)
+}
+
+fn parse_rendered_timestamp(value: &str) -> Option<u64> {
+    if value.len() != 10 || !value.starts_with('[') || !value.ends_with(']') {
+        return None;
+    }
+    let inner = &value[1..9];
+    let mut parts = inner.split(':');
+    let hours = parts.next()?.parse::<u64>().ok()?;
+    let minutes = parts.next()?.parse::<u64>().ok()?;
+    let seconds = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+    Some(hours * 3_600 + minutes * 60 + seconds)
+}
+
 #[async_trait]
 pub trait TranscriptProvider: Send + Sync {
     fn name(&self) -> &'static str;
@@ -238,6 +386,64 @@ fn format_timestamp(total_seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconstructs_materialized_local_asr_candidate() {
+        let mut diarization = toml::Table::new();
+        diarization.insert("engine".into(), toml::Value::String("sherpa-onnx".into()));
+        diarization.insert(
+            "model".into(),
+            toml::Value::String("segmentation=x;embedding=y".into()),
+        );
+        let artifact = SourceariumArtifactV1 {
+            schema: 1,
+            artifact_id: "youtube:video:abc:transcript".into(),
+            kind: "transcript".into(),
+            title: Some("Example".into()),
+            source: crate::SourceIdentityV1 {
+                family: "youtube".into(),
+                kind: "video".into(),
+                id: "abc".into(),
+                url: None,
+                creator: None,
+                creator_id: None,
+                published: None,
+            },
+            representation: TextRepresentationV1 {
+                derivation: "local_asr".into(),
+                language: Some("en".into()),
+                timestamps: Some(true),
+                engine: Some("whisper-candle".into()),
+                model: Some("small".into()),
+            },
+            acquisition: crate::AcquisitionV1 {
+                producer: "vessel".into(),
+                producer_version: None,
+                acquired_at: None,
+                method: Some("local_asr".into()),
+            },
+            extensions: std::collections::BTreeMap::from([(
+                "diarization".into(),
+                diarization,
+            )]),
+        };
+        let body =
+            "[00:00:03] <speaker:SPEAKER_00> Hello.\n\n[00:01:05] World.\n";
+        let candidate =
+            TranscriptCandidate::from_sourcearium_artifact(&artifact, body).expect("candidate");
+        assert_eq!(candidate.derivation, TranscriptDerivation::LocalAsr);
+        assert_eq!(candidate.segments.len(), 2);
+        assert_eq!(candidate.segments[0].start_seconds, Some(3));
+        assert_eq!(
+            candidate.segments[0]
+                .speaker
+                .as_ref()
+                .expect("speaker")
+                .diarization_label,
+            "SPEAKER_00"
+        );
+        assert_eq!(candidate.render_body().expect("body"), body);
+    }
 
     #[test]
     fn renders_timed_transcript_deterministically() {

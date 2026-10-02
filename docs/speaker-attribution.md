@@ -350,6 +350,14 @@ vessel diarization run <16-kHz-wav> --speaker-embeddings
 
 The standalone probe reports anonymous speaker labels and time segments, plus embedding dimensions/norms when requested; it does not persist identities or rewrite corpus artifacts.
 
+Once a fixture has been proven, an existing timestamped `local_asr` Sourcearium transcript can be enriched without retranscription:
+
+```text
+vessel diarization apply --sourcearium <root> --source-key <source> --video-id <youtube-video-id>
+```
+
+`diarization apply` is an explicit local mutation. It requires the durable fixture for the same video id, runs sherpa with speaker embeddings enabled, attaches anonymous file-local speaker labels to the existing transcript, persists speaker evidence under `.cache/vessel/speaker-evidence`, and updates only the diarization enrichment. It refuses to change the transcript's derivation, language, timestamp policy, ASR engine, or ASR model. If re-diarization changes the anonymous labeling, any prior speaker-attribution extension is cleared rather than left stale.
+
 The fetch boundary is explicit and authenticated. `vessel diarization fetch --plan` performs no network I/O and reports the exact pinned byte count and SHA-256 for each runtime/model artifact. A real fetch verifies the SHA-256 before an archive is extracted or a downloaded model is promoted into place. After installation, Vessel keeps BLAKE3 integrity receipts so `diarization doctor` can detect later offline corruption without contacting the network.
 
 Then any supported ASR backend can feed the primary Rust diarization path:
