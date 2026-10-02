@@ -4,6 +4,7 @@ pub mod events;
 pub mod models;
 pub mod sourcearium;
 pub mod sourcearium_repo;
+pub mod speaker_match;
 pub mod speaker_registry;
 pub mod transcript;
 
@@ -24,6 +25,12 @@ pub use sourcearium_repo::{
     SourceariumYoutubeSource, apply_sourcearium_prune, discover_youtube_sources,
     inventory_sourcearium_repository, load_youtube_transcript_artifact,
     materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
+};
+pub use speaker_match::{
+    AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1, SpeakerEvidenceDiarization,
+    SpeakerEvidenceProvenance, SpeakerEvidenceSegment, SpeakerEvidenceV1, SpeakerMatch,
+    SpeakerMatchConfig, SpeakerMatchReport, SpeakerMatchStatus, load_speaker_evidence,
+    match_speakers_from_evidence,
 };
 pub use speaker_registry::{
     SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,
