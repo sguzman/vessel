@@ -21,7 +21,7 @@ use vessel_core::{
 };
 use vessel_diarization::{
     DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
-    SHERPA_ONNX_BACKEND_NAME, SherpaOnnxDiarizer, persist_speaker_evidence,
+    DiarizationResult, SHERPA_ONNX_BACKEND_NAME, SherpaOnnxDiarizer, persist_speaker_evidence,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -1042,6 +1042,9 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "requires_local_asr": 0,
             "local_asr_attempted": 0,
             "local_asr_materialized": 0,
+            "diarization_attempted": 0,
+            "diarization_completed": 0,
+            "diarization_skipped": 0,
             "caption_access_degraded": 0,
             "caption_empty_response_tracks": 0,
             "unresolved_no_provider": 0,
@@ -1518,7 +1521,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 "empty_response_derivations": empty_response_derivations,
             });
 
-            let (candidate, asr_cache_dir) = if let Some(candidate) = caption_acquisition.candidate {
+            let (mut candidate, asr_cache_dir) = if let Some(candidate) = caption_acquisition.candidate {
                 (candidate, None)
             } else if existing.is_some() {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
@@ -1559,8 +1562,10 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                             "model_dir": &asr_config.model_dir,
                             "executable": &asr_config.executable,
                             "device": &asr_config.device,
-                            "diarize": asr_config.diarize,
-                            "diarization_model": &asr_config.diarization_model,
+                            "diarize": args.diarize,
+                            "diarization_backend": &args.diarization_backend,
+                            "diarization_segmentation_model": &args.diarization_segmentation_model,
+                            "diarization_embedding_model": &args.diarization_embedding_model,
                             "caption_probe": caption_probe,
                         }),
                     );
@@ -1597,6 +1602,78 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 );
                 continue;
             };
+
+            if let Some(config) = diarization_config.as_ref() {
+                if let Some(cache_dir) = asr_cache_dir.as_ref() {
+                    increment_summary(&mut summary, "diarization_attempted", 1);
+                    let wav = cache_dir.join("whisper-input.wav");
+                    match acquire_local_diarization(
+                        &wav,
+                        diarization_backend.take(),
+                        config,
+                    )
+                    .await
+                    {
+                        Ok((result, backend)) => {
+                            diarization_backend = Some(backend);
+                            if let Err(error) = result.apply_to_candidate(&mut candidate) {
+                                push_update_error(&mut summary, &video.video_id, error);
+                                continue;
+                            }
+                            let evidence = match result
+                                .to_speaker_evidence(&video.video_id, &candidate)
+                            {
+                                Ok(evidence) => evidence,
+                                Err(error) => {
+                                    push_update_error(&mut summary, &video.video_id, error);
+                                    continue;
+                                }
+                            };
+                            let evidence_dir = sourcearium_root
+                                .join(".cache")
+                                .join("vessel")
+                                .join("speaker-evidence");
+                            match persist_speaker_evidence(&evidence_dir, &evidence) {
+                                Ok(path) => {
+                                    increment_summary(&mut summary, "diarization_completed", 1);
+                                    push_update_item(
+                                        &mut summary,
+                                        report_items,
+                                        &video.video_id,
+                                        "diarized",
+                                        serde_json::json!({
+                                            "backend": result.engine,
+                                            "model": result.model,
+                                            "segments": result.segments.len(),
+                                            "speaker_embeddings": result.speaker_embeddings.len(),
+                                            "evidence": path,
+                                        }),
+                                    );
+                                }
+                                Err(error) => {
+                                    push_update_error(&mut summary, &video.video_id, error);
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            push_update_error(&mut summary, &video.video_id, error);
+                            continue;
+                        }
+                    }
+                } else {
+                    increment_summary(&mut summary, "diarization_skipped", 1);
+                    push_update_item(
+                        &mut summary,
+                        report_items,
+                        &video.video_id,
+                        "diarization_skipped",
+                        serde_json::json!({
+                            "reason": "Rust-native diarization currently runs on the normalized local-ASR audio path; caption-backed audio preparation is not wired yet",
+                        }),
+                    );
+                }
+            }
 
             if args.preview {
                 let existing_derivation = existing
@@ -1815,6 +1892,16 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "preview": args.preview,
         "limit_reached": limit_reached,
         "local_asr_implemented": true,
+        "diarization": {
+            "enabled": args.diarize,
+            "backend": args.diarization_backend,
+            "segmentation_model": args.diarization_segmentation_model,
+            "embedding_model": args.diarization_embedding_model,
+            "provider": args.diarization_provider,
+            "num_threads": args.diarization_num_threads,
+            "speaker_embeddings": args.speaker_embeddings,
+            "backend_loaded": diarization_backend.is_some(),
+        },
         "speaker_attribution": {
             "enabled": args.attribute_speakers,
             "min_similarity": speaker_match_config.min_similarity,
@@ -2005,6 +2092,58 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     config.speaker_embeddings = config.diarize && args.speaker_embeddings;
     config.hf_token_env = args.hf_token_env.clone();
     config
+}
+
+async fn acquire_local_diarization(
+    wav: &Path,
+    backend: Option<SherpaOnnxDiarizer>,
+    config: &DiarizationConfig,
+) -> Result<(DiarizationResult, SherpaOnnxDiarizer)> {
+    if cfg!(debug_assertions) {
+        warn!(
+            target: "diarization",
+            "speaker diarization is running from an unoptimized debug build; use cargo build --release for real inference work"
+        );
+    }
+
+    let config = config.clone();
+    let heartbeat_input = wav.to_path_buf();
+    let wav_for_worker = wav.to_path_buf();
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = std::sync::mpsc::channel::<()>();
+    let heartbeat = std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            match heartbeat_stop_rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "[diarization] still running backend={} input={} elapsed={:.0}s",
+                        SHERPA_ONNX_BACKEND_NAME,
+                        heartbeat_input.display(),
+                        started.elapsed().as_secs_f64(),
+                    );
+                }
+            }
+        }
+    });
+
+    let worker_result = tokio::task::spawn_blocking(move || {
+        let backend = match backend {
+            Some(backend) => backend,
+            None => SherpaOnnxDiarizer::load(config)?,
+        };
+        let result = backend.process_path(&wav_for_worker)?;
+        Ok::<_, VesselError>((result, backend))
+    })
+    .await
+    .map_err(|error| {
+        VesselError::Extractor(format!("diarization worker failed to join: {error}"))
+    });
+
+    let _ = heartbeat_stop_tx.send(());
+    let _ = heartbeat.join();
+
+    worker_result?
 }
 
 async fn acquire_local_asr_candidate(
