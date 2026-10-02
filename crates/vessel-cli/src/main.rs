@@ -4452,6 +4452,7 @@ mod tests {
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
+    use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
 
     #[test]
     fn configured_channels_select_all_or_requested_categories() {
