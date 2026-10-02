@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{CStr, CString, c_char, c_float, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::ptr;
+use std::slice;
 
-use sherpa_onnx::{
-    FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
-    OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
-    SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
-};
 use vessel_core::{
     DiarizationProvenance, Result, SpeakerAttribution, SpeakerEvidenceDiarization,
     SpeakerEvidenceProvenance, SpeakerEvidenceSegment, SpeakerEvidenceV1, TranscriptCandidate,
@@ -15,12 +13,14 @@ use vessel_core::{
 
 pub const SHERPA_ONNX_BACKEND_NAME: &str = "sherpa-onnx";
 pub const SHERPA_ONNX_ENGINE_NAME: &str = "sherpa-onnx";
+pub const SHERPA_ONNX_RUNTIME_VERSION: &str = "1.13.6";
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_WINDOW_SHIFT_RATIO: f32 = 0.1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarizationConfig {
     pub backend: String,
+    pub runtime_library: PathBuf,
     pub segmentation_model: PathBuf,
     pub embedding_model: PathBuf,
     pub provider: String,
@@ -41,6 +41,7 @@ impl DiarizationConfig {
                 self.backend
             )));
         }
+        require_file("sherpa runtime library", &self.runtime_library)?;
         require_file("segmentation model", &self.segmentation_model)?;
         require_file("speaker embedding model", &self.embedding_model)?;
         if self.provider.trim().is_empty() {
@@ -236,69 +237,292 @@ impl DiarizationResult {
     }
 }
 
+#[repr(C)]
+struct OfflineSpeakerSegmentationPyannoteModelConfig {
+    model: *const c_char,
+    window_shift_ratio: c_float,
+}
+
+#[repr(C)]
+struct OfflineSpeakerSegmentationModelConfig {
+    pyannote: OfflineSpeakerSegmentationPyannoteModelConfig,
+    num_threads: i32,
+    debug: i32,
+    provider: *const c_char,
+}
+
+#[repr(C)]
+struct SpeakerEmbeddingExtractorConfig {
+    model: *const c_char,
+    num_threads: i32,
+    debug: i32,
+    provider: *const c_char,
+}
+
+#[repr(C)]
+struct FastClusteringConfig {
+    num_clusters: i32,
+    threshold: c_float,
+    compute_confidence: i32,
+}
+
+#[repr(C)]
+struct OfflineSpeakerDiarizationConfig {
+    segmentation: OfflineSpeakerSegmentationModelConfig,
+    embedding: SpeakerEmbeddingExtractorConfig,
+    clustering: FastClusteringConfig,
+    min_duration_on: c_float,
+    min_duration_off: c_float,
+}
+
+#[repr(C)]
+struct OfflineSpeakerDiarization {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct OfflineSpeakerDiarizationResult {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct SpeakerEmbeddingExtractor {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct OnlineStream {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct RawDiarizationSegment {
+    start: c_float,
+    end: c_float,
+    speaker: i32,
+    confidence: c_float,
+}
+
+#[repr(C)]
+struct SherpaOnnxWave {
+    samples: *const f32,
+    sample_rate: i32,
+    num_samples: i32,
+}
+
+type CreateDiarizer =
+    unsafe extern "C" fn(*const OfflineSpeakerDiarizationConfig) -> *const OfflineSpeakerDiarization;
+type DestroyDiarizer = unsafe extern "C" fn(*const OfflineSpeakerDiarization);
+type DiarizerSampleRate = unsafe extern "C" fn(*const OfflineSpeakerDiarization) -> i32;
+type DiarizationProgressCallback =
+    unsafe extern "C" fn(i32, i32, *mut c_void) -> i32;
+type ProcessDiarization = unsafe extern "C" fn(
+    *const OfflineSpeakerDiarization,
+    *const f32,
+    i32,
+    DiarizationProgressCallback,
+    *mut c_void,
+) -> *const OfflineSpeakerDiarizationResult;
+type ResultNumSpeakers = unsafe extern "C" fn(*const OfflineSpeakerDiarizationResult) -> i32;
+type ResultNumSegments = unsafe extern "C" fn(*const OfflineSpeakerDiarizationResult) -> i32;
+type SortSegments = unsafe extern "C" fn(
+    *const OfflineSpeakerDiarizationResult,
+) -> *const RawDiarizationSegment;
+type DestroySegments = unsafe extern "C" fn(*const RawDiarizationSegment);
+type DestroyResult = unsafe extern "C" fn(*const OfflineSpeakerDiarizationResult);
+
+type ReadWave = unsafe extern "C" fn(*const c_char) -> *const SherpaOnnxWave;
+type FreeWave = unsafe extern "C" fn(*const SherpaOnnxWave);
+
+type CreateEmbeddingExtractor = unsafe extern "C" fn(
+    *const SpeakerEmbeddingExtractorConfig,
+) -> *const SpeakerEmbeddingExtractor;
+type DestroyEmbeddingExtractor = unsafe extern "C" fn(*const SpeakerEmbeddingExtractor);
+type EmbeddingDim = unsafe extern "C" fn(*const SpeakerEmbeddingExtractor) -> i32;
+type CreateEmbeddingStream =
+    unsafe extern "C" fn(*const SpeakerEmbeddingExtractor) -> *const OnlineStream;
+type EmbeddingReady =
+    unsafe extern "C" fn(*const SpeakerEmbeddingExtractor, *const OnlineStream) -> i32;
+type ComputeEmbedding = unsafe extern "C" fn(
+    *const SpeakerEmbeddingExtractor,
+    *const OnlineStream,
+) -> *const f32;
+type DestroyEmbedding = unsafe extern "C" fn(*const f32);
+type DestroyOnlineStream = unsafe extern "C" fn(*const OnlineStream);
+type AcceptWaveform = unsafe extern "C" fn(*const OnlineStream, i32, *const f32, i32);
+type InputFinished = unsafe extern "C" fn(*const OnlineStream);
+
+struct SherpaApi {
+    _dependencies: Vec<DynamicLibrary>,
+    _main: DynamicLibrary,
+    create_diarizer: CreateDiarizer,
+    destroy_diarizer: DestroyDiarizer,
+    diarizer_sample_rate: DiarizerSampleRate,
+    process_diarization: ProcessDiarization,
+    result_num_speakers: ResultNumSpeakers,
+    result_num_segments: ResultNumSegments,
+    sort_segments: SortSegments,
+    destroy_segments: DestroySegments,
+    destroy_result: DestroyResult,
+    read_wave: ReadWave,
+    free_wave: FreeWave,
+    create_embedding_extractor: CreateEmbeddingExtractor,
+    destroy_embedding_extractor: DestroyEmbeddingExtractor,
+    embedding_dim: EmbeddingDim,
+    create_embedding_stream: CreateEmbeddingStream,
+    embedding_ready: EmbeddingReady,
+    compute_embedding: ComputeEmbedding,
+    destroy_embedding: DestroyEmbedding,
+    destroy_online_stream: DestroyOnlineStream,
+    accept_waveform: AcceptWaveform,
+    input_finished: InputFinished,
+}
+
+unsafe impl Send for SherpaApi {}
+unsafe impl Sync for SherpaApi {}
+
+impl SherpaApi {
+    fn load(main_path: &Path) -> Result<Self> {
+        let dependencies = preload_runtime_dependencies(main_path);
+        let main = DynamicLibrary::open(main_path).map_err(|error| {
+            diarization_error(format!(
+                "failed to load sherpa runtime {}: {error}",
+                main_path.display()
+            ))
+        })?;
+
+        unsafe {
+            Ok(Self {
+                create_diarizer: main.symbol("SherpaOnnxCreateOfflineSpeakerDiarization")?,
+                destroy_diarizer: main.symbol("SherpaOnnxDestroyOfflineSpeakerDiarization")?,
+                diarizer_sample_rate: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationGetSampleRate")?,
+                process_diarization: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationProcessWithCallback")?,
+                result_num_speakers: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationResultGetNumSpeakers")?,
+                result_num_segments: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments")?,
+                sort_segments: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime")?,
+                destroy_segments: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationDestroySegment")?,
+                destroy_result: main
+                    .symbol("SherpaOnnxOfflineSpeakerDiarizationDestroyResult")?,
+                read_wave: main.symbol("SherpaOnnxReadWave")?,
+                free_wave: main.symbol("SherpaOnnxFreeWave")?,
+                create_embedding_extractor: main
+                    .symbol("SherpaOnnxCreateSpeakerEmbeddingExtractor")?,
+                destroy_embedding_extractor: main
+                    .symbol("SherpaOnnxDestroySpeakerEmbeddingExtractor")?,
+                embedding_dim: main.symbol("SherpaOnnxSpeakerEmbeddingExtractorDim")?,
+                create_embedding_stream: main
+                    .symbol("SherpaOnnxSpeakerEmbeddingExtractorCreateStream")?,
+                embedding_ready: main
+                    .symbol("SherpaOnnxSpeakerEmbeddingExtractorIsReady")?,
+                compute_embedding: main
+                    .symbol("SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding")?,
+                destroy_embedding: main
+                    .symbol("SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding")?,
+                destroy_online_stream: main.symbol("SherpaOnnxDestroyOnlineStream")?,
+                accept_waveform: main.symbol("SherpaOnnxOnlineStreamAcceptWaveform")?,
+                input_finished: main.symbol("SherpaOnnxOnlineStreamInputFinished")?,
+                _dependencies: dependencies,
+                _main: main,
+            })
+        }
+    }
+}
+
 pub struct SherpaOnnxDiarizer {
     config: DiarizationConfig,
-    diarizer: OfflineSpeakerDiarization,
-    embedding_extractor: Option<SpeakerEmbeddingExtractor>,
+    api: SherpaApi,
+    diarizer: *const OfflineSpeakerDiarization,
+    embedding_extractor: *const SpeakerEmbeddingExtractor,
 }
+
+unsafe impl Send for SherpaOnnxDiarizer {}
 
 impl SherpaOnnxDiarizer {
     pub fn load(config: DiarizationConfig) -> Result<Self> {
         config.validate()?;
+        let api = SherpaApi::load(&config.runtime_library)?;
+
+        let segmentation_model = path_cstring(&config.segmentation_model)?;
+        let embedding_model = path_cstring(&config.embedding_model)?;
+        let provider = CString::new(config.provider.as_str()).map_err(|_| {
+            diarization_error("diarization provider contains an embedded NUL byte")
+        })?;
+
         let embedding_config = SpeakerEmbeddingExtractorConfig {
-            model: Some(path_string(&config.embedding_model)?),
+            model: embedding_model.as_ptr(),
             num_threads: config.num_threads,
-            debug: false,
-            provider: Some(config.provider.clone()),
+            debug: 0,
+            provider: provider.as_ptr(),
         };
         let diarizer_config = OfflineSpeakerDiarizationConfig {
             segmentation: OfflineSpeakerSegmentationModelConfig {
                 pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
-                    model: Some(path_string(&config.segmentation_model)?),
+                    model: segmentation_model.as_ptr(),
                     window_shift_ratio: config.window_shift_ratio,
                 },
                 num_threads: config.num_threads,
-                debug: false,
-                provider: Some(config.provider.clone()),
+                debug: 0,
+                provider: provider.as_ptr(),
             },
-            embedding: embedding_config.clone(),
+            embedding: SpeakerEmbeddingExtractorConfig {
+                model: embedding_model.as_ptr(),
+                num_threads: config.num_threads,
+                debug: 0,
+                provider: provider.as_ptr(),
+            },
             clustering: FastClusteringConfig {
                 num_clusters: config.num_speakers.map(|value| value as i32).unwrap_or(-1),
                 threshold: config.clustering_threshold,
+                compute_confidence: 0,
             },
             min_duration_on: config.min_duration_on,
             min_duration_off: config.min_duration_off,
         };
 
         eprintln!(
-            "[diarization] model load started engine={} segmentation={} embedding={} provider={}",
+            "[diarization] runtime load completed engine={} runtime={} segmentation={} embedding={}",
             SHERPA_ONNX_ENGINE_NAME,
+            config.runtime_library.display(),
             config.segmentation_model.display(),
             config.embedding_model.display(),
-            config.provider,
         );
-        let diarizer = OfflineSpeakerDiarization::create(&diarizer_config).ok_or_else(|| {
-            diarization_error("failed to initialize sherpa-onnx offline speaker diarization")
-        })?;
+
+        let diarizer = unsafe { (api.create_diarizer)(&diarizer_config) };
+        if diarizer.is_null() {
+            return Err(diarization_error(
+                "failed to initialize sherpa-onnx offline speaker diarization",
+            ));
+        }
+
         let embedding_extractor = if config.speaker_embeddings {
-            Some(
-                SpeakerEmbeddingExtractor::create(&embedding_config).ok_or_else(|| {
-                    diarization_error(
-                        "failed to initialize sherpa-onnx speaker embedding extractor",
-                    )
-                })?,
-            )
+            let extractor = unsafe { (api.create_embedding_extractor)(&embedding_config) };
+            if extractor.is_null() {
+                unsafe { (api.destroy_diarizer)(diarizer) };
+                return Err(diarization_error(
+                    "failed to initialize sherpa-onnx speaker embedding extractor",
+                ));
+            }
+            extractor
         } else {
-            None
+            ptr::null()
         };
+
+        let sample_rate = unsafe { (api.diarizer_sample_rate)(diarizer) };
         eprintln!(
             "[diarization] model load completed engine={} sample_rate={}",
-            SHERPA_ONNX_ENGINE_NAME,
-            diarizer.sample_rate(),
+            SHERPA_ONNX_ENGINE_NAME, sample_rate,
         );
 
         Ok(Self {
             config,
+            api,
             diarizer,
             embedding_extractor,
         })
@@ -311,29 +535,62 @@ impl SherpaOnnxDiarizer {
                 path.display()
             )));
         }
-        let filename = path_string(path)?;
-        let wave = Wave::read(&filename).ok_or_else(|| {
-            diarization_error(format!("failed to read diarization WAV {}", path.display()))
-        })?;
-        if wave.sample_rate() != self.diarizer.sample_rate() {
+        let filename = path_cstring(path)?;
+        let wave = unsafe { (self.api.read_wave)(filename.as_ptr()) };
+        if wave.is_null() {
+            return Err(diarization_error(format!(
+                "failed to read diarization WAV {}",
+                path.display()
+            )));
+        }
+        let wave_ref = unsafe { &*wave };
+        let expected_sample_rate = unsafe { (self.api.diarizer_sample_rate)(self.diarizer) };
+        if wave_ref.sample_rate != expected_sample_rate {
+            unsafe { (self.api.free_wave)(wave) };
             return Err(diarization_error(format!(
                 "diarization WAV sample rate {} does not match sherpa-onnx expected {}",
-                wave.sample_rate(),
-                self.diarizer.sample_rate()
+                wave_ref.sample_rate, expected_sample_rate
             )));
+        }
+        if wave_ref.num_samples <= 0 || wave_ref.samples.is_null() {
+            unsafe { (self.api.free_wave)(wave) };
+            return Err(diarization_error("diarization WAV contains no samples"));
         }
 
         eprintln!(
             "[diarization] inference started engine={} input={} samples={}",
             SHERPA_ONNX_ENGINE_NAME,
             path.display(),
-            wave.num_samples(),
+            wave_ref.num_samples,
         );
-        let raw = self
-            .diarizer
-            .process(wave.samples())
-            .ok_or_else(|| diarization_error("sherpa-onnx diarization returned no result"))?;
-        let raw_segments = raw.sort_by_start_time();
+        let raw = unsafe {
+            (self.api.process_diarization)(
+                self.diarizer,
+                wave_ref.samples,
+                wave_ref.num_samples,
+                diarization_progress,
+                ptr::null_mut(),
+            )
+        };
+        if raw.is_null() {
+            unsafe { (self.api.free_wave)(wave) };
+            return Err(diarization_error(
+                "sherpa-onnx diarization returned no result",
+            ));
+        }
+
+        let num_speakers = unsafe { (self.api.result_num_speakers)(raw) };
+        let num_segments = unsafe { (self.api.result_num_segments)(raw) };
+        let raw_segments_ptr = unsafe { (self.api.sort_segments)(raw) };
+        let raw_segments = if num_segments > 0 && !raw_segments_ptr.is_null() {
+            unsafe { slice::from_raw_parts(raw_segments_ptr, num_segments as usize) }
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         let segments = raw_segments
             .iter()
             .filter(|segment| {
@@ -350,33 +607,66 @@ impl SherpaOnnxDiarizer {
             })
             .collect::<Vec<_>>();
 
+        let samples = unsafe {
+            slice::from_raw_parts(wave_ref.samples, wave_ref.num_samples as usize)
+        };
         let mut speaker_embeddings = BTreeMap::new();
-        if let Some(extractor) = self.embedding_extractor.as_ref() {
-            for speaker in 0..raw.num_speakers() {
+        if !self.embedding_extractor.is_null() {
+            let dim = unsafe { (self.api.embedding_dim)(self.embedding_extractor) };
+            if dim <= 0 {
+                self.destroy_process_values(raw, raw_segments_ptr, wave);
+                return Err(diarization_error(
+                    "sherpa-onnx speaker embedding dimension is invalid",
+                ));
+            }
+
+            for speaker in 0..num_speakers {
                 let label = speaker_label(speaker);
-                let samples = concatenate_speaker_audio(
-                    wave.samples(),
-                    wave.sample_rate(),
+                let speaker_samples = concatenate_speaker_audio(
+                    samples,
+                    wave_ref.sample_rate,
                     &raw_segments,
                     speaker,
                 );
-                if samples.is_empty() {
+                if speaker_samples.is_empty() {
                     continue;
                 }
-                let Some(stream) = extractor.create_stream() else {
-                    continue;
-                };
-                stream.accept_waveform(wave.sample_rate(), &samples);
-                stream.input_finished();
-                if !extractor.is_ready(&stream) {
+
+                let stream =
+                    unsafe { (self.api.create_embedding_stream)(self.embedding_extractor) };
+                if stream.is_null() {
                     continue;
                 }
-                if let Some(embedding) = extractor.compute(&stream) {
-                    speaker_embeddings
-                        .insert(label, embedding.into_iter().map(f64::from).collect());
+                unsafe {
+                    (self.api.accept_waveform)(
+                        stream,
+                        wave_ref.sample_rate,
+                        speaker_samples.as_ptr(),
+                        speaker_samples.len() as i32,
+                    );
+                    (self.api.input_finished)(stream);
                 }
+
+                let ready =
+                    unsafe { (self.api.embedding_ready)(self.embedding_extractor, stream) };
+                if ready != 0 {
+                    let embedding =
+                        unsafe { (self.api.compute_embedding)(self.embedding_extractor, stream) };
+                    if !embedding.is_null() {
+                        let values =
+                            unsafe { slice::from_raw_parts(embedding, dim as usize) }
+                                .iter()
+                                .map(|value| f64::from(*value))
+                                .collect::<Vec<_>>();
+                        speaker_embeddings.insert(label, values);
+                        unsafe { (self.api.destroy_embedding)(embedding) };
+                    }
+                }
+                unsafe { (self.api.destroy_online_stream)(stream) };
             }
         }
+
+        self.destroy_process_values(raw, raw_segments_ptr, wave);
 
         let result = DiarizationResult {
             engine: SHERPA_ONNX_ENGINE_NAME.into(),
@@ -388,12 +678,310 @@ impl SherpaOnnxDiarizer {
         eprintln!(
             "[diarization] inference completed engine={} speakers={} segments={} embeddings={}",
             SHERPA_ONNX_ENGINE_NAME,
-            raw.num_speakers(),
+            num_speakers,
             result.segments.len(),
             result.speaker_embeddings.len(),
         );
         Ok(result)
     }
+
+    fn destroy_process_values(
+        &self,
+        raw: *const OfflineSpeakerDiarizationResult,
+        raw_segments: *const RawDiarizationSegment,
+        wave: *const SherpaOnnxWave,
+    ) {
+        unsafe {
+            if !raw_segments.is_null() {
+                (self.api.destroy_segments)(raw_segments);
+            }
+            if !raw.is_null() {
+                (self.api.destroy_result)(raw);
+            }
+            if !wave.is_null() {
+                (self.api.free_wave)(wave);
+            }
+        }
+    }
+}
+
+impl Drop for SherpaOnnxDiarizer {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.embedding_extractor.is_null() {
+                (self.api.destroy_embedding_extractor)(self.embedding_extractor);
+                self.embedding_extractor = ptr::null();
+            }
+            if !self.diarizer.is_null() {
+                (self.api.destroy_diarizer)(self.diarizer);
+                self.diarizer = ptr::null();
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn diarization_progress(
+    processed_chunks: i32,
+    total_chunks: i32,
+    _arg: *mut c_void,
+) -> i32 {
+    if total_chunks > 0 {
+        let percent = 100.0 * processed_chunks as f64 / total_chunks as f64;
+        eprintln!(
+            "[diarization] progress {:.1}% ({}/{})",
+            percent, processed_chunks, total_chunks
+        );
+    }
+    0
+}
+
+pub fn find_sherpa_runtime_library(root: &Path) -> Result<PathBuf> {
+    if root.is_file() && is_sherpa_runtime_library(root) {
+        return Ok(root.to_path_buf());
+    }
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 5 || !dir.is_dir() {
+            continue;
+        }
+        let entries = fs::read_dir(&dir)?;
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_file() && is_sherpa_runtime_library(&path) {
+                return Ok(path);
+            }
+            if path.is_dir() {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    Err(diarization_error(format!(
+        "sherpa runtime library was not found under {}",
+        root.display()
+    )))
+}
+
+fn is_sherpa_runtime_library(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if cfg!(target_os = "windows") {
+        name.eq_ignore_ascii_case("sherpa-onnx-c-api.dll")
+    } else if cfg!(target_os = "macos") {
+        name == "libsherpa-onnx-c-api.dylib"
+    } else {
+        name == "libsherpa-onnx-c-api.so"
+            || name.starts_with("libsherpa-onnx-c-api.so.")
+    }
+}
+
+fn preload_runtime_dependencies(main_path: &Path) -> Vec<DynamicLibrary> {
+    let Some(dir) = main_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut candidates = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file() && runtime_dependency_candidate(path))
+        .filter(|path| path != main_path)
+        .collect::<Vec<_>>();
+    candidates.sort();
+
+    let mut loaded = Vec::new();
+    let mut remaining = candidates;
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        let before = remaining.len();
+        for path in remaining {
+            match DynamicLibrary::open(&path) {
+                Ok(lib) => loaded.push(lib),
+                Err(_) => next.push(path),
+            }
+        }
+        if next.is_empty() || next.len() == before {
+            break;
+        }
+        remaining = next;
+    }
+    loaded
+}
+
+fn runtime_dependency_candidate(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if cfg!(target_os = "windows") {
+        name.to_ascii_lowercase().ends_with(".dll")
+    } else if cfg!(target_os = "macos") {
+        name.ends_with(".dylib")
+    } else {
+        name.contains(".so")
+    }
+}
+
+struct DynamicLibrary {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for DynamicLibrary {}
+unsafe impl Sync for DynamicLibrary {}
+
+impl DynamicLibrary {
+    fn open(path: &Path) -> std::result::Result<Self, String> {
+        platform_dynlib::open(path).map(|handle| Self { handle })
+    }
+
+    unsafe fn symbol<T: Copy>(&self, name: &str) -> Result<T> {
+        let symbol = platform_dynlib::symbol(self.handle, name)
+            .map_err(|error| diarization_error(format!("missing sherpa symbol {name}: {error}")))?;
+        if std::mem::size_of::<T>() != std::mem::size_of::<*mut c_void>() {
+            return Err(diarization_error(format!(
+                "invalid function pointer size for sherpa symbol {name}"
+            )));
+        }
+        Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&symbol) })
+    }
+}
+
+impl Drop for DynamicLibrary {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            platform_dynlib::close(self.handle);
+            self.handle = ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(unix)]
+mod platform_dynlib {
+    use super::*;
+
+    const RTLD_NOW: i32 = 2;
+    const RTLD_GLOBAL: i32 = 0x100;
+
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> i32;
+        fn dlerror() -> *const c_char;
+    }
+
+    pub fn open(path: &Path) -> std::result::Result<*mut c_void, String> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "dynamic-library path contains an embedded NUL byte".to_owned())?;
+        let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW | RTLD_GLOBAL) };
+        if handle.is_null() {
+            Err(last_error())
+        } else {
+            Ok(handle)
+        }
+    }
+
+    pub fn symbol(
+        handle: *mut c_void,
+        name: &str,
+    ) -> std::result::Result<*mut c_void, String> {
+        let name = CString::new(name)
+            .map_err(|_| "dynamic-library symbol contains an embedded NUL byte".to_owned())?;
+        unsafe {
+            let _ = dlerror();
+            let value = dlsym(handle, name.as_ptr());
+            let error = dlerror();
+            if !error.is_null() {
+                Err(CStr::from_ptr(error).to_string_lossy().into_owned())
+            } else if value.is_null() {
+                Err("symbol resolved to NULL".into())
+            } else {
+                Ok(value)
+            }
+        }
+    }
+
+    pub fn close(handle: *mut c_void) {
+        unsafe {
+            let _ = dlclose(handle);
+        }
+    }
+
+    fn last_error() -> String {
+        unsafe {
+            let error = dlerror();
+            if error.is_null() {
+                "unknown dynamic-loader error".into()
+            } else {
+                CStr::from_ptr(error).to_string_lossy().into_owned()
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod platform_dynlib {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+
+    unsafe extern "system" {
+        fn LoadLibraryW(filename: *const u16) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+        fn FreeLibrary(module: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    pub fn open(path: &Path) -> std::result::Result<*mut c_void, String> {
+        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide.push(0);
+        let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if handle.is_null() {
+            Err(format!("LoadLibraryW failed with error {}", unsafe {
+                GetLastError()
+            }))
+        } else {
+            Ok(handle)
+        }
+    }
+
+    pub fn symbol(
+        handle: *mut c_void,
+        name: &str,
+    ) -> std::result::Result<*mut c_void, String> {
+        let name = CString::new(name)
+            .map_err(|_| "dynamic-library symbol contains an embedded NUL byte".to_owned())?;
+        let value = unsafe { GetProcAddress(handle, name.as_ptr().cast()) };
+        if value.is_null() {
+            Err(format!("GetProcAddress failed with error {}", unsafe {
+                GetLastError()
+            }))
+        } else {
+            Ok(value)
+        }
+    }
+
+    pub fn close(handle: *mut c_void) {
+        unsafe {
+            let _ = FreeLibrary(handle);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod platform_dynlib {
+    use super::*;
+
+    pub fn open(_path: &Path) -> std::result::Result<*mut c_void, String> {
+        Err("runtime sherpa loading is not implemented on this platform".into())
+    }
+
+    pub fn symbol(
+        _handle: *mut c_void,
+        _name: &str,
+    ) -> std::result::Result<*mut c_void, String> {
+        Err("runtime sherpa loading is not implemented on this platform".into())
+    }
+
+    pub fn close(_handle: *mut c_void) {}
 }
 
 pub fn persist_speaker_evidence(
@@ -415,7 +1003,7 @@ pub fn persist_speaker_evidence(
 fn concatenate_speaker_audio(
     samples: &[f32],
     sample_rate: i32,
-    segments: &[sherpa_onnx::OfflineSpeakerDiarizationSegment],
+    segments: &[RawDiarizationSegment],
     speaker: i32,
 ) -> Vec<f32> {
     if sample_rate <= 0 {
@@ -451,10 +1039,18 @@ fn portable_model_id(path: &Path) -> String {
         .unwrap_or(file)
 }
 
-fn path_string(path: &Path) -> Result<String> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| diarization_error(format!("path is not valid UTF-8: {}", path.display())))
+fn path_cstring(path: &Path) -> Result<CString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| diarization_error(format!("path contains NUL: {}", path.display())));
+    }
+    #[cfg(not(unix))]
+    {
+        CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| diarization_error(format!("path contains NUL: {}", path.display())))
+    }
 }
 
 fn require_file(label: &str, path: &Path) -> Result<()> {
@@ -588,5 +1184,17 @@ mod tests {
     fn portable_model_provenance_avoids_machine_absolute_paths() {
         let path = Path::new("/home/user/models/sherpa-pyannote/model.onnx");
         assert_eq!(portable_model_id(path), "sherpa-pyannote/model.onnx");
+    }
+
+    #[test]
+    fn runtime_library_name_detection_is_platform_specific() {
+        #[cfg(target_os = "linux")]
+        assert!(is_sherpa_runtime_library(Path::new(
+            "libsherpa-onnx-c-api.so"
+        )));
+        #[cfg(target_os = "windows")]
+        assert!(is_sherpa_runtime_library(Path::new(
+            "sherpa-onnx-c-api.dll"
+        )));
     }
 }
