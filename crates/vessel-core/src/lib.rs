@@ -18,16 +18,16 @@ pub use sourcearium::{
     YoutubeChannelPolicyV1, YoutubeSelectionPolicyV1, YoutubeSourcePolicyV1,
     YoutubeTranscriptPolicyV1,
 };
-pub use speaker_registry::{
-    SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,
-    load_speaker_registry, write_speaker_registry,
-};
 pub use sourcearium_repo::{
     ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumInventoryReport,
     SourceariumPruneCandidate, SourceariumPrunePlan, SourceariumValidationReport,
     SourceariumYoutubeSource, apply_sourcearium_prune, discover_youtube_sources,
     inventory_sourcearium_repository, load_youtube_transcript_artifact,
     materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
+};
+pub use speaker_registry::{
+    SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,
+    load_speaker_registry, write_speaker_registry,
 };
 pub use transcript::{
     DiarizationProvenance, SpeakerAttribution, TranscriptCandidate, TranscriptDerivation,
