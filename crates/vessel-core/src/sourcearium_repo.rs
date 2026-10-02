@@ -1309,6 +1309,68 @@ input = "https://www.youtube.com/@{key}"
     }
 
     #[test]
+    fn speaker_projection_renders_identity_without_mutating_canonical_body() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let mut candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        candidate.engine = Some("whisperx-faster-whisper".into());
+        candidate.model = Some("large-v3".into());
+        candidate.diarization = Some(crate::DiarizationProvenance {
+            engine: "pyannote-audio".into(),
+            model: "pyannote/speaker-diarization-community-1".into(),
+            registry_revision: None,
+        });
+        candidate.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+        let report = crate::SpeakerMatchReport {
+            target_video_id: video.video_id.clone(),
+            registry_revision: 4,
+            diarization_engine: "pyannote-audio".into(),
+            diarization_model: "pyannote/speaker-diarization-community-1".into(),
+            config: crate::SpeakerMatchConfig::default(),
+            anchor_samples_used: 2,
+            identities_with_compatible_anchors: 1,
+            anchor_diagnostics: Vec::new(),
+            matches: vec![crate::SpeakerMatch {
+                diarization_label: "SPEAKER_00".into(),
+                status: crate::SpeakerMatchStatus::Matched,
+                best_identity: Some("creator".into()),
+                similarity: Some(0.94),
+                second_identity: None,
+                second_similarity: None,
+                margin: None,
+                anchor_samples: 2,
+            }],
+        };
+        apply_speaker_match_report(&source, &video.video_id, &report).unwrap();
+        let canonical_before = fs::read_to_string(&materialized.path).unwrap();
+
+        let projected =
+            render_speaker_attributed_transcript(&source, &video.video_id, false).unwrap();
+        assert!(projected.contains("<speaker:creator>"));
+        assert!(!projected.contains("<speaker:SPEAKER_00>"));
+
+        let projected_with_cluster =
+            render_speaker_attributed_transcript(&source, &video.video_id, true).unwrap();
+        assert!(projected_with_cluster.contains("<speaker:creator|SPEAKER_00>"));
+
+        assert_eq!(
+            fs::read_to_string(&materialized.path).unwrap(),
+            canonical_before
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn speaker_attribution_application_rejects_diarization_provenance_mismatch() {
         let root = temp_sourcearium();
         write_policy(&root, "alpha", "alpha");
