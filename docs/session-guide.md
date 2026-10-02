@@ -148,6 +148,9 @@ The following are already implemented and CI-tested:
 - metadata-only no-churn semantics
 - opt-in per-video decision reporting
 - non-materializing `--preview` mode
+- operational `--video-id` targeting for bounded acceptance/debug runs
+- explicit caption-access diagnostics when advertised YouTube caption tracks return empty bodies
+- explicit SQLite WAL checkpoint/close at the end of Sourcearium updates
 - explicit offline safe prune: plan by default, delete only with `--apply`
 - Linux full-workspace CI
 - native Windows path/store/ASR tests and CLI compile
@@ -159,11 +162,14 @@ The architecture is no longer the main uncertainty.
 
 Highest-value next steps:
 
-1. exercise `--preview --max-videos 3` against the first real configured channel
-2. materialize a deliberately tiny real corpus
-3. inspect creator-caption, auto-caption, and local-ASR behavior
-4. rerun and verify no-op Git behavior
+1. materialize one deliberately targeted real artifact with `--video-id`
+2. inspect Sourcearium artifact structure and local-ASR provenance
+3. rerun the same target and verify no-op Git behavior
+4. expand to a small bounded batch
 5. exercise prune planning against a deliberate real policy change
-6. consider optional ASR acceleration only after CPU behavior is proven
+6. decide whether native YouTube PO-token support is worth adding for caption-body acquisition
+7. consider optional ASR acceleration only after CPU behavior is proven
+
+The residential `--preview --max-videos 3` acceptance is complete. Player/media acquisition works on the target network; current direct caption-body access is degraded by empty `timedtext` responses, so the sampled videos resolve to ASR fallback while retaining the caption-access diagnostic.
 
 Do not add more generalized acquisition abstractions before real Sourcearium data demonstrates a need.
