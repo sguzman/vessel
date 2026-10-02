@@ -10,7 +10,7 @@ use vessel_core::{
     TranscriptSegment, TranscriptSpeaker, VesselError,
 };
 use whisper_core::{
-    TranscribeOptions, WhisperModel, WhichModel, device, fetch_model as fetch_whisper_model,
+    TranscribeOptions, WhichModel, WhisperModel, device, fetch_model as fetch_whisper_model,
     load_model, transcribe_file,
 };
 
@@ -35,8 +35,7 @@ pub const WHISPER_MODEL_NAMES: &[&str] = &[
     "large-v3",
     "large-v3-turbo",
 ];
-pub const PHONON_MODEL_NAMES: &[&str] =
-    &["phonon-2", "phonon-1", "phonon-1-big", "phonon-1-micro"];
+pub const PHONON_MODEL_NAMES: &[&str] = &["phonon-2", "phonon-1", "phonon-1-big", "phonon-1-micro"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsrModelLocation {
@@ -63,19 +62,21 @@ pub fn fetch_asr_model(
 
     match backend {
         WHISPER_CANDLE_ENGINE_NAME => {
-            let which: WhichModel = model.parse().map_err(|error| {
-                asr_error(format!("invalid Whisper model {model:?}: {error}"))
-            })?;
+            let which: WhichModel = model
+                .parse()
+                .map_err(|error| asr_error(format!("invalid Whisper model {model:?}: {error}")))?;
             eprintln!("[asr] model download/cache check started backend={backend} model={model}");
             let files = fetch_whisper_model(which).map_err(|error| {
                 asr_error(format!("failed to fetch Whisper model {model:?}: {error}"))
             })?;
-            let config_dir = files.config.parent().ok_or_else(|| {
-                asr_error("Whisper config path has no parent directory")
-            })?;
-            let weights_dir = files.weights.parent().ok_or_else(|| {
-                asr_error("Whisper weights path has no parent directory")
-            })?;
+            let config_dir = files
+                .config
+                .parent()
+                .ok_or_else(|| asr_error("Whisper config path has no parent directory"))?;
+            let weights_dir = files
+                .weights
+                .parent()
+                .ok_or_else(|| asr_error("Whisper weights path has no parent directory"))?;
             if config_dir != weights_dir {
                 return Err(asr_error(format!(
                     "Whisper model files landed in different directories: {} and {}",
@@ -195,7 +196,9 @@ print(path)
                 )));
             }
             let stdout = String::from_utf8(output.stdout).map_err(|error| {
-                asr_error(format!("WhisperX model download output was not UTF-8: {error}"))
+                asr_error(format!(
+                    "WhisperX model download output was not UTF-8: {error}"
+                ))
             })?;
             let directory = PathBuf::from(stdout.trim());
             if stdout.trim().is_empty() || !directory.is_dir() {
@@ -538,7 +541,10 @@ impl WhisperXBackend {
         }
 
         let parent = path.parent().ok_or_else(|| {
-            asr_error(format!("WhisperX input has no parent directory: {}", path.display()))
+            asr_error(format!(
+                "WhisperX input has no parent directory: {}",
+                path.display()
+            ))
         })?;
         let output_dir = parent.join("whisperx-output");
         fs::create_dir_all(&output_dir).map_err(|error| {
@@ -548,9 +554,15 @@ impl WhisperXBackend {
             ))
         })?;
 
-        let stem = path.file_stem().and_then(|value| value.to_str()).ok_or_else(|| {
-            asr_error(format!("WhisperX input has no UTF-8 file stem: {}", path.display()))
-        })?;
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                asr_error(format!(
+                    "WhisperX input has no UTF-8 file stem: {}",
+                    path.display()
+                ))
+            })?;
         let output_json = output_dir.join(format!("{stem}.json"));
         if output_json.exists() {
             fs::remove_file(&output_json).map_err(|error| {
@@ -765,15 +777,12 @@ fn persist_whisperx_speaker_evidence(
                 video_dir.display()
             ))
         })?;
-    let vessel_cache = video_dir
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| {
-            asr_error(format!(
-                "cannot resolve Vessel cache root from {}",
-                input.display()
-            ))
-        })?;
+    let vessel_cache = video_dir.parent().and_then(Path::parent).ok_or_else(|| {
+        asr_error(format!(
+            "cannot resolve Vessel cache root from {}",
+            input.display()
+        ))
+    })?;
     let evidence_dir = vessel_cache.join("speaker-evidence");
     fs::create_dir_all(&evidence_dir).map_err(|error| {
         asr_error(format!(
@@ -1069,10 +1078,8 @@ mod tests {
 
     #[test]
     fn whisperx_python_prefers_sibling_virtualenv_interpreter() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-whisperx-python-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-whisperx-python-{}", std::process::id()));
         let bin = root.join("bin");
         fs::create_dir_all(&bin).expect("bin");
         fs::write(bin.join("python"), b"").expect("python marker");
@@ -1136,7 +1143,11 @@ mod tests {
         let error = WhisperCandleBackend::load(whisper)
             .err()
             .expect("whisper-candle diarization must fail explicitly");
-        assert!(error.to_string().contains("does not support speaker diarization"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not support speaker diarization")
+        );
 
         let mut phonon = AsrConfig::default();
         phonon.backend = PHONON2_BACKEND_NAME.into();
@@ -1145,7 +1156,11 @@ mod tests {
         let error = Phonon2Backend::load(phonon)
             .err()
             .expect("phonon diarization must fail explicitly");
-        assert!(error.to_string().contains("does not support speaker diarization"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not support speaker diarization")
+        );
     }
 
     #[test]
@@ -1161,10 +1176,8 @@ mod tests {
 
     #[test]
     fn speaker_evidence_path_is_outside_disposable_video_asr_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-speaker-evidence-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-speaker-evidence-{}", std::process::id()));
         let video_dir = root.join(".cache/vessel/asr/video123");
         fs::create_dir_all(&video_dir).expect("video dir");
         let input = video_dir.join("whisper-input.wav");
@@ -1191,8 +1204,7 @@ mod tests {
             root.join(".cache/vessel/speaker-evidence/video123.json")
         );
         assert!(path.is_file());
-        let persisted: Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let persisted: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(persisted["video_id"], "video123");
         assert_eq!(persisted["segments"][0]["speaker"], "SPEAKER_00");
         assert_eq!(
@@ -1225,7 +1237,10 @@ mod tests {
         assert_eq!(candidate.model.as_deref(), Some("large-v3"));
         assert_eq!(candidate.language.as_deref(), Some("en"));
         assert_eq!(
-            candidate.diarization.as_ref().map(|value| value.engine.as_str()),
+            candidate
+                .diarization
+                .as_ref()
+                .map(|value| value.engine.as_str()),
             Some("pyannote-audio")
         );
         let first = candidate.segments[0].speaker.as_ref().expect("speaker");
