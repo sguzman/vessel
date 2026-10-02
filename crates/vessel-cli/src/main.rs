@@ -851,6 +851,12 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             "network_io": false,
             "backend": SHERPA_ONNX_BACKEND_NAME,
             "build_time_fetch": false,
+            "integrity": {
+                "algorithm": "blake3",
+                "runtime_receipt": runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
+                "model_receipt": model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
+                "network_required_for_verification": false,
+            },
             "downloads": [
                 {
                     "kind": "native_runtime",
