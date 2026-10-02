@@ -219,6 +219,13 @@ fn require_nonempty(field: &str, value: Option<&str>) -> Result<()> {
     }
 }
 
+fn validate_optional_nonempty(field: &str, value: Option<&str>) -> Result<()> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        return Err(corpus_error(format!("{field} must not be empty when present")));
+    }
+    Ok(())
+}
+
 fn format_timestamp(total_seconds: u64) -> String {
     let hours = total_seconds / 3_600;
     let minutes = (total_seconds % 3_600) / 60;
