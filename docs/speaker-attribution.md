@@ -270,3 +270,47 @@ Each persisted assignment records:
 The extension also records the registry revision, diarization engine/model, and all matching thresholds.
 
 A future projection/rendering layer may display stable identity names in a human-facing transcript without mutating the canonical raw diarization body.
+
+
+## Human-Facing Speaker Projection
+
+Canonical transcript bodies keep raw file-local diarization labels even after identity attribution is applied.
+
+For a human-facing view, render a projection:
+
+```text
+vessel speakers render \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <video-id>
+```
+
+A canonical line such as:
+
+```text
+[00:00:03] <speaker:SPEAKER_00> Spoken text.
+```
+
+can project as:
+
+```text
+[00:00:03] <speaker:creator> Spoken text.
+```
+
+To retain the raw cluster label in the rendered view:
+
+```text
+vessel speakers render \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <video-id> \
+  --show-clusters
+```
+
+which renders:
+
+```text
+[00:00:03] <speaker:creator|SPEAKER_00> Spoken text.
+```
+
+Projection is read-only. It does not rewrite the Sourcearium artifact.
