@@ -574,6 +574,7 @@ fn candidate_from_segments(
         normalized.push(TranscriptSegment {
             start_seconds: Some(segment.start_seconds.floor() as u64),
             text,
+            speaker: None,
         });
     }
 
@@ -583,6 +584,7 @@ fn candidate_from_segments(
         timestamps: true,
         engine: Some(engine.to_owned()),
         model: Some(model.to_owned()),
+        diarization: None,
         segments: normalized,
     };
     candidate.validate()?;
