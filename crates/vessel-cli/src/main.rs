@@ -888,6 +888,29 @@ fn reset_staging_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn planned_remaining_bytes(
+    destination: &Path,
+    expected_bytes: u64,
+    already_available: bool,
+) -> (u64, u64) {
+    if already_available {
+        return (0, 0);
+    }
+    if destination.is_file()
+        && std::fs::metadata(destination)
+            .map(|metadata| metadata.len() == expected_bytes)
+            .unwrap_or(false)
+    {
+        return (expected_bytes, 0);
+    }
+    let partial = destination
+        .with_extension("download");
+    let resume_bytes = std::fs::metadata(partial)
+        .map(|metadata| metadata.len().min(expected_bytes))
+        .unwrap_or(0);
+    (resume_bytes, expected_bytes.saturating_sub(resume_bytes))
+}
+
 fn validate_sherpa_bundle(
     runtime_library: &Path,
     segmentation_model: &Path,
@@ -936,11 +959,38 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
         SHERPA_ONNX_RUNTIME_VERSION, runtime_archive_name
     );
+    let runtime_parent = runtime_root.parent().ok_or_else(|| {
+        VesselError::Config(format!(
+            "runtime directory has no parent: {}",
+            runtime_root.display()
+        ))
+    })?;
+    let runtime_archive_path = runtime_parent.join(&runtime_archive_name);
+    let segmentation_archive_path =
+        model_root.join("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2");
 
     if args.plan {
         let runtime_available = find_sherpa_runtime_library(&runtime_root)
             .ok()
             .is_some_and(|path| probe_sherpa_runtime(&path).is_ok());
+        let segmentation_available = segmentation_model.is_file();
+        let embedding_available = embedding_model.is_file();
+        let (runtime_resume_bytes, runtime_remaining_bytes) = planned_remaining_bytes(
+            &runtime_archive_path,
+            runtime_archive_bytes,
+            runtime_available,
+        );
+        let (segmentation_resume_bytes, segmentation_remaining_bytes) =
+            planned_remaining_bytes(
+                &segmentation_archive_path,
+                SHERPA_SEGMENTATION_ARCHIVE_BYTES,
+                segmentation_available,
+            );
+        let (embedding_resume_bytes, embedding_remaining_bytes) = planned_remaining_bytes(
+            &embedding_model,
+            SHERPA_EMBEDDING_BYTES,
+            embedding_available,
+        );
         let plan = serde_json::json!({
             "status": "plan",
             "network_io": false,
@@ -960,25 +1010,34 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                     "expected_bytes": runtime_archive_bytes,
                     "destination_root": runtime_root,
                     "already_available": runtime_available,
+                    "resume_bytes": runtime_resume_bytes,
+                    "remaining_bytes": runtime_remaining_bytes,
                 },
                 {
                     "kind": "segmentation_model",
                     "url": SHERPA_SEGMENTATION_ARCHIVE_URL,
                     "expected_bytes": SHERPA_SEGMENTATION_ARCHIVE_BYTES,
                     "destination": segmentation_model,
-                    "already_available": segmentation_model.is_file(),
+                    "already_available": segmentation_available,
+                    "resume_bytes": segmentation_resume_bytes,
+                    "remaining_bytes": segmentation_remaining_bytes,
                 },
                 {
                     "kind": "speaker_embedding_model",
                     "url": SHERPA_EMBEDDING_MODEL_URL,
                     "expected_bytes": SHERPA_EMBEDDING_BYTES,
                     "destination": embedding_model,
-                    "already_available": embedding_model.is_file(),
+                    "already_available": embedding_available,
+                    "resume_bytes": embedding_resume_bytes,
+                    "remaining_bytes": embedding_remaining_bytes,
                 }
             ],
             "total_expected_bytes": runtime_archive_bytes
                 + SHERPA_SEGMENTATION_ARCHIVE_BYTES
                 + SHERPA_EMBEDDING_BYTES,
+            "total_remaining_bytes": runtime_remaining_bytes
+                + segmentation_remaining_bytes
+                + embedding_remaining_bytes,
         });
         println!(
             "{}",
@@ -989,12 +1048,6 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     }
 
     tokio::fs::create_dir_all(&model_root).await?;
-    let runtime_parent = runtime_root.parent().ok_or_else(|| {
-        VesselError::Config(format!(
-            "runtime directory has no parent: {}",
-            runtime_root.display()
-        ))
-    })?;
     tokio::fs::create_dir_all(runtime_parent).await?;
     let client = Client::new();
 
@@ -1014,7 +1067,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                 );
             }
 
-            let archive_path = runtime_parent.join(&runtime_archive_name);
+            let archive_path = runtime_archive_path.clone();
             download_with_progress(
                 &client,
                 &runtime_url,
@@ -1083,7 +1136,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     };
 
     if !segmentation_model.is_file() {
-        let archive_path = model_root.join("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2");
+        let archive_path = segmentation_archive_path.clone();
         download_with_progress(
             &client,
             SHERPA_SEGMENTATION_ARCHIVE_URL,
