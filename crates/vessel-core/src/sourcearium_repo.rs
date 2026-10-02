@@ -1157,6 +1157,131 @@ input = "https://www.youtube.com/@{key}"
     }
 
     #[test]
+    fn speaker_attribution_application_preserves_raw_body_and_is_idempotent() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let mut candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        candidate.engine = Some("whisperx-faster-whisper".into());
+        candidate.model = Some("large-v3".into());
+        candidate.diarization = Some(crate::DiarizationProvenance {
+            engine: "pyannote-audio".into(),
+            model: "pyannote/speaker-diarization-community-1".into(),
+            registry_revision: None,
+        });
+        candidate.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+        let original = fs::read_to_string(&materialized.path).unwrap();
+        let (_, original_body) = SourceariumArtifactV1::parse_markdown(&original).unwrap();
+
+        let report = crate::SpeakerMatchReport {
+            target_video_id: video.video_id.clone(),
+            registry_revision: 4,
+            diarization_engine: "pyannote-audio".into(),
+            diarization_model: "pyannote/speaker-diarization-community-1".into(),
+            config: crate::SpeakerMatchConfig {
+                min_similarity: 0.80,
+                min_margin: 0.05,
+                min_anchor_dominance: 0.80,
+            },
+            anchor_samples_used: 2,
+            identities_with_compatible_anchors: 1,
+            anchor_diagnostics: Vec::new(),
+            matches: vec![crate::SpeakerMatch {
+                diarization_label: "SPEAKER_00".into(),
+                status: crate::SpeakerMatchStatus::Matched,
+                best_identity: Some("creator".into()),
+                similarity: Some(0.94),
+                second_identity: None,
+                second_similarity: None,
+                margin: None,
+                anchor_samples: 2,
+            }],
+        };
+
+        let first =
+            apply_speaker_match_report(&source, &video.video_id, &report).expect("apply attribution");
+        assert!(first.updated);
+        assert_eq!(first.assignments, 1);
+        assert_eq!(first.registry_revision, 4);
+
+        let annotated = fs::read_to_string(&materialized.path).unwrap();
+        let (artifact, annotated_body) =
+            SourceariumArtifactV1::parse_markdown(&annotated).unwrap();
+        assert_eq!(annotated_body, original_body);
+        assert!(annotated_body.contains("<speaker:SPEAKER_00>"));
+        let attribution = &artifact.extensions["speaker_attribution"];
+        assert_eq!(
+            attribution["method"].as_str(),
+            Some("embedding_cosine")
+        );
+        assert_eq!(attribution["registry_revision"].as_integer(), Some(4));
+        let assignments = attribution["assignments"].as_array().unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            assignments[0]["diarization_label"].as_str(),
+            Some("SPEAKER_00")
+        );
+        assert_eq!(assignments[0]["identity"].as_str(), Some("creator"));
+        assert_eq!(
+            assignments[0]["attribution"].as_str(),
+            Some("model_matched")
+        );
+
+        let second =
+            apply_speaker_match_report(&source, &video.video_id, &report).expect("reapply");
+        assert!(!second.updated);
+        assert_eq!(fs::read_to_string(&materialized.path).unwrap(), annotated);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn speaker_attribution_application_rejects_diarization_provenance_mismatch() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let mut candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        candidate.diarization = Some(crate::DiarizationProvenance {
+            engine: "pyannote-audio".into(),
+            model: "model-a".into(),
+            registry_revision: None,
+        });
+        candidate.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+        materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+
+        let report = crate::SpeakerMatchReport {
+            target_video_id: video.video_id.clone(),
+            registry_revision: 2,
+            diarization_engine: "pyannote-audio".into(),
+            diarization_model: "model-b".into(),
+            config: crate::SpeakerMatchConfig::default(),
+            anchor_samples_used: 1,
+            identities_with_compatible_anchors: 1,
+            anchor_diagnostics: Vec::new(),
+            matches: Vec::new(),
+        };
+
+        let error = apply_speaker_match_report(&source, &video.video_id, &report)
+            .expect_err("mismatched provenance must fail");
+        assert!(error.to_string().contains("does not match artifact diarization"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn materialization_preserves_channel_creator_provenance() {
         let root = temp_sourcearium();
         write_policy(&root, "alpha", "alpha");
