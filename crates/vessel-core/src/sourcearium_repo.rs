@@ -1313,6 +1313,96 @@ input = "https://www.youtube.com/@{key}"
     }
 
     #[test]
+    fn diarization_enrichment_preserves_representation_and_is_idempotent() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+        let before = fs::read_to_string(&materialized.path).unwrap();
+        let (before_artifact, _) = SourceariumArtifactV1::parse_markdown(&before).unwrap();
+
+        let mut enriched = candidate.clone();
+        enriched.diarization = Some(crate::DiarizationProvenance {
+            engine: "sherpa-onnx".into(),
+            model: "segmentation=x;embedding=y".into(),
+            registry_revision: None,
+        });
+        enriched.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+
+        let first =
+            apply_youtube_transcript_diarization(&source, &video.video_id, &enriched).unwrap();
+        assert!(first.updated);
+        assert!(!first.speaker_attribution_cleared);
+
+        let after = fs::read_to_string(&materialized.path).unwrap();
+        let (after_artifact, after_body) = SourceariumArtifactV1::parse_markdown(&after).unwrap();
+        assert_eq!(after_artifact.representation, before_artifact.representation);
+        assert_eq!(
+            after_artifact.extensions["diarization"]["engine"].as_str(),
+            Some("sherpa-onnx")
+        );
+        assert!(after_body.contains("<speaker:SPEAKER_00>"));
+
+        let second =
+            apply_youtube_transcript_diarization(&source, &video.video_id, &enriched).unwrap();
+        assert!(!second.updated);
+        assert!(!second.speaker_attribution_cleared);
+        assert_eq!(fs::read_to_string(&materialized.path).unwrap(), after);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn diarization_enrichment_clears_stale_speaker_attribution() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let mut first_candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        first_candidate.diarization = Some(crate::DiarizationProvenance {
+            engine: "sherpa-onnx".into(),
+            model: "segmentation=x;embedding=y".into(),
+            registry_revision: None,
+        });
+        first_candidate.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, None, &first_candidate).unwrap();
+
+        let mut raw = fs::read_to_string(&materialized.path).unwrap();
+        let (mut artifact, body) = SourceariumArtifactV1::parse_markdown(&raw).unwrap();
+        artifact
+            .extensions
+            .insert("speaker_attribution".into(), toml::Table::new());
+        raw = artifact.to_markdown(&body).unwrap();
+        fs::write(&materialized.path, raw).unwrap();
+
+        let mut changed = first_candidate.clone();
+        changed.diarization.as_mut().unwrap().model =
+            "segmentation=x2;embedding=y".into();
+        let result =
+            apply_youtube_transcript_diarization(&source, &video.video_id, &changed).unwrap();
+        assert!(result.updated);
+        assert!(result.speaker_attribution_cleared);
+
+        let updated = fs::read_to_string(&materialized.path).unwrap();
+        let (artifact, _) = SourceariumArtifactV1::parse_markdown(&updated).unwrap();
+        assert!(!artifact.extensions.contains_key("speaker_attribution"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn speaker_attribution_application_preserves_raw_body_and_is_idempotent() {
         let root = temp_sourcearium();
         write_policy(&root, "alpha", "alpha");
