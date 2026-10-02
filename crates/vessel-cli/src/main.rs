@@ -826,6 +826,68 @@ fn integrity_status_json(status: &IntegrityStatus) -> serde_json::Value {
     })
 }
 
+fn install_staged_directory(staging: &Path, target: &Path) -> Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        VesselError::Config(format!(
+            "staged install target has no parent: {}",
+            target.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    let target_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            VesselError::Config(format!(
+                "staged install target has no UTF-8 file name: {}",
+                target.display()
+            ))
+        })?;
+    let backup = parent.join(format!(".{target_name}.previous"));
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup)?;
+    }
+
+    let had_target = target.exists();
+    if had_target {
+        if !target.is_dir() {
+            return Err(VesselError::Config(format!(
+                "staged install target exists but is not a directory: {}",
+                target.display()
+            )));
+        }
+        std::fs::rename(target, &backup)?;
+    }
+
+    match std::fs::rename(staging, target) {
+        Ok(()) => {
+            if backup.exists() {
+                std::fs::remove_dir_all(backup)?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if had_target && backup.exists() {
+                let _ = std::fs::rename(&backup, target);
+            }
+            Err(VesselError::Extractor(format!(
+                "failed to install staged directory {} -> {}: {error}",
+                staging.display(),
+                target.display()
+            )))
+        }
+    }
+}
+
+fn reset_staging_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
 async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     if args.backend != SHERPA_ONNX_BACKEND_NAME {
         return Err(VesselError::Config(format!(
@@ -846,11 +908,15 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     );
 
     if args.plan {
+        let runtime_available = find_sherpa_runtime_library(&runtime_root)
+            .ok()
+            .is_some_and(|path| probe_sherpa_runtime(&path).is_ok());
         let plan = serde_json::json!({
             "status": "plan",
             "network_io": false,
             "backend": SHERPA_ONNX_BACKEND_NAME,
             "build_time_fetch": false,
+            "transactional_install": true,
             "integrity": {
                 "algorithm": "blake3",
                 "runtime_receipt": runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
@@ -863,7 +929,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                     "url": runtime_url,
                     "expected_bytes": runtime_archive_bytes,
                     "destination_root": runtime_root,
-                    "already_available": find_sherpa_runtime_library(&runtime_root).is_ok(),
+                    "already_available": runtime_available,
                 },
                 {
                     "kind": "segmentation_model",
@@ -893,19 +959,32 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     }
 
     tokio::fs::create_dir_all(&model_root).await?;
-    tokio::fs::create_dir_all(&runtime_root).await?;
+    let runtime_parent = runtime_root.parent().ok_or_else(|| {
+        VesselError::Config(format!(
+            "runtime directory has no parent: {}",
+            runtime_root.display()
+        ))
+    })?;
+    tokio::fs::create_dir_all(runtime_parent).await?;
     let client = Client::new();
 
     let runtime_library = match find_sherpa_runtime_library(&runtime_root) {
-        Ok(path) => {
+        Ok(path) if probe_sherpa_runtime(&path).is_ok() => {
             eprintln!(
-                "[diarization] sherpa runtime already available path={}",
+                "[diarization] sherpa runtime already available and loadable path={}",
                 path.display()
             );
             path
         }
-        Err(_) => {
-            let archive_path = runtime_root.join(&runtime_archive_name);
+        existing => {
+            if let Ok(path) = existing {
+                eprintln!(
+                    "[diarization] existing sherpa runtime is not loadable; staging a replacement path={}",
+                    path.display()
+                );
+            }
+
+            let archive_path = runtime_parent.join(&runtime_archive_name);
             download_with_progress(
                 &client,
                 &runtime_url,
@@ -915,9 +994,22 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             )
             .await?;
 
-            let unpack_root = runtime_root.clone();
+            let runtime_name = runtime_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    VesselError::Config(format!(
+                        "runtime directory has no UTF-8 file name: {}",
+                        runtime_root.display()
+                    ))
+                })?;
+            let staging_root =
+                runtime_parent.join(format!(".{runtime_name}.installing"));
+            reset_staging_directory(&staging_root)?;
+
+            let unpack_root = staging_root.clone();
             let archive_for_worker = archive_path.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
+            let extraction = tokio::task::spawn_blocking(move || -> Result<()> {
                 let file = std::fs::File::open(&archive_for_worker)?;
                 let decoder = bzip2::read::BzDecoder::new(file);
                 let mut archive = tar::Archive::new(decoder);
@@ -929,9 +1021,25 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                 VesselError::Extractor(format!(
                     "sherpa runtime archive worker failed to join: {error}"
                 ))
-            })??;
+            })?;
+            if let Err(error) = extraction {
+                let _ = std::fs::remove_dir_all(&staging_root);
+                return Err(error);
+            }
+
+            let staged_runtime = find_sherpa_runtime_library(&staging_root)?;
+            if let Err(error) = probe_sherpa_runtime(&staged_runtime) {
+                let _ = std::fs::remove_dir_all(&staging_root);
+                return Err(VesselError::Extractor(format!(
+                    "staged sherpa runtime failed validation: {error}"
+                )));
+            }
+
+            install_staged_directory(&staging_root, &runtime_root)?;
             let _ = tokio::fs::remove_file(&archive_path).await;
-            find_sherpa_runtime_library(&runtime_root)?
+            let installed = find_sherpa_runtime_library(&runtime_root)?;
+            probe_sherpa_runtime(&installed)?;
+            installed
         }
     };
 
@@ -946,9 +1054,11 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         )
         .await?;
 
-        let unpack_root = model_root.clone();
+        let staging_root = model_root.join(".segmentation.installing");
+        reset_staging_directory(&staging_root)?;
+        let unpack_root = staging_root.clone();
         let archive_for_worker = archive_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let extraction = tokio::task::spawn_blocking(move || -> Result<()> {
             let file = std::fs::File::open(&archive_for_worker)?;
             let decoder = bzip2::read::BzDecoder::new(file);
             let mut archive = tar::Archive::new(decoder);
@@ -960,7 +1070,25 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             VesselError::Extractor(format!(
                 "sherpa segmentation archive worker failed to join: {error}"
             ))
-        })??;
+        })?;
+        if let Err(error) = extraction {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+
+        let staged_model_dir = staging_root.join(SHERPA_SEGMENTATION_DIR);
+        let staged_model = staged_model_dir.join("model.onnx");
+        if !staged_model.is_file() {
+            let _ = std::fs::remove_dir_all(&staging_root);
+            return Err(VesselError::Extractor(format!(
+                "segmentation archive did not contain expected model {}",
+                staged_model.display()
+            )));
+        }
+
+        let target_model_dir = model_root.join(SHERPA_SEGMENTATION_DIR);
+        install_staged_directory(&staged_model_dir, &target_model_dir)?;
+        let _ = std::fs::remove_dir_all(&staging_root);
         let _ = tokio::fs::remove_file(&archive_path).await;
     } else {
         eprintln!(
@@ -1017,6 +1145,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "backend": SHERPA_ONNX_BACKEND_NAME,
         "network_phase": "explicit_runtime_command",
         "build_time_fetch": false,
+        "transactional_install": true,
         "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
         "runtime_directory": runtime_root,
         "runtime_library": runtime_library,
@@ -1055,6 +1184,19 @@ async fn download_with_progress(
         ))
     })?;
     tokio::fs::create_dir_all(parent).await?;
+
+    if destination.is_file() {
+        let actual = tokio::fs::metadata(destination).await?.len();
+        if expected_bytes.is_none_or(|expected| expected == actual) {
+            eprintln!(
+                "[diarization] completed download already available label={} bytes={} path={}",
+                label,
+                actual,
+                destination.display()
+            );
+            return Ok(());
+        }
+    }
 
     let temp = destination.with_extension("download");
     let mut resume_from = tokio::fs::metadata(&temp)
