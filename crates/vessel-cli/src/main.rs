@@ -235,6 +235,7 @@ enum DiarizationSubcommand {
     Models,
     Fetch(DiarizationFetchArgs),
     Doctor(DiarizationDoctorArgs),
+    Run(DiarizationRunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -261,6 +262,37 @@ struct DiarizationDoctorArgs {
     embedding_model: Option<PathBuf>,
     #[arg(long = "provider", default_value = "cpu")]
     provider: String,
+}
+
+#[derive(Debug, Args)]
+struct DiarizationRunArgs {
+    input: PathBuf,
+    #[arg(long, default_value = "sherpa-onnx")]
+    backend: String,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
+    #[arg(long = "segmentation-model")]
+    segmentation_model: Option<PathBuf>,
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<PathBuf>,
+    #[arg(long = "provider", default_value = "cpu")]
+    provider: String,
+    #[arg(long = "num-threads", default_value_t = 4)]
+    num_threads: i32,
+    #[arg(long = "num-speakers")]
+    num_speakers: Option<usize>,
+    #[arg(
+        long = "clustering-threshold",
+        default_value_t = DEFAULT_CLUSTERING_THRESHOLD
+    )]
+    clustering_threshold: f32,
+    #[arg(
+        long = "window-shift-ratio",
+        default_value_t = DEFAULT_WINDOW_SHIFT_RATIO
+    )]
+    window_shift_ratio: f32,
+    #[arg(long = "speaker-embeddings")]
+    speaker_embeddings: bool,
 }
 
 #[derive(Debug, Args)]
@@ -577,6 +609,7 @@ async fn main() -> Result<()> {
             DiarizationSubcommand::Models => diarization_models(),
             DiarizationSubcommand::Fetch(args) => diarization_fetch(args).await,
             DiarizationSubcommand::Doctor(args) => diarization_doctor(args),
+            DiarizationSubcommand::Run(args) => diarization_run(args).await,
         },
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
@@ -1659,6 +1692,153 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
             "unsupported diarization backend {other:?}"
         ))),
     }
+}
+
+async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
+    if args.backend != SHERPA_ONNX_BACKEND_NAME {
+        return Err(VesselError::Config(format!(
+            "standalone diarization run is not implemented for backend {:?}",
+            args.backend
+        )));
+    }
+    if !args.input.is_file() {
+        return Err(VesselError::Config(format!(
+            "diarization input does not exist: {}",
+            args.input.display()
+        )));
+    }
+
+    let default_model_root = default_diarization_model_root();
+    let (default_segmentation, default_embedding) = sherpa_model_paths(&default_model_root);
+    let using_default_models =
+        args.segmentation_model.is_none() && args.embedding_model.is_none();
+    let segmentation_model = args.segmentation_model.unwrap_or(default_segmentation);
+    let embedding_model = args.embedding_model.unwrap_or(default_embedding);
+
+    let using_default_runtime = args.runtime_dir.is_none();
+    let runtime_root = args
+        .runtime_dir
+        .unwrap_or_else(default_diarization_runtime_root);
+    let runtime_library = find_sherpa_runtime_library(&runtime_root).map_err(|_| {
+        VesselError::Config(format!(
+            "sherpa-onnx runtime is missing; run vessel diarization fetch or pass --runtime-dir explicitly (expected default under {})",
+            runtime_root.display()
+        ))
+    })?;
+
+    if !segmentation_model.is_file() || !embedding_model.is_file() {
+        return Err(VesselError::Config(format!(
+            "sherpa-onnx diarization models are missing; run vessel diarization fetch or pass explicit model paths (expected defaults under {})",
+            default_model_root.display()
+        )));
+    }
+
+    if using_default_runtime {
+        let integrity = verify_integrity_receipt(
+            &runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
+            &runtime_root,
+        );
+        if integrity.present && !integrity.verified {
+            return Err(VesselError::Config(format!(
+                "default sherpa runtime failed offline integrity verification: {}",
+                integrity.errors.join("; ")
+            )));
+        }
+    }
+    if using_default_models {
+        let integrity = verify_integrity_receipt(
+            &default_model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
+            &default_model_root,
+        );
+        if integrity.present && !integrity.verified {
+            return Err(VesselError::Config(format!(
+                "default sherpa models failed offline integrity verification: {}",
+                integrity.errors.join("; ")
+            )));
+        }
+    }
+
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library,
+        segmentation_model,
+        embedding_model,
+        provider: args.provider,
+        num_threads: args.num_threads,
+        num_speakers: args.num_speakers,
+        clustering_threshold: args.clustering_threshold,
+        window_shift_ratio: args.window_shift_ratio,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: args.speaker_embeddings,
+    };
+    config.validate()?;
+
+    let started = Instant::now();
+    let (result, _backend) =
+        acquire_local_diarization(&args.input, None, &config).await?;
+
+    let mut speaker_labels = result
+        .segments
+        .iter()
+        .map(|segment| segment.speaker.clone())
+        .collect::<Vec<_>>();
+    speaker_labels.sort();
+    speaker_labels.dedup();
+
+    let segments = result
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "start_seconds": segment.start_seconds,
+                "end_seconds": segment.end_seconds,
+                "speaker": segment.speaker,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let embedding_summaries = result
+        .speaker_embeddings
+        .iter()
+        .map(|(speaker, values)| {
+            let norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
+            (
+                speaker.clone(),
+                serde_json::json!({
+                    "dimension": values.len(),
+                    "l2_norm": norm,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+
+    let report = serde_json::json!({
+        "status": "ok",
+        "backend": SHERPA_ONNX_BACKEND_NAME,
+        "input": args.input,
+        "engine": result.engine,
+        "model": result.model,
+        "elapsed_seconds": started.elapsed().as_secs_f64(),
+        "speaker_count": speaker_labels.len(),
+        "speaker_labels": speaker_labels,
+        "segment_count": segments.len(),
+        "segments": segments,
+        "speaker_embeddings": {
+            "enabled": config.speaker_embeddings,
+            "count": embedding_summaries.len(),
+            "speakers": embedding_summaries,
+        },
+        "network_io": false,
+        "sourcearium_mutation": false,
+        "asr_invoked": false,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
 }
 
 fn asr_models() -> Result<()> {
