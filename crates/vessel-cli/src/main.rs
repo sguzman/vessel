@@ -23,7 +23,8 @@ use vessel_core::{
 };
 use vessel_diarization::{
     DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
-    DiarizationResult, SHERPA_ONNX_BACKEND_NAME, SherpaOnnxDiarizer, persist_speaker_evidence,
+    DiarizationResult, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION,
+    SherpaOnnxDiarizer, find_sherpa_runtime_library, persist_speaker_evidence,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -127,6 +128,8 @@ struct UpdateArgs {
     diarization_segmentation_model: Option<PathBuf>,
     #[arg(long = "diarization-embedding-model")]
     diarization_embedding_model: Option<PathBuf>,
+    #[arg(long = "diarization-runtime-dir")]
+    diarization_runtime_dir: Option<PathBuf>,
     #[arg(long = "diarization-provider", default_value = "cpu")]
     diarization_provider: String,
     #[arg(long = "diarization-num-threads", default_value_t = 4)]
@@ -243,6 +246,8 @@ struct DiarizationFetchArgs {
 struct DiarizationDoctorArgs {
     #[arg(long, default_value = "sherpa-onnx")]
     backend: String,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
     #[arg(long = "segmentation-model")]
     segmentation_model: Option<PathBuf>,
     #[arg(long = "embedding-model")]
