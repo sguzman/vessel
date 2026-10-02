@@ -8,7 +8,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
-use vessel_asr::{AsrConfig, WhisperCandleBackend};
+use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
@@ -96,6 +96,8 @@ struct UpdateArgs {
     max_videos: Option<usize>,
     #[arg(long = "video-id")]
     video_ids: Vec<String>,
+    #[arg(long = "asr-backend")]
+    asr_backend: Option<String>,
     #[arg(long = "asr-model")]
     asr_model: Option<String>,
     #[arg(long = "asr-model-dir")]
@@ -1051,7 +1053,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "limit_reached": limit_reached,
         "local_asr_implemented": true,
         "asr": {
-            "engine": vessel_asr::ENGINE_NAME,
+            "engine": asr_config.backend,
             "model": asr_config.model,
             "model_dir": asr_config.model_dir,
             "device": asr_config.device,
@@ -1115,6 +1117,9 @@ fn transcript_upgrade_probe_due(
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     let mut config = AsrConfig::default();
+    if let Some(backend) = args.asr_backend.as_deref() {
+        config.backend = backend.to_owned();
+    }
     if let Some(model) = args.asr_model.as_deref() {
         config.model = model.to_owned();
     }
@@ -1133,9 +1138,9 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
 async fn acquire_local_asr_candidate(
     sourcearium_root: &Path,
     video: &VideoMetadata,
-    backend: Option<WhisperCandleBackend>,
+    backend: Option<LoadedAsrBackend>,
     config: &AsrConfig,
-) -> Result<(TranscriptCandidate, PathBuf, WhisperCandleBackend)> {
+) -> Result<(TranscriptCandidate, PathBuf, LoadedAsrBackend)> {
     if cfg!(debug_assertions) {
         warn!(
             target: "asr",
@@ -1193,6 +1198,7 @@ async fn acquire_local_asr_candidate(
     }
 
     let config = config.clone();
+    let heartbeat_backend = config.backend.clone();
     let heartbeat_model = config.model.clone();
     let heartbeat_input = whisper_wav.clone();
     let wav_for_worker = whisper_wav.clone();
@@ -1205,7 +1211,8 @@ async fn acquire_local_asr_candidate(
                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     eprintln!(
-                        "[asr] transcription still running model={} input={} elapsed={:.0}s",
+                        "[asr] transcription still running backend={} model={} input={} elapsed={:.0}s",
+                        heartbeat_backend,
                         heartbeat_model,
                         heartbeat_input.display(),
                         started.elapsed().as_secs_f64(),
@@ -1218,7 +1225,7 @@ async fn acquire_local_asr_candidate(
     let worker_result = tokio::task::spawn_blocking(move || {
         let mut backend = match backend {
             Some(backend) => backend,
-            None => WhisperCandleBackend::load(config)?,
+            None => LoadedAsrBackend::load(config)?,
         };
         let candidate = backend.transcribe_path(&wav_for_worker)?;
         Ok::<_, VesselError>((candidate, backend))
@@ -3258,6 +3265,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            asr_backend: Some("whisper-candle".into()),
             asr_model: Some("base".into()),
             asr_model_dir: Some(PathBuf::from("/models/whisper-base")),
             asr_device: Some("cpu".into()),
@@ -3267,6 +3275,7 @@ mod tests {
             preview: false,
         };
         let config = resolve_asr_config(&args);
+        assert_eq!(config.backend, "whisper-candle");
         assert_eq!(config.model, "base");
         assert_eq!(
             config.model_dir.as_deref(),
