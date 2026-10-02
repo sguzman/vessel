@@ -32,6 +32,14 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Guard against build-time sherpa downloader
+        shell: bash
+        run: |
+          if grep -Eq 'name = "sherpa-onnx(-sys)?"' Cargo.lock; then
+            echo "sherpa-onnx Cargo packages are forbidden: sherpa acquisition must remain explicit at runtime"
+            exit 1
+          fi
+
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
 
