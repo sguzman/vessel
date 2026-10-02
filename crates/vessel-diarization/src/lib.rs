@@ -128,7 +128,11 @@ impl DiarizationResult {
                     "speaker embedding {speaker:?} contains non-finite values"
                 )));
             }
-            let norm = embedding.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let norm = embedding
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
             if norm <= f64::EPSILON {
                 return Err(diarization_error(format!(
                     "speaker embedding {speaker:?} has zero norm"
@@ -259,10 +263,7 @@ impl SherpaOnnxDiarizer {
             },
             embedding: embedding_config.clone(),
             clustering: FastClusteringConfig {
-                num_clusters: config
-                    .num_speakers
-                    .map(|value| value as i32)
-                    .unwrap_or(-1),
+                num_clusters: config.num_speakers.map(|value| value as i32).unwrap_or(-1),
                 threshold: config.clustering_threshold,
             },
             min_duration_on: config.min_duration_on,
@@ -280,9 +281,13 @@ impl SherpaOnnxDiarizer {
             diarization_error("failed to initialize sherpa-onnx offline speaker diarization")
         })?;
         let embedding_extractor = if config.speaker_embeddings {
-            Some(SpeakerEmbeddingExtractor::create(&embedding_config).ok_or_else(|| {
-                diarization_error("failed to initialize sherpa-onnx speaker embedding extractor")
-            })?)
+            Some(
+                SpeakerEmbeddingExtractor::create(&embedding_config).ok_or_else(|| {
+                    diarization_error(
+                        "failed to initialize sherpa-onnx speaker embedding extractor",
+                    )
+                })?,
+            )
         } else {
             None
         };
@@ -367,10 +372,8 @@ impl SherpaOnnxDiarizer {
                     continue;
                 }
                 if let Some(embedding) = extractor.compute(&stream) {
-                    speaker_embeddings.insert(
-                        label,
-                        embedding.into_iter().map(f64::from).collect(),
-                    );
+                    speaker_embeddings
+                        .insert(label, embedding.into_iter().map(f64::from).collect());
                 }
             }
         }
@@ -401,8 +404,9 @@ pub fn persist_speaker_evidence(
     fs::create_dir_all(evidence_dir)?;
     let path = evidence_dir.join(format!("{}.json", evidence.video_id));
     let temp = evidence_dir.join(format!("{}.json.tmp", evidence.video_id));
-    let rendered = serde_json::to_vec_pretty(evidence)
-        .map_err(|error| diarization_error(format!("speaker evidence serialization failed: {error}")))?;
+    let rendered = serde_json::to_vec_pretty(evidence).map_err(|error| {
+        diarization_error(format!("speaker evidence serialization failed: {error}"))
+    })?;
     fs::write(&temp, rendered)?;
     fs::rename(&temp, &path)?;
     Ok(path)
@@ -470,9 +474,7 @@ fn diarization_error(message: impl Into<String>) -> VesselError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vessel_core::{
-        TranscriptDerivation, TranscriptSegment,
-    };
+    use vessel_core::{TranscriptDerivation, TranscriptSegment};
 
     fn synthetic_result() -> DiarizationResult {
         DiarizationResult {
