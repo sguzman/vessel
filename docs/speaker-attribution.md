@@ -18,7 +18,7 @@ Current:
 
 - `whisper-candle`: Rust-native Whisper backend
 
-Planned:
+Implemented:
 
 - `whisperx`: external/optional pipeline using faster-whisper, forced alignment, and pyannote diarization
 - `phonon-2`: fast English CPU-oriented backend
@@ -142,3 +142,37 @@ Long-running stages must emit progress or heartbeat information. A silent multi-
 6. add cross-video embedding matching with explicit confidence/provenance
 7. add Phonon-2 as the fast English ASR backend
 8. evaluate whether speaker-aware body rendering should become default or remain optional
+
+
+## Implemented Operational Evidence
+
+When WhisperX runs with diarization, Vessel keeps compact non-corpus evidence under:
+
+```text
+.cache/vessel/speaker-evidence/<video-id>.json
+```
+
+The evidence survives cleanup of the temporary ASR media directory and records:
+
+- file-local diarization labels and time ranges
+- ASR engine/model
+- diarization engine/model
+- speaker embeddings when explicitly requested
+
+It does not contain a durable speaker identity assignment.
+
+Durable identity lives in:
+
+```text
+sources/youtube/<source-key>/speakers.toml
+```
+
+Current commands:
+
+```text
+vessel speakers init --sourcearium <root> --source-key <key>
+vessel speakers show --sourcearium <root> --source-key <key>
+vessel speakers anchor --sourcearium <root> --source-key <key> --speaker creator --video-id <id> --start-seconds <n> --end-seconds <n>
+```
+
+The next matching layer will compare file-local embeddings against embeddings supported by these human-confirmed anchor ranges. Similarity is evidence; it will not be silently promoted to identity without an explicit calibrated attribution rule.
