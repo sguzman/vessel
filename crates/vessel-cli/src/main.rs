@@ -166,6 +166,7 @@ struct AsrCommand {
 enum AsrSubcommand {
     Models,
     Fetch(AsrFetchArgs),
+    Doctor(AsrDoctorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -176,6 +177,18 @@ struct AsrFetchArgs {
     model: Option<String>,
     #[arg(long)]
     executable: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct AsrDoctorArgs {
+    #[arg(long, default_value = "whisper-candle")]
+    backend: String,
+    #[arg(long)]
+    executable: Option<PathBuf>,
+    #[arg(long = "model-dir")]
+    model_dir: Option<PathBuf>,
+    #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
+    hf_token_env: String,
 }
 
 #[derive(Debug, Args)]
@@ -486,6 +499,7 @@ async fn main() -> Result<()> {
         Commands::Asr(cmd) => match cmd.command {
             AsrSubcommand::Models => asr_models(),
             AsrSubcommand::Fetch(args) => asr_fetch(args),
+            AsrSubcommand::Doctor(args) => asr_doctor(args),
         },
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
@@ -510,7 +524,7 @@ fn asr_models() -> Result<()> {
         "backends": [
             {
                 "name": vessel_asr::WHISPER_CANDLE_ENGINE_NAME,
-                "status": "available",
+                "status": "implemented",
                 "default_model": "small",
                 "models": vessel_asr::WHISPER_MODEL_NAMES,
                 "languages": "multilingual",
@@ -519,7 +533,7 @@ fn asr_models() -> Result<()> {
             },
             {
                 "name": vessel_asr::PHONON2_BACKEND_NAME,
-                "status": "available",
+                "status": "implemented",
                 "default_model": "phonon-2",
                 "models": vessel_asr::PHONON_MODEL_NAMES,
                 "languages": ["en"],
@@ -528,7 +542,7 @@ fn asr_models() -> Result<()> {
             },
             {
                 "name": vessel_asr::WHISPERX_BACKEND_NAME,
-                "status": "available",
+                "status": "implemented",
                 "default_model": "large-v3",
                 "languages": "multilingual",
                 "offline_model_dir": true,
@@ -536,6 +550,90 @@ fn asr_models() -> Result<()> {
             }
         ]
     });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn asr_doctor(args: AsrDoctorArgs) -> Result<()> {
+    let model_dir = args.model_dir.as_ref().map(|path| {
+        serde_json::json!({
+            "path": path,
+            "exists": path.exists(),
+            "is_directory": path.is_dir(),
+        })
+    });
+
+    let report = match args.backend.as_str() {
+        vessel_asr::WHISPER_CANDLE_ENGINE_NAME => serde_json::json!({
+            "backend": args.backend,
+            "implemented": true,
+            "built_in": true,
+            "executable_required": false,
+            "executable_available": true,
+            "model_dir": model_dir,
+            "ready_for_transcription": args
+                .model_dir
+                .as_ref()
+                .is_none_or(|path| path.is_dir()),
+            "ready_for_diarization": false,
+        }),
+        vessel_asr::PHONON2_BACKEND_NAME => {
+            let executable = args
+                .executable
+                .unwrap_or_else(|| PathBuf::from("fermion"));
+            let executable_available = Command::new(&executable)
+                .arg("--help")
+                .output()
+                .is_ok_and(|output| output.status.success());
+            serde_json::json!({
+                "backend": args.backend,
+                "implemented": true,
+                "built_in": false,
+                "executable": executable,
+                "executable_available": executable_available,
+                "model_dir": model_dir,
+                "ready_for_transcription": executable_available
+                    && args.model_dir.as_ref().is_none_or(|path| path.is_dir()),
+                "ready_for_diarization": false,
+            })
+        }
+        vessel_asr::WHISPERX_BACKEND_NAME => {
+            let executable = args
+                .executable
+                .unwrap_or_else(|| PathBuf::from("whisperx"));
+            let executable_available = Command::new(&executable)
+                .arg("--help")
+                .output()
+                .is_ok_and(|output| output.status.success());
+            let hf_token_present = std::env::var(&args.hf_token_env)
+                .is_ok_and(|value| !value.trim().is_empty());
+            serde_json::json!({
+                "backend": args.backend,
+                "implemented": true,
+                "built_in": false,
+                "executable": executable,
+                "executable_available": executable_available,
+                "model_dir": model_dir,
+                "hf_token_env": args.hf_token_env,
+                "hf_token_present": hf_token_present,
+                "ready_for_transcription": executable_available
+                    && args.model_dir.as_ref().is_none_or(|path| path.is_dir()),
+                "ready_for_diarization": executable_available
+                    && hf_token_present
+                    && args.model_dir.as_ref().is_none_or(|path| path.is_dir()),
+            })
+        }
+        other => {
+            return Err(VesselError::Config(format!(
+                "unsupported ASR backend {other:?}"
+            )));
+        }
+    };
+
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
