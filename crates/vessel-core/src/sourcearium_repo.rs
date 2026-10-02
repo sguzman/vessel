@@ -1271,22 +1271,18 @@ input = "https://www.youtube.com/@{key}"
             }],
         };
 
-        let first =
-            apply_speaker_match_report(&source, &video.video_id, &report).expect("apply attribution");
+        let first = apply_speaker_match_report(&source, &video.video_id, &report)
+            .expect("apply attribution");
         assert!(first.updated);
         assert_eq!(first.assignments, 1);
         assert_eq!(first.registry_revision, 4);
 
         let annotated = fs::read_to_string(&materialized.path).unwrap();
-        let (artifact, annotated_body) =
-            SourceariumArtifactV1::parse_markdown(&annotated).unwrap();
+        let (artifact, annotated_body) = SourceariumArtifactV1::parse_markdown(&annotated).unwrap();
         assert_eq!(annotated_body, original_body);
         assert!(annotated_body.contains("<speaker:SPEAKER_00>"));
         let attribution = &artifact.extensions["speaker_attribution"];
-        assert_eq!(
-            attribution["method"].as_str(),
-            Some("embedding_cosine")
-        );
+        assert_eq!(attribution["method"].as_str(), Some("embedding_cosine"));
         assert_eq!(attribution["registry_revision"].as_integer(), Some(4));
         let assignments = attribution["assignments"].as_array().unwrap();
         assert_eq!(assignments.len(), 1);
@@ -1403,7 +1399,11 @@ input = "https://www.youtube.com/@{key}"
 
         let error = apply_speaker_match_report(&source, &video.video_id, &report)
             .expect_err("mismatched provenance must fail");
-        assert!(error.to_string().contains("does not match artifact diarization"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match artifact diarization")
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }
