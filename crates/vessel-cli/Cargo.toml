@@ -9,6 +9,8 @@ name = "vessel"
 path = "src/main.rs"
 
 [dependencies]
+bzip2.workspace = true
+tar.workspace = true
 blake3.workspace = true
 clap.workspace = true
 reqwest.workspace = true
