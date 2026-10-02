@@ -349,8 +349,8 @@ type AcceptWaveform = unsafe extern "C" fn(*const OnlineStream, i32, *const f32,
 type InputFinished = unsafe extern "C" fn(*const OnlineStream);
 
 struct SherpaApi {
-    _dependencies: Vec<DynamicLibrary>,
     _main: DynamicLibrary,
+    _dependencies: Vec<DynamicLibrary>,
     create_diarizer: CreateDiarizer,
     destroy_diarizer: DestroyDiarizer,
     diarizer_sample_rate: DiarizerSampleRate,
@@ -421,8 +421,8 @@ impl SherpaApi {
                 destroy_online_stream: main.symbol("SherpaOnnxDestroyOnlineStream")?,
                 accept_waveform: main.symbol("SherpaOnnxOnlineStreamAcceptWaveform")?,
                 input_finished: main.symbol("SherpaOnnxOnlineStreamInputFinished")?,
-                _dependencies: dependencies,
                 _main: main,
+                _dependencies: dependencies,
             })
         }
     }
