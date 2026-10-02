@@ -86,10 +86,11 @@ Before implementation:
 1. Read `docs/charter.md`.
 2. Read both Sourcearium contracts for corpus-facing work.
 3. Read `docs/youtube-access.md` before changing YouTube authentication, player-client, cookie, or PO-token behavior.
-4. Read the relevant roadmap milestone.
-5. State the bounded implementation target.
-6. Identify durable Sourcearium semantics versus Vessel operational state.
-7. Preserve unrelated working capabilities.
+4. Read `docs/speaker-attribution.md` before changing ASR backends, diarization, speaker embeddings, or cross-video identity behavior.
+5. Read the relevant roadmap milestone.
+6. State the bounded implementation target.
+7. Identify durable Sourcearium semantics versus Vessel operational state.
+8. Preserve unrelated working capabilities.
 
 ## Engineering Rules
 
