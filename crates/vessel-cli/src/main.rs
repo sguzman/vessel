@@ -16,7 +16,7 @@ use vessel_core::{
     apply_sourcearium_prune, apply_speaker_match_report, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
-    plan_sourcearium_prune,
+    plan_sourcearium_prune, render_speaker_attributed_transcript,
     resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
@@ -183,6 +183,7 @@ enum SpeakersSubcommand {
     Anchor(SpeakerAnchorArgs),
     Match(SpeakerMatchArgs),
     Apply(SpeakerMatchArgs),
+    Render(SpeakerRenderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -237,6 +238,18 @@ struct SpeakerMatchArgs {
     min_margin: f64,
     #[arg(long = "min-anchor-dominance", default_value_t = 0.80)]
     min_anchor_dominance: f64,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerRenderArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "show-clusters")]
+    show_clusters: bool,
 }
 
 #[derive(Debug, Args)]
@@ -472,6 +485,7 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
             SpeakersSubcommand::Apply(args) => speakers_apply(args),
+            SpeakersSubcommand::Render(args) => speakers_render(args),
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
@@ -701,6 +715,20 @@ fn speakers_apply(args: SpeakerMatchArgs) -> Result<()> {
     );
     Ok(())
 }
+fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let source = discover_youtube_sources(&root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == args.source_key)
+        .ok_or_else(|| {
+            VesselError::Corpus(format!("unknown YouTube source key {:?}", args.source_key))
+        })?;
+    let rendered =
+        render_speaker_attributed_transcript(&source, &args.video_id, args.show_clusters)?;
+    print!("{rendered}");
+    Ok(())
+}
+
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
