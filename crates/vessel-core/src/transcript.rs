@@ -221,7 +221,9 @@ fn require_nonempty(field: &str, value: Option<&str>) -> Result<()> {
 
 fn validate_optional_nonempty(field: &str, value: Option<&str>) -> Result<()> {
     if value.is_some_and(|value| value.trim().is_empty()) {
-        return Err(corpus_error(format!("{field} must not be empty when present")));
+        return Err(corpus_error(format!(
+            "{field} must not be empty when present"
+        )));
     }
     Ok(())
 }
