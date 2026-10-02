@@ -207,15 +207,18 @@ Optional compatibility backend:
 
 This means `whisper-candle + sherpa-onnx` and `phonon-2 + sherpa-onnx` are both valid pipelines. A diarization backend must never dictate which ASR engine produced the transcript.
 
-Rust-native diarization model workflow:
+Rust-native diarization acquisition workflow:
 
 ```text
 vessel diarization models
+vessel diarization fetch --plan
 vessel diarization fetch
 vessel diarization doctor
 ```
 
-`vessel diarization fetch` is the only Vessel-managed network acquisition step for the primary sherpa path. It explicitly downloads both the platform-native sherpa/ONNX Runtime bundle and the official Pyannote segmentation + 3D-Speaker embedding model pair into durable user data with visible progress.
+`vessel diarization fetch --plan` performs zero network I/O and prints the exact runtime/model URLs, target paths, expected byte counts, and whether each artifact is already available.
+
+`vessel diarization fetch` is the only Vessel-managed network acquisition step for the primary sherpa path. It explicitly downloads both the platform-native sherpa/ONNX Runtime bundle and the official Pyannote segmentation + 3D-Speaker embedding model pair into durable user data with visible progress. Downloads use resumable `.download` partials and exact expected-size validation before installation. On Linux x86_64 the current explicit payload is about 53.5 MiB total: about 9.1 MiB native runtime, 6.6 MiB segmentation archive, and 37.8 MiB speaker-embedding model.
 
 Vessel does not depend on the `sherpa-onnx` or `sherpa-onnx-sys` Cargo crates. `cargo build` therefore does not run sherpa's downloader or fetch sherpa native runtime/model artifacts. At execution time Vessel dynamically loads the already-fetched sherpa C runtime from the user-data directory. If the runtime or models are missing, `--diarize` fails with an explicit instruction to run `vessel diarization fetch`; it does not silently download them.
 
