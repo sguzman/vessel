@@ -593,17 +593,17 @@ const SHERPA_EMBEDDING_FILENAME: &str =
     "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
 fn default_diarization_model_root() -> PathBuf {
-    let cache = env::var_os("XDG_CACHE_HOME")
+    let data_root = env::var_os("XDG_DATA_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             env::var_os("HOME")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
-                .map(|home| home.join(".cache"))
+                .map(|home| home.join(".local").join("share"))
         })
-        .unwrap_or_else(|| PathBuf::from(".cache"));
-    cache
+        .unwrap_or_else(|| PathBuf::from(".local/share"));
+    data_root
         .join("vessel")
         .join("models")
         .join("diarization")
