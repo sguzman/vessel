@@ -573,7 +573,10 @@ pub fn materialize_youtube_transcript(
             toml::Value::String("file_local".into()),
         );
         if let Some(revision) = diarization.registry_revision {
-            table.insert("registry_revision".into(), toml::Value::Integer(revision as i64));
+            table.insert(
+                "registry_revision".into(),
+                toml::Value::Integer(revision as i64),
+            );
         }
         extensions.insert("diarization".into(), table);
     }
