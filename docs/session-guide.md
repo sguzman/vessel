@@ -139,6 +139,11 @@ The following are already implemented and CI-tested:
 - creator-subtitle and automatic-caption provider path
 - pure-Rust Candle/Whisper local ASR fallback
 - CPU-first ASR with lazy model reuse
+- pluggable local-ASR backend boundary
+- Phonon-2 CLI backend with runtime engine/model provenance
+- explicit ASR model catalog/prefetch commands
+- offline model-directory and external-backend executable overrides
+- long-running ASR heartbeat/progress output
 - Sourcearium materializer with atomic replacement and downgrade protection
 - offline `vessel validate`
 - offline `vessel inventory`
@@ -171,18 +176,29 @@ Required provenance for every local-ASR artifact:
 
 A transcript produced by one backend/model must never be presented as if another backend/model produced it.
 
-Current backend:
+Current backends:
 
 - `whisper-candle`: pure-Rust Whisper, multilingual, timestamp-capable, CPU-first
+- `phonon-2`: Fermion Research CLI backend, English-only fast path, JSON segment timestamps, live stderr progress, local model-directory support
 
 Planned backend:
 
-- Phonon-2 / Fermion Research: English-only fast path, substantially smaller/faster on CPU, with no claim that it replaces Whisper for multilingual, translation, or timestamp-rich work
+- `whisperx`: optional faster-whisper/alignment/diarization pipeline; reserved but not yet executable through Vessel
 
-Model acquisition must support both:
+Model acquisition supports both:
 
 1. automatic first-use download/cache when network access is acceptable
 2. explicit offline/local model paths when the model has been downloaded ahead of time
+
+Operational model commands:
+
+```text
+vessel asr models
+vessel asr fetch --backend whisper-candle --model small
+vessel asr fetch --backend phonon-2
+```
+
+`vessel asr fetch` prints the exact local model directory. Reuse it later with `vessel update --asr-model-dir <directory>`. Phonon can also use `--asr-executable <path>` for an explicitly selected virtual-environment binary.
 
 Long-running ASR work must never be silent. At minimum Vessel must report model loading, audio normalization, transcription start, transcription progress when the backend exposes it, and completion/error.
 
