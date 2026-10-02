@@ -7,12 +7,129 @@ use serde_json::Value;
 use vessel_core::{
     Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
 };
-use whisper_core::{TranscribeOptions, WhisperModel, device, load_model, transcribe_file};
+use whisper_core::{
+    TranscribeOptions, WhisperModel, WhichModel, device, fetch_model as fetch_whisper_model,
+    load_model, transcribe_file,
+};
 
 pub const WHISPER_CANDLE_ENGINE_NAME: &str = "whisper-candle";
 pub const PHONON2_BACKEND_NAME: &str = "phonon-2";
 pub const PHONON_ENGINE_NAME: &str = "fermion-phonon";
 pub const ENGINE_NAME: &str = WHISPER_CANDLE_ENGINE_NAME;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsrModelLocation {
+    pub backend: String,
+    pub model: String,
+    pub directory: PathBuf,
+}
+
+pub fn default_model_for_backend(backend: &str) -> Result<&'static str> {
+    match backend {
+        WHISPER_CANDLE_ENGINE_NAME => Ok("small"),
+        PHONON2_BACKEND_NAME => Ok("phonon-2"),
+        "whisperx" => Ok("large-v3"),
+        other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
+    }
+}
+
+pub fn fetch_asr_model(
+    backend: &str,
+    model: Option<&str>,
+    executable: Option<&Path>,
+) -> Result<AsrModelLocation> {
+    let model = model.unwrap_or(default_model_for_backend(backend)?);
+
+    match backend {
+        WHISPER_CANDLE_ENGINE_NAME => {
+            let which: WhichModel = model.parse().map_err(|error| {
+                asr_error(format!("invalid Whisper model {model:?}: {error}"))
+            })?;
+            eprintln!("[asr] model download/cache check started backend={backend} model={model}");
+            let files = fetch_whisper_model(which).map_err(|error| {
+                asr_error(format!("failed to fetch Whisper model {model:?}: {error}"))
+            })?;
+            let config_dir = files.config.parent().ok_or_else(|| {
+                asr_error("Whisper config path has no parent directory")
+            })?;
+            let weights_dir = files.weights.parent().ok_or_else(|| {
+                asr_error("Whisper weights path has no parent directory")
+            })?;
+            if config_dir != weights_dir {
+                return Err(asr_error(format!(
+                    "Whisper model files landed in different directories: {} and {}",
+                    config_dir.display(),
+                    weights_dir.display()
+                )));
+            }
+            eprintln!(
+                "[asr] model available backend={} model={} directory={}",
+                backend,
+                model,
+                config_dir.display()
+            );
+            Ok(AsrModelLocation {
+                backend: backend.to_owned(),
+                model: model.to_owned(),
+                directory: config_dir.to_path_buf(),
+            })
+        }
+        PHONON2_BACKEND_NAME => {
+            let executable = executable.unwrap_or_else(|| Path::new("fermion"));
+            eprintln!(
+                "[asr] model download/cache check started backend={} model={} executable={}",
+                backend,
+                model,
+                executable.display()
+            );
+            let output = Command::new(executable)
+                .arg("transcribe")
+                .arg(model)
+                .arg("--download-only")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .output()
+                .map_err(|error| {
+                    asr_error(format!(
+                        "failed to start Phonon CLI {:?}: {error}; install fermion-research or pass an explicit executable",
+                        executable
+                    ))
+                })?;
+            if !output.status.success() {
+                return Err(asr_error(format!(
+                    "Phonon model download failed with status {}",
+                    output.status
+                )));
+            }
+            let stdout = String::from_utf8(output.stdout).map_err(|error| {
+                asr_error(format!("Phonon download output was not UTF-8: {error}"))
+            })?;
+            let directory = PathBuf::from(stdout.trim());
+            if stdout.trim().is_empty() || !directory.is_dir() {
+                return Err(asr_error(format!(
+                    "Phonon download did not return a valid model directory: {:?}",
+                    stdout.trim()
+                )));
+            }
+            eprintln!(
+                "[asr] model available backend={} model={} directory={}",
+                backend,
+                model,
+                directory.display()
+            );
+            Ok(AsrModelLocation {
+                backend: backend.to_owned(),
+                model: model.to_owned(),
+                directory,
+            })
+        }
+        "whisperx" => Err(asr_error(
+            "ASR backend "whisperx" model fetching is reserved but not implemented yet",
+        )),
+        other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsrConfig {
@@ -472,6 +589,20 @@ fn asr_error(message: impl Into<String>) -> VesselError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_default_models_are_explicit() {
+        assert_eq!(
+            default_model_for_backend(WHISPER_CANDLE_ENGINE_NAME).unwrap(),
+            "small"
+        );
+        assert_eq!(
+            default_model_for_backend(PHONON2_BACKEND_NAME).unwrap(),
+            "phonon-2"
+        );
+        assert_eq!(default_model_for_backend("whisperx").unwrap(), "large-v3");
+        assert!(default_model_for_backend("unknown").is_err());
+    }
 
     #[test]
     fn loaded_backend_is_safe_to_move_to_blocking_worker() {
