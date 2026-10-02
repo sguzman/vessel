@@ -197,13 +197,19 @@ Model acquisition supports both:
 1. automatic first-use download/cache when network access is acceptable
 2. explicit offline/local model paths when the model has been downloaded ahead of time
 
-Operational model commands:
+Operational model and preflight commands:
 
 ```text
 vessel asr models
+vessel asr doctor --backend whisperx
+vessel asr doctor --backend phonon-2
 vessel asr fetch --backend whisper-candle --model small
 vessel asr fetch --backend phonon-2
 ```
+
+`vessel asr models` reports what Vessel implements, not what is installed on the current machine.
+
+`vessel asr doctor` checks local runtime readiness without starting a transcription. For external backends it probes the executable, optional model directory, and (for WhisperX diarization) only whether the configured Hugging Face token environment variable is present. It never prints the token value.
 
 `vessel asr fetch` prints the exact local model directory. Reuse it later with `vessel update --asr-model-dir <directory>`. Phonon can also use `--asr-executable <path>` for an explicitly selected virtual-environment binary.
 
