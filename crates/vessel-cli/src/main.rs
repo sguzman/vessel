@@ -122,6 +122,8 @@ struct UpdateArgs {
     max_speakers: Option<usize>,
     #[arg(long = "speaker-embeddings")]
     speaker_embeddings: bool,
+    #[arg(long = "attribute-speakers")]
+    attribute_speakers: bool,
     #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
     hf_token_env: String,
     #[arg(long = "upgrade-check-days", default_value_t = 30)]
@@ -732,6 +734,19 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
+    if args.attribute_speakers {
+        if asr_config.backend != vessel_asr::WHISPERX_BACKEND_NAME {
+            return Err(VesselError::Config(
+                "--attribute-speakers requires --asr-backend whisperx".into(),
+            ));
+        }
+        if !asr_config.diarize || !asr_config.speaker_embeddings {
+            return Err(VesselError::Config(
+                "--attribute-speakers requires --diarize and --speaker-embeddings".into(),
+            ));
+        }
+    }
+    let speaker_match_config = SpeakerMatchConfig::default();
     let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
@@ -782,6 +797,11 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "caption_access_degraded": 0,
             "caption_empty_response_tracks": 0,
             "unresolved_no_provider": 0,
+            "speaker_attribution_attempted": 0,
+            "speaker_attribution_assignments": 0,
+            "speaker_attribution_updated": 0,
+            "speaker_attribution_unchanged": 0,
+            "speaker_attribution_skipped": 0,
             "errors": [],
         });
         if report_items {
@@ -794,6 +814,40 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             source_reports.push(summary);
             continue;
         }
+
+        let speaker_registry = if args.attribute_speakers {
+            let registry_path = source.source_dir.join("speakers.toml");
+            match load_speaker_registry(&registry_path) {
+                Ok(Some(registry)) => Some(registry),
+                Ok(None) => {
+                    summary["status"] =
+                        serde_json::Value::String("speaker_registry_missing".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({
+                            "message": format!(
+                                "speaker registry does not exist: {}",
+                                registry_path.display()
+                            ),
+                        }));
+                    source_reports.push(summary);
+                    continue;
+                }
+                Err(error) => {
+                    summary["status"] =
+                        serde_json::Value::String("speaker_registry_invalid".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                    source_reports.push(summary);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
 
         let channel_input = parse_sourcearium_channel_input(&policy.channel.input)?;
         let channel = match extract_channel(&channel_input).await {
@@ -1323,6 +1377,12 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 &candidate,
             ) {
                 Ok(result) => {
+                    let speaker_attribution_eligible = matches!(
+                        result.status,
+                        MaterializeStatus::Created
+                            | MaterializeStatus::Updated
+                            | MaterializeStatus::Unchanged
+                    ) && candidate.diarization.is_some();
                     let materialize_action = match result.status {
                         MaterializeStatus::Created => {
                             increment_summary(&mut summary, "created", 1);
@@ -1362,6 +1422,90 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     {
                         Ok(()) => increment_summary(&mut summary, "upgrade_checks_completed", 1),
                         Err(error) => push_update_error(&mut summary, &video.video_id, error),
+                    }
+
+                    if args.attribute_speakers {
+                        if speaker_attribution_eligible {
+                            increment_summary(&mut summary, "speaker_attribution_attempted", 1);
+                            let registry = speaker_registry
+                                .as_ref()
+                                .expect("speaker registry prevalidated");
+                            let evidence_dir = sourcearium_root
+                                .join(".cache")
+                                .join("vessel")
+                                .join("speaker-evidence");
+                            match match_speakers_from_evidence(
+                                registry,
+                                &evidence_dir,
+                                &video.video_id,
+                                speaker_match_config,
+                            ) {
+                                Ok(match_report) => {
+                                    let assignments = match_report
+                                        .matches
+                                        .iter()
+                                        .filter(|item| {
+                                            item.status
+                                                == vessel_core::SpeakerMatchStatus::Matched
+                                        })
+                                        .count();
+                                    increment_summary(
+                                        &mut summary,
+                                        "speaker_attribution_assignments",
+                                        assignments,
+                                    );
+                                    match apply_speaker_match_report(
+                                        &source,
+                                        &video.video_id,
+                                        &match_report,
+                                    ) {
+                                        Ok(application) => {
+                                            increment_summary(
+                                                &mut summary,
+                                                if application.updated {
+                                                    "speaker_attribution_updated"
+                                                } else {
+                                                    "speaker_attribution_unchanged"
+                                                },
+                                                1,
+                                            );
+                                            push_update_item(
+                                                &mut summary,
+                                                report_items,
+                                                &video.video_id,
+                                                "speaker_attribution",
+                                                serde_json::json!({
+                                                    "assignments": application.assignments,
+                                                    "updated": application.updated,
+                                                    "registry_revision": application.registry_revision,
+                                                }),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            push_update_error(
+                                                &mut summary,
+                                                &video.video_id,
+                                                error,
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    push_update_error(&mut summary, &video.video_id, error);
+                                }
+                            }
+                        } else {
+                            increment_summary(&mut summary, "speaker_attribution_skipped", 1);
+                            push_update_item(
+                                &mut summary,
+                                report_items,
+                                &video.video_id,
+                                "speaker_attribution_skipped",
+                                serde_json::json!({
+                                    "reason": "materialized representation has no applicable diarization",
+                                }),
+                            );
+                        }
                     }
 
                     if let Some(cache_dir) = asr_cache_dir {
@@ -1423,6 +1567,12 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "preview": args.preview,
         "limit_reached": limit_reached,
         "local_asr_implemented": true,
+        "speaker_attribution": {
+            "enabled": args.attribute_speakers,
+            "min_similarity": speaker_match_config.min_similarity,
+            "min_margin": speaker_match_config.min_margin,
+            "min_anchor_dominance": speaker_match_config.min_anchor_dominance,
+        },
         "asr": {
             "engine": asr_config.backend,
             "model": asr_config.model,
@@ -3671,6 +3821,7 @@ mod tests {
             min_speakers: Some(1),
             max_speakers: Some(3),
             speaker_embeddings: true,
+            attribute_speakers: false,
             hf_token_env: "TEST_HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3714,6 +3865,7 @@ mod tests {
             min_speakers: None,
             max_speakers: None,
             speaker_embeddings: false,
+            attribute_speakers: false,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -3741,6 +3893,7 @@ mod tests {
             min_speakers: None,
             max_speakers: None,
             speaker_embeddings: false,
+            attribute_speakers: false,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
