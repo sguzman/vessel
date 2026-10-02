@@ -5055,13 +5055,42 @@ mod tests {
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
-        resolve_asr_config, resolve_configured_channels, resolve_diarization_config,
-        transcript_upgrade_probe_due, validate_update_speaker_attribution,
-        verify_integrity_receipt, write_integrity_receipt,
+        install_staged_directory, resolve_asr_config, resolve_configured_channels,
+        resolve_diarization_config, transcript_upgrade_probe_due,
+        validate_update_speaker_attribution, verify_integrity_receipt,
+        write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
+
+    #[test]
+    fn staged_directory_install_replaces_live_tree_only_after_stage_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-staged-install-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("staged install temp root");
+
+        let live = root.join("live");
+        let staging = root.join("staging");
+        fs::create_dir_all(&live).expect("live dir");
+        fs::create_dir_all(&staging).expect("staging dir");
+        fs::write(live.join("version.txt"), b"old").expect("old live content");
+        fs::write(staging.join("version.txt"), b"new").expect("new staged content");
+
+        install_staged_directory(&staging, &live).expect("install staged directory");
+
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read_to_string(live.join("version.txt")).expect("installed content"),
+            "new"
+        );
+        assert!(!root.join(".live.previous").exists());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn diarization_integrity_receipt_detects_post_fetch_corruption() {
