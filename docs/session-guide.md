@@ -145,7 +145,8 @@ The following are already implemented and CI-tested:
 - offline model-directory and external-backend executable overrides
 - long-running ASR heartbeat/progress output
 - versioned per-source speaker registries with human-confirmed anchors
-- persisted WhisperX speaker-evidence sidecars
+- Rust-native sherpa-onnx diarization with file-local speaker labels and embeddings
+- backend-neutral persisted speaker-evidence sidecars
 - read-only cross-video cosine speaker matching with threshold/margin gates
 - non-destructive Sourcearium speaker-attribution metadata application
 - speaker-attributed transcript projection without canonical-body mutation
@@ -186,11 +187,35 @@ Current backends:
 - `whisper-candle`: pure-Rust Whisper, multilingual, timestamp-capable, CPU-first
 - `phonon-2`: Fermion Research CLI backend, English-only fast path, JSON segment timestamps, live stderr progress, local model-directory support
 
-Current optional external backend:
+Current optional external ASR backend:
 
-- `whisperx`: faster-whisper + forced alignment + optional pyannote diarization, file-local speaker labels, optional speaker embeddings, live progress, and offline cache-only model-directory support
+- `whisperx`: faster-whisper + forced alignment + optional bundled diarization/alignment behavior when explicitly selected
 
-WhisperX is executable through Vessel when the external `whisperx` CLI is installed. Diarization identity remains unresolved until speaker-registry evidence is applied.
+WhisperX remains a compatibility backend and may require Python. It is not a prerequisite for normal Vessel operation.
+
+### Diarization Is Independent From ASR
+
+Speaker diarization is a separate operational stage from speech recognition.
+
+Primary backend:
+
+- `sherpa-onnx`: Rust API, offline speaker diarization, Pyannote segmentation ONNX + speaker-embedding ONNX, CPU-first, no Python runtime
+
+Optional compatibility backend:
+
+- `whisperx`: external Python CLI path retained for users who explicitly want that pipeline
+
+This means `whisper-candle + sherpa-onnx` and `phonon-2 + sherpa-onnx` are both valid pipelines. A diarization backend must never dictate which ASR engine produced the transcript.
+
+Rust-native diarization model workflow:
+
+```text
+vessel diarization models
+vessel diarization fetch
+vessel diarization doctor
+```
+
+`vessel diarization fetch` downloads the official sherpa-onnx Pyannote segmentation and 3D-Speaker embedding model pair into the user cache with visible progress. Normal `--diarize` runs reuse those cached files automatically; explicit local model paths remain supported for fully manual/offline layouts.
 
 Model acquisition supports both:
 
@@ -223,14 +248,14 @@ The architecture is no longer the main uncertainty.
 
 Highest-value next steps:
 
-1. validate Phonon-2 and WhisperX backends on the actual target machine
-2. create the first human-confirmed ContraPoints voice anchor from a clean creator-only range
-3. validate `speakers match`, `speakers apply`, and `speakers render` against real WhisperX embeddings
-4. integrate optional speaker attribution into bounded `vessel update` runs after real-match calibration
-5. rerun the same target and verify no-op Git behavior
-6. expand to a small bounded batch
-7. exercise prune planning against a deliberate real policy change
-8. decide whether native YouTube PO-token support is worth adding for caption-body acquisition
+1. validate Rust-native sherpa-onnx diarization on the actual target machine
+2. validate at least one ASR/diarization combination without Python
+3. create the first human-confirmed ContraPoints voice anchor from a clean creator-only range
+4. validate `speakers match`, `speakers apply`, and `speakers render` against real sherpa speaker embeddings
+5. calibrate matching thresholds from real repeated creator/guest samples
+6. rerun the same target and verify no-op Git behavior
+7. expand to a small bounded batch
+8. keep WhisperX as optional future compatibility rather than a required dependency
 
 The residential `--preview --max-videos 3` acceptance is complete. Player/media acquisition works on the target network; current direct caption-body access is degraded by empty `timedtext` responses, so the sampled videos resolve to ASR fallback while retaining the caption-access diagnostic.
 
