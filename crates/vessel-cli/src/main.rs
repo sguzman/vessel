@@ -426,8 +426,8 @@ fn asr_models() -> Result<()> {
                 "diarization": false,
             },
             {
-                "name": "whisperx",
-                "status": "planned",
+                "name": vessel_asr::WHISPERX_BACKEND_NAME,
+                "status": "available",
                 "default_model": "large-v3",
                 "languages": "multilingual",
                 "offline_model_dir": true,
@@ -1234,8 +1234,12 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     let mut config = AsrConfig::default();
     if let Some(backend) = args.asr_backend.as_deref() {
         config.backend = backend.to_owned();
-        if args.asr_model.is_none() && backend == vessel_asr::PHONON2_BACKEND_NAME {
-            config.model = vessel_asr::PHONON2_BACKEND_NAME.to_owned();
+        if args.asr_model.is_none() {
+            config.model = match backend {
+                vessel_asr::PHONON2_BACKEND_NAME => vessel_asr::PHONON2_BACKEND_NAME.to_owned(),
+                vessel_asr::WHISPERX_BACKEND_NAME => "large-v3".to_owned(),
+                _ => config.model,
+            };
         }
     }
     if let Some(model) = args.asr_model.as_deref() {
@@ -3456,6 +3460,34 @@ mod tests {
         let config = resolve_asr_config(&args);
         assert_eq!(config.backend, "phonon-2");
         assert_eq!(config.model, "phonon-2");
+    }
+
+    #[test]
+    fn whisperx_backend_gets_large_v3_default_model() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("whisperx".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: true,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+        let config = resolve_asr_config(&args);
+        assert_eq!(config.backend, "whisperx");
+        assert_eq!(config.model, "large-v3");
+        assert!(config.diarize);
     }
 
     #[test]
