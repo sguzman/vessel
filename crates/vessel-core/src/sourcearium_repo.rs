@@ -7,8 +7,9 @@ use serde::Serialize;
 
 use crate::models::{ChannelMetadata, VideoMetadata};
 use crate::{
-    AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, TranscriptCandidate,
-    TranscriptDerivation, VesselError, VideoSelection, YoutubeSourcePolicyV1,
+    AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, SpeakerMatchReport,
+    SpeakerMatchStatus, TranscriptCandidate, TranscriptDerivation, VesselError, VideoSelection,
+    YoutubeSourcePolicyV1,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -503,6 +504,186 @@ pub fn load_youtube_transcript_artifact(
     let (artifact, _) = SourceariumArtifactV1::parse_markdown(&raw)
         .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
     Ok(Some(ExistingSourceariumArtifact { path, artifact }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpeakerAttributionApplyResult {
+    pub path: PathBuf,
+    pub updated: bool,
+    pub registry_revision: u64,
+    pub assignments: usize,
+}
+
+pub fn apply_speaker_match_report(
+    source: &SourceariumYoutubeSource,
+    video_id: &str,
+    report: &SpeakerMatchReport,
+) -> Result<SpeakerAttributionApplyResult> {
+    if report.target_video_id != video_id {
+        return Err(corpus_error(format!(
+            "speaker match report targets {:?}, not requested video {:?}",
+            report.target_video_id, video_id
+        )));
+    }
+
+    let artifact_id = format!("youtube:video:{video_id}:transcript");
+    let transcripts_dir = source.source_dir.join("transcripts");
+    let path = find_artifact_path(&transcripts_dir, &artifact_id)?.ok_or_else(|| {
+        corpus_error(format!(
+            "Sourcearium transcript artifact does not exist for video {video_id:?}"
+        ))
+    })?;
+    let raw = fs::read_to_string(&path)?;
+    let (mut artifact, body) = SourceariumArtifactV1::parse_markdown(&raw)
+        .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
+
+    if artifact.source.family != "youtube"
+        || artifact.source.kind != "video"
+        || artifact.source.id != video_id
+        || artifact.kind != "transcript"
+    {
+        return Err(corpus_error(format!(
+            "{} is not the expected YouTube transcript artifact for {video_id:?}",
+            path.display()
+        )));
+    }
+
+    let diarization = artifact.extensions.get("diarization").ok_or_else(|| {
+        corpus_error(format!(
+            "{} has no diarization extension; speaker identity cannot be applied",
+            path.display()
+        ))
+    })?;
+    let artifact_engine = diarization
+        .get("engine")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| corpus_error("diarization extension is missing engine"))?;
+    let artifact_model = diarization
+        .get("model")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| corpus_error("diarization extension is missing model"))?;
+
+    if artifact_engine != report.diarization_engine || artifact_model != report.diarization_model {
+        return Err(corpus_error(format!(
+            "speaker match provenance {}/{} does not match artifact diarization {}/{}",
+            report.diarization_engine,
+            report.diarization_model,
+            artifact_engine,
+            artifact_model
+        )));
+    }
+
+    let mut assignments = report
+        .matches
+        .iter()
+        .filter(|item| item.status == SpeakerMatchStatus::Matched)
+        .map(|item| {
+            let identity = item.best_identity.as_deref().ok_or_else(|| {
+                corpus_error(format!(
+                    "matched speaker {:?} is missing best_identity",
+                    item.diarization_label
+                ))
+            })?;
+            let similarity = item.similarity.ok_or_else(|| {
+                corpus_error(format!(
+                    "matched speaker {:?} is missing similarity",
+                    item.diarization_label
+                ))
+            })?;
+
+            let mut assignment = toml::Table::new();
+            assignment.insert(
+                "diarization_label".into(),
+                toml::Value::String(item.diarization_label.clone()),
+            );
+            assignment.insert("identity".into(), toml::Value::String(identity.to_owned()));
+            assignment.insert(
+                "attribution".into(),
+                toml::Value::String("model_matched".into()),
+            );
+            assignment.insert("similarity".into(), toml::Value::Float(similarity));
+            assignment.insert(
+                "anchor_samples".into(),
+                toml::Value::Integer(item.anchor_samples as i64),
+            );
+            if let Some(second_identity) = item.second_identity.as_deref() {
+                assignment.insert(
+                    "second_identity".into(),
+                    toml::Value::String(second_identity.to_owned()),
+                );
+            }
+            if let Some(second_similarity) = item.second_similarity {
+                assignment.insert(
+                    "second_similarity".into(),
+                    toml::Value::Float(second_similarity),
+                );
+            }
+            if let Some(margin) = item.margin {
+                assignment.insert("margin".into(), toml::Value::Float(margin));
+            }
+
+            Ok::<_, VesselError>((
+                item.diarization_label.clone(),
+                toml::Value::Table(assignment),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assignments.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut attribution = toml::Table::new();
+    attribution.insert(
+        "method".into(),
+        toml::Value::String("embedding_cosine".into()),
+    );
+    attribution.insert(
+        "registry_revision".into(),
+        toml::Value::Integer(report.registry_revision as i64),
+    );
+    attribution.insert(
+        "diarization_engine".into(),
+        toml::Value::String(report.diarization_engine.clone()),
+    );
+    attribution.insert(
+        "diarization_model".into(),
+        toml::Value::String(report.diarization_model.clone()),
+    );
+    attribution.insert(
+        "min_similarity".into(),
+        toml::Value::Float(report.config.min_similarity),
+    );
+    attribution.insert(
+        "min_margin".into(),
+        toml::Value::Float(report.config.min_margin),
+    );
+    attribution.insert(
+        "min_anchor_dominance".into(),
+        toml::Value::Float(report.config.min_anchor_dominance),
+    );
+    attribution.insert(
+        "assignments".into(),
+        toml::Value::Array(
+            assignments
+                .iter()
+                .map(|(_, assignment)| assignment.clone())
+                .collect(),
+        ),
+    );
+    artifact
+        .extensions
+        .insert("speaker_attribution".into(), attribution);
+
+    let rendered = artifact.to_markdown(&body)?;
+    let updated = rendered != raw;
+    if updated {
+        atomic_write(&path, rendered.as_bytes())?;
+    }
+
+    Ok(SpeakerAttributionApplyResult {
+        path,
+        updated,
+        registry_revision: report.registry_revision,
+        assignments: assignments.len(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
