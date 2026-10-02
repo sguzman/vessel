@@ -263,7 +263,6 @@ struct SpeakerEmbeddingExtractorConfig {
 struct FastClusteringConfig {
     num_clusters: i32,
     threshold: c_float,
-    compute_confidence: i32,
 }
 
 #[repr(C)]
@@ -301,7 +300,6 @@ struct RawDiarizationSegment {
     start: c_float,
     end: c_float,
     speaker: i32,
-    confidence: c_float,
 }
 
 #[repr(C)]
@@ -480,7 +478,6 @@ impl SherpaOnnxDiarizer {
             clustering: FastClusteringConfig {
                 num_clusters: config.num_speakers.map(|value| value as i32).unwrap_or(-1),
                 threshold: config.clustering_threshold,
-                compute_confidence: 0,
             },
             min_duration_on: config.min_duration_on,
             min_duration_off: config.min_duration_off,
@@ -546,10 +543,11 @@ impl SherpaOnnxDiarizer {
         let wave_ref = unsafe { &*wave };
         let expected_sample_rate = unsafe { (self.api.diarizer_sample_rate)(self.diarizer) };
         if wave_ref.sample_rate != expected_sample_rate {
+            let actual_sample_rate = wave_ref.sample_rate;
             unsafe { (self.api.free_wave)(wave) };
             return Err(diarization_error(format!(
                 "diarization WAV sample rate {} does not match sherpa-onnx expected {}",
-                wave_ref.sample_rate, expected_sample_rate
+                actual_sample_rate, expected_sample_rate
             )));
         }
         if wave_ref.num_samples <= 0 || wave_ref.samples.is_null() {
