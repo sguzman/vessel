@@ -144,6 +144,11 @@ The following are already implemented and CI-tested:
 - explicit ASR model catalog/prefetch commands
 - offline model-directory and external-backend executable overrides
 - long-running ASR heartbeat/progress output
+- versioned per-source speaker registries with human-confirmed anchors
+- persisted WhisperX speaker-evidence sidecars
+- read-only cross-video cosine speaker matching with threshold/margin gates
+- non-destructive Sourcearium speaker-attribution metadata application
+- speaker-attributed transcript projection without canonical-body mutation
 - Sourcearium materializer with atomic replacement and downgrade protection
 - offline `vessel validate`
 - offline `vessel inventory`
@@ -212,13 +217,14 @@ The architecture is no longer the main uncertainty.
 
 Highest-value next steps:
 
-1. materialize one deliberately targeted real artifact with `--video-id`
-2. inspect Sourcearium artifact structure and local-ASR provenance
-3. rerun the same target and verify no-op Git behavior
-4. expand to a small bounded batch
-5. exercise prune planning against a deliberate real policy change
-6. decide whether native YouTube PO-token support is worth adding for caption-body acquisition
-7. consider optional ASR acceleration only after CPU behavior is proven
+1. validate Phonon-2 and WhisperX backends on the actual target machine
+2. create the first human-confirmed ContraPoints voice anchor from a clean creator-only range
+3. validate `speakers match`, `speakers apply`, and `speakers render` against real WhisperX embeddings
+4. integrate optional speaker attribution into bounded `vessel update` runs after real-match calibration
+5. rerun the same target and verify no-op Git behavior
+6. expand to a small bounded batch
+7. exercise prune planning against a deliberate real policy change
+8. decide whether native YouTube PO-token support is worth adding for caption-body acquisition
 
 The residential `--preview --max-videos 3` acceptance is complete. Player/media acquisition works on the target network; current direct caption-body access is degraded by empty `timedtext` responses, so the sampled videos resolve to ASR fallback while retaining the caption-access diagnostic.
 
