@@ -240,6 +240,8 @@ struct DiarizationFetchArgs {
     backend: String,
     #[arg(long = "dir")]
     dir: Option<PathBuf>,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -597,8 +599,8 @@ const SHERPA_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 const SHERPA_EMBEDDING_FILENAME: &str =
     "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
-fn default_diarization_model_root() -> PathBuf {
-    let data_root = env::var_os("XDG_DATA_HOME")
+fn default_vessel_data_root() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
@@ -607,12 +609,54 @@ fn default_diarization_model_root() -> PathBuf {
                 .map(PathBuf::from)
                 .map(|home| home.join(".local").join("share"))
         })
-        .unwrap_or_else(|| PathBuf::from(".local/share"));
-    data_root
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
         .join("vessel")
+}
+
+fn default_diarization_model_root() -> PathBuf {
+    default_vessel_data_root()
         .join("models")
         .join("diarization")
         .join(SHERPA_ONNX_BACKEND_NAME)
+}
+
+fn default_diarization_runtime_root() -> PathBuf {
+    default_vessel_data_root()
+        .join("runtime")
+        .join("diarization")
+        .join(SHERPA_ONNX_BACKEND_NAME)
+        .join(format!("v{SHERPA_ONNX_RUNTIME_VERSION}"))
+}
+
+fn sherpa_runtime_archive_name() -> Result<String> {
+    let version = SHERPA_ONNX_RUNTIME_VERSION;
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok(format!(
+            "sherpa-onnx-v{version}-linux-x64-shared-lib.tar.bz2"
+        ))
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Ok(format!(
+            "sherpa-onnx-v{version}-linux-aarch64-shared-cpu-lib.tar.bz2"
+        ))
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok(format!(
+            "sherpa-onnx-v{version}-win-x64-shared-MT-Release-lib.tar.bz2"
+        ))
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok(format!(
+            "sherpa-onnx-v{version}-osx-x64-shared-lib.tar.bz2"
+        ))
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok(format!(
+            "sherpa-onnx-v{version}-osx-arm64-shared-lib.tar.bz2"
+        ))
+    } else {
+        Err(VesselError::Config(format!(
+            "no sherpa runtime bundle is defined for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )))
+    }
 }
 
 fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
