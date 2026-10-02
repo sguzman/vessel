@@ -566,10 +566,7 @@ pub fn apply_speaker_match_report(
     if artifact_engine != report.diarization_engine || artifact_model != report.diarization_model {
         return Err(corpus_error(format!(
             "speaker match provenance {}/{} does not match artifact diarization {}/{}",
-            report.diarization_engine,
-            report.diarization_model,
-            artifact_engine,
-            artifact_model
+            report.diarization_engine, report.diarization_model, artifact_engine, artifact_model
         )));
     }
 
