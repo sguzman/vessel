@@ -886,9 +886,11 @@ input = "https://www.youtube.com/@{key}"
             timestamps: true,
             engine: (derivation == TranscriptDerivation::LocalAsr).then(|| "whisper-candle".into()),
             model: (derivation == TranscriptDerivation::LocalAsr).then(|| "small.en".into()),
+            diarization: None,
             segments: vec![crate::TranscriptSegment {
                 start_seconds: Some(3),
                 text: "Hello corpus.".into(),
+                speaker: None,
             }],
         }
     }
