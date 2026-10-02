@@ -28,6 +28,57 @@ The same hosted-runner IP was tested with several current Innertube client profi
 
 The non-embedded clients were bot-gated. The embedded client reported the sampled video unavailable.
 
+## Residential Acceptance - 2026-10-02
+
+The same ContraPoints acceptance source was re-tested from the actual residential target environment.
+
+The player-access blocker observed on hosted CI did **not** reproduce.
+
+For the sampled video `uiGIbdrQjbI` ("Saw | ContraPoints"), Vessel resolved:
+
+- normal public playability
+- video/channel metadata
+- playable streaming data
+- one creator English caption track
+- one automatic English caption track
+
+This proves that the target environment is suitable for normal player/media acquisition.
+
+A three-video Sourcearium preview then completed without extractor errors. Channel membership remained durable at 36 videos. On the later incremental crawl, 32 currently visible first-page videos were re-observed while the persisted 36-video backlog remained authoritative. This is expected once completed tab backfills stop re-walking historical continuations.
+
+### Caption Body Access
+
+The advertised creator and automatic caption tracks did not yield transcript bodies through Vessel's direct `timedtext` requests.
+
+Observed behavior:
+
+```text
+caption track advertised in player metadata
+HTTP request succeeds
+response body is empty
+```
+
+This is materially different from "the video has no captions."
+
+As of 2026, the same zero-byte-success behavior is associated in the wider YouTube tooling ecosystem with proof-of-origin / PO-token enforcement on subtitle requests.
+
+Vessel therefore preserves empty caption responses as an access diagnostic and may continue to local ASR when policy permits. It does **not** silently add cookies, browser automation, yt-dlp fallback, or PO-token machinery.
+
+If native caption retrieval is pursued later, treat proof-of-origin support as an explicit acquisition/authentication feature rather than hiding it inside the subtitle parser.
+
+### Operational SQLite Finalization
+
+The acceptance run also exposed that WAL-mode operational state could remain primarily in `vessel.sqlite-wal` after the CLI returned.
+
+`vessel update` now explicitly:
+
+1. checkpoints the WAL with `PRAGMA wal_checkpoint(TRUNCATE)`
+2. awaits SQLx pool closure
+3. reports `operational_state.checkpointed = true`
+
+A completed update therefore leaves the main `vessel.sqlite` as a self-contained readable database rather than requiring a live WAL sidecar for recently committed state.
+
+
 ## Error Classification
 
 When a player response lacks `videoDetails`, Vessel must inspect `playabilityStatus` before calling the response malformed.
