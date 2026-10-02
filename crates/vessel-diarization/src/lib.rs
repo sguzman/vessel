@@ -778,9 +778,7 @@ fn preload_runtime_dependencies(main_path: &Path) -> Vec<DynamicLibrary> {
     let mut candidates = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
-            path.is_file()
-                && runtime_dependency_candidate(path)
-                && !is_sherpa_runtime_library(path)
+            path.is_file() && runtime_dependency_candidate(path) && !is_sherpa_runtime_library(path)
         })
         .filter(|path| path != main_path)
         .collect::<Vec<_>>();
@@ -940,10 +938,7 @@ mod platform_dynlib {
         }
     }
 
-    pub fn symbol(
-        handle: *mut c_void,
-        name: &str,
-    ) -> std::result::Result<*mut c_void, String> {
+    pub fn symbol(handle: *mut c_void, name: &str) -> std::result::Result<*mut c_void, String> {
         let name = CString::new(name)
             .map_err(|_| "dynamic-library symbol contains an embedded NUL byte".to_owned())?;
         let value = unsafe { GetProcAddress(handle, name.as_ptr().cast()) };
@@ -1182,10 +1177,7 @@ mod tests {
 
     #[test]
     fn runtime_finder_recurses_into_extracted_bundle() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-runtime-find-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("vessel-runtime-find-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let lib = root
             .join("sherpa-bundle")
