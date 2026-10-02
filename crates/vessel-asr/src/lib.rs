@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tracing::info;
 
 use vessel_core::{
     Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
@@ -45,13 +44,16 @@ pub struct WhisperCandleBackend {
 impl WhisperCandleBackend {
     pub fn load(config: AsrConfig) -> Result<Self> {
         let started = Instant::now();
-        info!(
-            target: "asr",
-            engine = ENGINE_NAME,
-            model = %config.model,
-            model_dir = ?config.model_dir,
-            device = %config.device,
-            "ASR model load started"
+        eprintln!(
+            "[asr] model load started engine={} model={} model_dir={} device={}",
+            ENGINE_NAME,
+            config.model,
+            config
+                .model_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<automatic-cache>".into()),
+            config.device,
         );
 
         let device = device(&config.device).map_err(|error| {
@@ -111,12 +113,11 @@ impl WhisperCandleBackend {
             }
         }
 
-        info!(
-            target: "asr",
-            engine = ENGINE_NAME,
-            model = %config.model,
-            elapsed_seconds = started.elapsed().as_secs_f64(),
-            "ASR model load completed"
+        eprintln!(
+            "[asr] model load completed engine={} model={} elapsed={:.1}s",
+            ENGINE_NAME,
+            config.model,
+            started.elapsed().as_secs_f64(),
         );
         Ok(Self { config, model })
     }
@@ -142,12 +143,11 @@ impl WhisperCandleBackend {
         options.verbose = Some(false);
 
         let started = Instant::now();
-        info!(
-            target: "asr",
-            engine = ENGINE_NAME,
-            model = %self.config.model,
-            input = %path.display(),
-            "ASR transcription started"
+        eprintln!(
+            "[asr] transcription started engine={} model={} input={}",
+            ENGINE_NAME,
+            self.config.model,
+            path.display(),
         );
 
         let result = transcribe_file(&mut self.model, path, &options).map_err(|error| {
@@ -157,13 +157,12 @@ impl WhisperCandleBackend {
             ))
         })?;
 
-        info!(
-            target: "asr",
-            engine = ENGINE_NAME,
-            model = %self.config.model,
-            elapsed_seconds = started.elapsed().as_secs_f64(),
-            segments = result.segments.len(),
-            "ASR transcription completed"
+        eprintln!(
+            "[asr] transcription completed engine={} model={} elapsed={:.1}s segments={}",
+            ENGINE_NAME,
+            self.config.model,
+            started.elapsed().as_secs_f64(),
+            result.segments.len(),
         );
 
         let segments = result
