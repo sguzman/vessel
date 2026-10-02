@@ -724,6 +724,11 @@ unsafe extern "C" fn diarization_progress(
     0
 }
 
+pub fn probe_sherpa_runtime(runtime_library: &Path) -> Result<()> {
+    let _api = SherpaApi::load(runtime_library)?;
+    Ok(())
+}
+
 pub fn find_sherpa_runtime_library(root: &Path) -> Result<PathBuf> {
     if root.is_file() && is_sherpa_runtime_library(root) {
         return Ok(root.to_path_buf());
@@ -772,7 +777,11 @@ fn preload_runtime_dependencies(main_path: &Path) -> Vec<DynamicLibrary> {
     };
     let mut candidates = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file() && runtime_dependency_candidate(path))
+        .filter(|path| {
+            path.is_file()
+                && runtime_dependency_candidate(path)
+                && !is_sherpa_runtime_library(path)
+        })
         .filter(|path| path != main_path)
         .collect::<Vec<_>>();
     candidates.sort();
@@ -847,6 +856,9 @@ mod platform_dynlib {
     use super::*;
 
     const RTLD_NOW: i32 = 2;
+    #[cfg(target_os = "macos")]
+    const RTLD_GLOBAL: i32 = 0x8;
+    #[cfg(not(target_os = "macos"))]
     const RTLD_GLOBAL: i32 = 0x100;
 
     unsafe extern "C" {
@@ -1166,6 +1178,31 @@ mod tests {
     fn portable_model_provenance_avoids_machine_absolute_paths() {
         let path = Path::new("/home/user/models/sherpa-pyannote/model.onnx");
         assert_eq!(portable_model_id(path), "sherpa-pyannote/model.onnx");
+    }
+
+    #[test]
+    fn runtime_finder_recurses_into_extracted_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-runtime-find-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let lib = root
+            .join("sherpa-bundle")
+            .join("lib")
+            .join(if cfg!(target_os = "windows") {
+                "sherpa-onnx-c-api.dll"
+            } else if cfg!(target_os = "macos") {
+                "libsherpa-onnx-c-api.dylib"
+            } else {
+                "libsherpa-onnx-c-api.so"
+            });
+        fs::create_dir_all(lib.parent().unwrap()).expect("runtime dir");
+        fs::write(&lib, b"not-a-real-library").expect("runtime placeholder");
+
+        assert_eq!(find_sherpa_runtime_library(&root).unwrap(), lib);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
