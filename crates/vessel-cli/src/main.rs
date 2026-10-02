@@ -385,7 +385,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         .join("vessel")
         .join("vessel.sqlite");
     let (operational_store, _) = init_sqlite_database_path(&operational_db_path).await?;
-    let mut asr_backend: Option<WhisperCandleBackend> = None;
+    let mut asr_backend: Option<LoadedAsrBackend> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
     let mut limit_reached = false;
