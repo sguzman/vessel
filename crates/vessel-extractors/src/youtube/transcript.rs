@@ -8,13 +8,26 @@ use vessel_core::{
     YoutubeTranscriptPolicyV1,
 };
 
+#[derive(Debug, Clone, Default)]
+pub struct CaptionAcquisition {
+    pub candidate: Option<TranscriptCandidate>,
+    pub empty_response_derivations: Vec<TranscriptDerivation>,
+}
+
+enum CaptionFetchOutcome {
+    Candidate(TranscriptCandidate),
+    EmptyResponse,
+}
+
 pub async fn acquire_best_caption_candidate(
     video: &VideoMetadata,
     policy: &YoutubeTranscriptPolicyV1,
-) -> Result<Option<TranscriptCandidate>> {
+) -> Result<CaptionAcquisition> {
     if !policy.enabled {
-        return Ok(None);
+        return Ok(CaptionAcquisition::default());
     }
+
+    let mut acquisition = CaptionAcquisition::default();
 
     let providers = [
         (
@@ -50,12 +63,17 @@ pub async fn acquire_best_caption_candidate(
         match fetch_caption_candidate(base_url, &track.language, derivation, &http_client()?)
             .await?
         {
-            Some(candidate) => return Ok(Some(candidate)),
-            None => continue,
+            CaptionFetchOutcome::Candidate(candidate) => {
+                acquisition.candidate = Some(candidate);
+                return Ok(acquisition);
+            }
+            CaptionFetchOutcome::EmptyResponse => {
+                acquisition.empty_response_derivations.push(derivation);
+            }
         }
     }
 
-    Ok(None)
+    Ok(acquisition)
 }
 
 fn choose_track<'a>(
@@ -92,7 +110,7 @@ async fn fetch_caption_candidate(
     language: &str,
     derivation: TranscriptDerivation,
     client: &Client,
-) -> Result<Option<TranscriptCandidate>> {
+) -> Result<CaptionFetchOutcome> {
     let url = json3_url(base_url)?;
     let response = client.get(url).send().await.map_err(|error| {
         VesselError::Extractor(format!("youtube caption request failed: {error}"))
@@ -114,14 +132,14 @@ fn parse_caption_response(
     raw: &str,
     derivation: TranscriptDerivation,
     language: &str,
-) -> Result<Option<TranscriptCandidate>> {
+) -> Result<CaptionFetchOutcome> {
     if raw.trim().is_empty() {
-        return Ok(None);
+        return Ok(CaptionFetchOutcome::EmptyResponse);
     }
 
     let candidate = parse_youtube_json3(raw, derivation, language)?;
     candidate.validate()?;
-    Ok(Some(candidate))
+    Ok(CaptionFetchOutcome::Candidate(candidate))
 }
 
 fn json3_url(base_url: &str) -> Result<Url> {
@@ -254,11 +272,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_caption_response_is_treated_as_unavailable() {
-        let candidate = parse_caption_response("", TranscriptDerivation::CreatorSubtitles, "en")
+    fn empty_caption_response_is_preserved_as_access_diagnostic() {
+        let outcome = parse_caption_response("", TranscriptDerivation::CreatorSubtitles, "en")
             .expect("empty response should not be fatal");
 
-        assert!(candidate.is_none());
+        assert!(matches!(outcome, CaptionFetchOutcome::EmptyResponse));
     }
 
     #[test]
