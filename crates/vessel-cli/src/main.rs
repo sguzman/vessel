@@ -13,9 +13,10 @@ use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, SpeakerIdentityV1,
     SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, VesselError, VideoSelection,
-    apply_sourcearium_prune, discover_youtube_sources, inventory_sourcearium_repository,
-    load_config, load_speaker_registry, load_youtube_transcript_artifact,
-    match_speakers_from_evidence, materialize_youtube_transcript, plan_sourcearium_prune,
+    apply_sourcearium_prune, apply_speaker_match_report, discover_youtube_sources,
+    inventory_sourcearium_repository, load_config, load_speaker_registry,
+    load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
+    plan_sourcearium_prune,
     resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
@@ -181,6 +182,7 @@ enum SpeakersSubcommand {
     Init(SpeakerInitArgs),
     Anchor(SpeakerAnchorArgs),
     Match(SpeakerMatchArgs),
+    Apply(SpeakerMatchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -469,6 +471,7 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Init(args) => speakers_init(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
+            SpeakersSubcommand::Apply(args) => speakers_apply(args),
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
@@ -655,6 +658,45 @@ fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn speakers_apply(args: SpeakerMatchArgs) -> Result<()> {
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let source = discover_youtube_sources(&root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == args.source_key)
+        .ok_or_else(|| {
+            VesselError::Corpus(format!("unknown YouTube source key {:?}", args.source_key))
+        })?;
+    let registry_path = source.source_dir.join("speakers.toml");
+    let registry = load_speaker_registry(&registry_path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}; initialize it first",
+            registry_path.display()
+        ))
+    })?;
+    let evidence_dir = root.join(".cache").join("vessel").join("speaker-evidence");
+    let report = match_speakers_from_evidence(
+        &registry,
+        &evidence_dir,
+        &args.video_id,
+        SpeakerMatchConfig {
+            min_similarity: args.min_similarity,
+            min_margin: args.min_margin,
+            min_anchor_dominance: args.min_anchor_dominance,
+        },
+    )?;
+    let application = apply_speaker_match_report(&source, &args.video_id, &report)?;
+    let output = serde_json::json!({
+        "match_report": report,
+        "application": application,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
             .map_err(|error| VesselError::Config(error.to_string()))?
     );
     Ok(())
