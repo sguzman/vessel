@@ -995,12 +995,15 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "ok"
     };
 
+    operational_store.checkpoint_and_close().await?;
+
     let report = serde_json::json!({
         "status": report_status,
         "error_count": total_errors,
         "sourcearium_root": sourcearium_root,
         "operational_state": {
             "sqlite": operational_db_path,
+            "checkpointed": true,
         },
         "sources": source_reports,
         "remote_videos_processed": remote_videos_processed,
