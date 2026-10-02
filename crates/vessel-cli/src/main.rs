@@ -4233,6 +4233,7 @@ fn binary_available(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use time::OffsetDateTime;
@@ -4240,8 +4241,8 @@ mod tests {
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
-        resolve_asr_config, resolve_configured_channels, transcript_upgrade_probe_due,
-        validate_update_speaker_attribution,
+        resolve_asr_config, resolve_configured_channels, resolve_diarization_config,
+        transcript_upgrade_probe_due, validate_update_speaker_attribution,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
@@ -4284,6 +4285,13 @@ mod tests {
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
             diarize: true,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: Some("example/diarizer".into()),
             min_speakers: Some(1),
             max_speakers: Some(3),
@@ -4310,11 +4318,11 @@ mod tests {
         );
         assert_eq!(config.device, "cpu");
         assert_eq!(config.language.as_deref(), Some("es"));
-        assert!(config.diarize);
+        assert!(!config.diarize);
         assert_eq!(config.diarization_model, "example/diarizer");
-        assert_eq!(config.min_speakers, Some(1));
-        assert_eq!(config.max_speakers, Some(3));
-        assert!(config.speaker_embeddings);
+        assert_eq!(config.min_speakers, None);
+        assert_eq!(config.max_speakers, None);
+        assert!(!config.speaker_embeddings);
         assert_eq!(config.hf_token_env, "TEST_HF_TOKEN");
     }
 
@@ -4331,6 +4339,13 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: false,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -4362,6 +4377,13 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: true,
+            diarization_backend: "whisperx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -4382,7 +4404,7 @@ mod tests {
     }
 
     #[test]
-    fn speaker_attribution_update_requires_whisperx() {
+    fn speaker_attribution_accepts_rust_native_diarization_with_any_asr() {
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
             max_videos: None,
@@ -4394,6 +4416,51 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: true,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: true,
+            attribute_speakers: true,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+        let config = resolve_asr_config(&args);
+        validate_update_speaker_attribution(&args, &config)
+            .expect("Rust-native diarization must not require WhisperX");
+    }
+
+    #[test]
+    fn whisperx_diarization_requires_whisperx_asr_backend() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("whisper-candle".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: true,
+            diarization_backend: "whisperx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -4409,12 +4476,8 @@ mod tests {
         };
         let config = resolve_asr_config(&args);
         let error = validate_update_speaker_attribution(&args, &config)
-            .expect_err("non-WhisperX attribution must fail");
-        assert!(
-            error
-                .to_string()
-                .contains("requires --asr-backend whisperx")
-        );
+            .expect_err("WhisperX compatibility diarization requires WhisperX ASR");
+        assert!(error.to_string().contains("WhisperX diarization requires"));
     }
 
     #[test]
@@ -4430,6 +4493,13 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: false,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -4464,6 +4534,71 @@ mod tests {
     }
 
     #[test]
+    fn rust_diarization_config_is_independent_from_asr_backend() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-diarization-config-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp model dir");
+        let segmentation = root.join("segmentation.onnx");
+        let embedding = root.join("embedding.onnx");
+        fs::write(&segmentation, b"model").expect("segmentation model");
+        fs::write(&embedding, b"model").expect("embedding model");
+
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("phonon-2".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: Some("en".into()),
+            diarize: true,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: Some(segmentation.clone()),
+            diarization_embedding_model: Some(embedding.clone()),
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 6,
+            diarization_clustering_threshold: 0.57,
+            diarization_window_shift_ratio: 0.12,
+            diarization_model: None,
+            min_speakers: Some(2),
+            max_speakers: Some(2),
+            speaker_embeddings: true,
+            attribute_speakers: false,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+
+        let asr = resolve_asr_config(&args);
+        assert_eq!(asr.backend, "phonon-2");
+        assert!(!asr.diarize);
+
+        let diarization = resolve_diarization_config(&args)
+            .expect("resolve diarization")
+            .expect("configured");
+        assert_eq!(diarization.backend, "sherpa-onnx");
+        assert_eq!(diarization.segmentation_model, segmentation);
+        assert_eq!(diarization.embedding_model, embedding);
+        assert_eq!(diarization.provider, "cpu");
+        assert_eq!(diarization.num_threads, 6);
+        assert_eq!(diarization.num_speakers, Some(2));
+        assert_eq!(diarization.clustering_threshold, 0.57);
+        assert_eq!(diarization.window_shift_ratio, 0.12);
+        assert!(diarization.speaker_embeddings);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn speaker_matching_thresholds_are_operational_update_controls() {
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
@@ -4476,6 +4611,13 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: true,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
