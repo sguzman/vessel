@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::Client;
 use time::OffsetDateTime;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
@@ -225,7 +227,16 @@ struct DiarizationCommand {
 #[derive(Debug, Subcommand)]
 enum DiarizationSubcommand {
     Models,
+    Fetch(DiarizationFetchArgs),
     Doctor(DiarizationDoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct DiarizationFetchArgs {
+    #[arg(long, default_value = "sherpa-onnx")]
+    backend: String,
+    #[arg(long = "dir")]
+    dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -552,6 +563,7 @@ async fn main() -> Result<()> {
         },
         Commands::Diarization(cmd) => match cmd.command {
             DiarizationSubcommand::Models => diarization_models(),
+            DiarizationSubcommand::Fetch(args) => diarization_fetch(args).await,
             DiarizationSubcommand::Doctor(args) => diarization_doctor(args),
         },
         Commands::Speakers(cmd) => match cmd.command {
@@ -570,6 +582,207 @@ async fn main() -> Result<()> {
             PluginSubcommand::Install(args) => plugin_install(args, &paths, &layout).await,
         },
     }
+}
+
+const SHERPA_SEGMENTATION_ARCHIVE_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
+const SHERPA_EMBEDDING_MODEL_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const SHERPA_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
+const SHERPA_EMBEDDING_FILENAME: &str =
+    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+
+fn default_diarization_model_root() -> PathBuf {
+    let cache = env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .map(|home| home.join(".cache"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".cache"));
+    cache
+        .join("vessel")
+        .join("models")
+        .join("diarization")
+        .join(SHERPA_ONNX_BACKEND_NAME)
+}
+
+fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
+    (
+        root.join(SHERPA_SEGMENTATION_DIR).join("model.onnx"),
+        root.join(SHERPA_EMBEDDING_FILENAME),
+    )
+}
+
+async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
+    if args.backend != SHERPA_ONNX_BACKEND_NAME {
+        return Err(VesselError::Config(format!(
+            "model fetching is not implemented for diarization backend {:?}",
+            args.backend
+        )));
+    }
+
+    let root = args.dir.unwrap_or_else(default_diarization_model_root);
+    tokio::fs::create_dir_all(&root).await?;
+    let (segmentation_model, embedding_model) = sherpa_model_paths(&root);
+    let client = Client::new();
+
+    if !segmentation_model.is_file() {
+        let archive_path = root.join("sherpa-onnx-pyannote-segmentation-3-0.tar.bz2");
+        download_with_progress(
+            &client,
+            SHERPA_SEGMENTATION_ARCHIVE_URL,
+            &archive_path,
+            "sherpa segmentation model",
+        )
+        .await?;
+
+        let unpack_root = root.clone();
+        let archive_for_worker = archive_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = std::fs::File::open(&archive_for_worker)?;
+            let decoder = bzip2::read::BzDecoder::new(file);
+            let mut archive = tar::Archive::new(decoder);
+            archive.unpack(&unpack_root)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            VesselError::Extractor(format!(
+                "sherpa segmentation archive worker failed to join: {error}"
+            ))
+        })??;
+        let _ = tokio::fs::remove_file(&archive_path).await;
+    } else {
+        eprintln!(
+            "[diarization] segmentation model already available path={}",
+            segmentation_model.display()
+        );
+    }
+
+    if !embedding_model.is_file() {
+        download_with_progress(
+            &client,
+            SHERPA_EMBEDDING_MODEL_URL,
+            &embedding_model,
+            "sherpa speaker embedding model",
+        )
+        .await?;
+    } else {
+        eprintln!(
+            "[diarization] embedding model already available path={}",
+            embedding_model.display()
+        );
+    }
+
+    if !segmentation_model.is_file() || !embedding_model.is_file() {
+        return Err(VesselError::Extractor(format!(
+            "sherpa model fetch completed without expected files under {}",
+            root.display()
+        )));
+    }
+
+    let report = serde_json::json!({
+        "status": "ok",
+        "backend": SHERPA_ONNX_BACKEND_NAME,
+        "directory": root,
+        "segmentation_model": segmentation_model,
+        "embedding_model": embedding_model,
+        "python_required": false,
+        "reuse_with": {
+            "diarization_backend": SHERPA_ONNX_BACKEND_NAME,
+            "diarization_segmentation_model": segmentation_model,
+            "diarization_embedding_model": embedding_model,
+        }
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+async fn download_with_progress(
+    client: &Client,
+    url: &str,
+    destination: &Path,
+    label: &str,
+) -> Result<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        VesselError::Config(format!(
+            "download destination has no parent: {}",
+            destination.display()
+        ))
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+
+    let temp = destination.with_extension("download");
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(VesselError::Extractor(format!(
+            "{label} download returned HTTP {}",
+            response.status()
+        )));
+    }
+
+    let total = response.content_length();
+    let mut file = tokio::fs::File::create(&temp).await?;
+    let mut downloaded = 0u64;
+    let mut next_report = 0u64;
+    eprintln!(
+        "[diarization] download started label={} destination={} total_bytes={}",
+        label,
+        destination.display(),
+        total
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?
+    {
+        file.write_all(&chunk).await?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded >= next_report {
+            if let Some(total) = total {
+                let percent = if total == 0 {
+                    100.0
+                } else {
+                    downloaded as f64 * 100.0 / total as f64
+                };
+                eprintln!(
+                    "[diarization] downloading label={} {:.1}% ({}/{})",
+                    label, percent, downloaded, total
+                );
+                next_report = downloaded.saturating_add((total / 20).max(1));
+            } else {
+                eprintln!(
+                    "[diarization] downloading label={} bytes={}",
+                    label, downloaded
+                );
+                next_report = downloaded.saturating_add(16 * 1024 * 1024);
+            }
+        }
+    }
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&temp, destination).await?;
+    eprintln!(
+        "[diarization] download completed label={} bytes={} path={}",
+        label,
+        downloaded,
+        destination.display()
+    );
+    Ok(())
 }
 
 fn diarization_models() -> Result<()> {
@@ -607,26 +820,12 @@ fn diarization_models() -> Result<()> {
 fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
     match args.backend.as_str() {
         SHERPA_ONNX_BACKEND_NAME => {
-            let segmentation = args.segmentation_model.as_ref().map(|path| {
-                serde_json::json!({
-                    "path": path,
-                    "exists": path.is_file(),
-                })
-            });
-            let embedding = args.embedding_model.as_ref().map(|path| {
-                serde_json::json!({
-                    "path": path,
-                    "exists": path.is_file(),
-                })
-            });
-            let ready = args
-                .segmentation_model
-                .as_ref()
-                .is_some_and(|path| path.is_file())
-                && args
-                    .embedding_model
-                    .as_ref()
-                    .is_some_and(|path| path.is_file())
+            let default_root = default_diarization_model_root();
+            let (default_segmentation, default_embedding) = sherpa_model_paths(&default_root);
+            let segmentation_path = args.segmentation_model.unwrap_or(default_segmentation);
+            let embedding_path = args.embedding_model.unwrap_or(default_embedding);
+            let ready = segmentation_path.is_file()
+                && embedding_path.is_file()
                 && !args.provider.trim().is_empty();
             let report = serde_json::json!({
                 "backend": SHERPA_ONNX_BACKEND_NAME,
@@ -634,9 +833,16 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "python_required": false,
                 "rust_api": true,
                 "provider": args.provider,
-                "segmentation_model": segmentation,
-                "embedding_model": embedding,
+                "segmentation_model": {
+                    "path": segmentation_path,
+                    "exists": segmentation_path.is_file(),
+                },
+                "embedding_model": {
+                    "path": embedding_path,
+                    "exists": embedding_path.is_file(),
+                },
                 "ready_for_diarization": ready,
+                "fetch_command": "vessel diarization fetch",
             });
             println!(
                 "{}",
@@ -2007,22 +2213,22 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
         )));
     }
 
+    let default_root = default_diarization_model_root();
+    let (default_segmentation, default_embedding) = sherpa_model_paths(&default_root);
     let segmentation_model = args
         .diarization_segmentation_model
         .clone()
-        .ok_or_else(|| {
-            VesselError::Config(
-                "--diarize with sherpa-onnx requires --diarization-segmentation-model".into(),
-            )
-        })?;
+        .unwrap_or(default_segmentation);
     let embedding_model = args
         .diarization_embedding_model
         .clone()
-        .ok_or_else(|| {
-            VesselError::Config(
-                "--diarize with sherpa-onnx requires --diarization-embedding-model".into(),
-            )
-        })?;
+        .unwrap_or(default_embedding);
+    if !segmentation_model.is_file() || !embedding_model.is_file() {
+        return Err(VesselError::Config(format!(
+            "sherpa-onnx diarization models are missing; run vessel diarization fetch or pass --diarization-segmentation-model and --diarization-embedding-model explicitly (expected defaults under {})",
+            default_root.display()
+        )));
+    }
 
     let num_speakers = match (args.min_speakers, args.max_speakers) {
         (None, None) => None,
