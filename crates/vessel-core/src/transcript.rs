@@ -44,10 +44,43 @@ pub struct TranscriptRequest {
     pub preferred_languages: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeakerAttribution {
+    Unresolved,
+    ModelMatched,
+    HumanConfirmed,
+}
+
+impl SpeakerAttribution {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unresolved => "unresolved",
+            Self::ModelMatched => "model_matched",
+            Self::HumanConfirmed => "human_confirmed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptSpeaker {
+    pub diarization_label: String,
+    pub identity: Option<String>,
+    pub attribution: SpeakerAttribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiarizationProvenance {
+    pub engine: String,
+    pub model: String,
+    pub registry_revision: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptSegment {
     pub start_seconds: Option<u64>,
     pub text: String,
+    pub speaker: Option<TranscriptSpeaker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +90,7 @@ pub struct TranscriptCandidate {
     pub timestamps: bool,
     pub engine: Option<String>,
     pub model: Option<String>,
+    pub diarization: Option<DiarizationProvenance>,
     pub segments: Vec<TranscriptSegment>,
 }
 
@@ -71,10 +105,32 @@ impl TranscriptCandidate {
             require_nonempty("local ASR model", self.model.as_deref())?;
         }
 
+        if let Some(diarization) = self.diarization.as_ref() {
+            require_nonempty("diarization engine", Some(&diarization.engine))?;
+            require_nonempty("diarization model", Some(&diarization.model))?;
+        }
+
         let mut previous = None;
         for segment in &self.segments {
             if segment.text.is_empty() {
                 return Err(corpus_error("transcript segment text must not be empty"));
+            }
+            if let Some(speaker) = segment.speaker.as_ref() {
+                require_nonempty(
+                    "segment speaker diarization label",
+                    Some(&speaker.diarization_label),
+                )?;
+                validate_optional_nonempty(
+                    "segment speaker identity",
+                    speaker.identity.as_deref(),
+                )?;
+                if speaker.identity.is_some()
+                    && speaker.attribution == SpeakerAttribution::Unresolved
+                {
+                    return Err(corpus_error(
+                        "identified segment speaker cannot have unresolved attribution",
+                    ));
+                }
             }
 
             match (self.timestamps, segment.start_seconds) {
@@ -115,6 +171,15 @@ impl TranscriptCandidate {
             if let Some(start) = segment.start_seconds {
                 body.push_str(&format_timestamp(start));
                 body.push(' ');
+            }
+            if let Some(speaker) = segment.speaker.as_ref() {
+                let label = speaker
+                    .identity
+                    .as_deref()
+                    .unwrap_or(&speaker.diarization_label);
+                body.push_str("<speaker:");
+                body.push_str(label);
+                body.push_str("> ");
             }
             body.push_str(segment.text.trim_end_matches(['\r', '\n']));
             body.push('\n');
@@ -173,14 +238,17 @@ mod tests {
             timestamps: true,
             engine: None,
             model: None,
+            diarization: None,
             segments: vec![
                 TranscriptSegment {
                     start_seconds: Some(3),
                     text: "Hello.".into(),
+                    speaker: None,
                 },
                 TranscriptSegment {
                     start_seconds: Some(65),
                     text: "World.".into(),
+                    speaker: None,
                 },
             ],
         };
@@ -192,6 +260,47 @@ mod tests {
     }
 
     #[test]
+    fn renders_anonymous_and_identified_speakers_without_conflating_them() {
+        let candidate = TranscriptCandidate {
+            derivation: TranscriptDerivation::LocalAsr,
+            language: Some("en".into()),
+            timestamps: true,
+            engine: Some("whisperx".into()),
+            model: Some("large-v3".into()),
+            diarization: Some(DiarizationProvenance {
+                engine: "pyannote".into(),
+                model: "speaker-diarization-community-1".into(),
+                registry_revision: None,
+            }),
+            segments: vec![
+                TranscriptSegment {
+                    start_seconds: Some(3),
+                    text: "Anonymous clip.".into(),
+                    speaker: Some(TranscriptSpeaker {
+                        diarization_label: "SPEAKER_00".into(),
+                        identity: None,
+                        attribution: SpeakerAttribution::Unresolved,
+                    }),
+                },
+                TranscriptSegment {
+                    start_seconds: Some(8),
+                    text: "Known creator.".into(),
+                    speaker: Some(TranscriptSpeaker {
+                        diarization_label: "SPEAKER_01".into(),
+                        identity: Some("creator".into()),
+                        attribution: SpeakerAttribution::HumanConfirmed,
+                    }),
+                },
+            ],
+        };
+
+        assert_eq!(
+            candidate.render_body().expect("body"),
+            "[00:00:03] <speaker:SPEAKER_00> Anonymous clip.\n\n[00:00:08] <speaker:creator> Known creator.\n"
+        );
+    }
+
+    #[test]
     fn rejects_non_monotonic_timestamps() {
         let candidate = TranscriptCandidate {
             derivation: TranscriptDerivation::PlatformAutoCaption,
@@ -199,14 +308,17 @@ mod tests {
             timestamps: true,
             engine: None,
             model: None,
+            diarization: None,
             segments: vec![
                 TranscriptSegment {
                     start_seconds: Some(10),
                     text: "Later".into(),
+                    speaker: None,
                 },
                 TranscriptSegment {
                     start_seconds: Some(9),
                     text: "Earlier".into(),
+                    speaker: None,
                 },
             ],
         };
