@@ -437,14 +437,15 @@ fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
         args.model.as_deref(),
         args.executable.as_deref(),
     )?;
+    let directory = location.directory.display().to_string();
     let report = serde_json::json!({
         "status": "ok",
         "backend": location.backend,
         "model": location.model,
-        "directory": location.directory,
+        "directory": directory,
         "reuse_with": {
             "asr_backend": args.backend,
-            "asr_model_dir": location.directory,
+            "asr_model_dir": directory,
         }
     });
     println!(
