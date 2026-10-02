@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
@@ -824,11 +824,43 @@ async fn download_with_progress(
     tokio::fs::create_dir_all(parent).await?;
 
     let temp = destination.with_extension("download");
-    let mut response = client
-        .get(url)
-        .send()
+    let mut resume_from = tokio::fs::metadata(&temp)
         .await
-        .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?;
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    let mut response = {
+        let mut request = client.get(url);
+        if resume_from > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+            eprintln!(
+                "[diarization] resuming download label={} from_byte={} temp={}",
+                label,
+                resume_from,
+                temp.display()
+            );
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?
+    };
+
+    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE && resume_from > 0 {
+        eprintln!(
+            "[diarization] remote rejected resume range; restarting label={} from byte 0",
+            label
+        );
+        let _ = tokio::fs::remove_file(&temp).await;
+        resume_from = 0;
+        response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?;
+    }
+
+    let append = resume_from > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
     if !response.status().is_success() {
         return Err(VesselError::Extractor(format!(
             "{label} download returned HTTP {}",
@@ -836,18 +868,37 @@ async fn download_with_progress(
         )));
     }
 
-    let total = response.content_length();
-    let mut file = tokio::fs::File::create(&temp).await?;
-    let mut downloaded = 0u64;
-    let mut next_report = 0u64;
+    if resume_from > 0 && !append {
+        eprintln!(
+            "[diarization] remote ignored resume range; restarting label={} from byte 0",
+            label
+        );
+        resume_from = 0;
+    }
+
+    let response_bytes = response.content_length();
+    let total = response_bytes.map(|bytes| resume_from.saturating_add(bytes));
+    let mut file = if append {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp)
+            .await?
+    } else {
+        tokio::fs::File::create(&temp).await?
+    };
+    let mut downloaded = resume_from;
+    let mut next_report = downloaded;
+
     eprintln!(
-        "[diarization] download started label={} destination={} total_bytes={}",
+        "[diarization] download started label={} destination={} resumed_bytes={} total_bytes={}",
         label,
         destination.display(),
+        resume_from,
         total
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".into()),
     );
+
     while let Some(chunk) = response
         .chunk()
         .await
@@ -888,6 +939,7 @@ async fn download_with_progress(
     Ok(())
 }
 
+
 fn diarization_models() -> Result<()> {
     let report = serde_json::json!({
         "backends": [
@@ -896,7 +948,8 @@ fn diarization_models() -> Result<()> {
                 "status": "implemented",
                 "primary": true,
                 "python_required": false,
-                "rust_api": true,
+                "implementation_language": "rust",
+                "runtime_abi": "sherpa-c",
                 "runtime_loading": "dynamic_at_execution",
                 "build_time_fetch": false,
                 "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
@@ -910,7 +963,8 @@ fn diarization_models() -> Result<()> {
                 "status": "compatibility",
                 "primary": false,
                 "python_required": true,
-                "rust_api": false,
+                "implementation_language": "python",
+                "runtime_abi": "python-cli",
                 "speaker_embeddings": true,
             }
         ]
@@ -943,7 +997,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "backend": SHERPA_ONNX_BACKEND_NAME,
                 "implemented": true,
                 "python_required": false,
-                "rust_api": true,
+                "implementation_language": "rust",
+                "runtime_abi": "sherpa-c",
                 "runtime_loading": "dynamic_at_execution",
                 "build_time_fetch": false,
                 "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
