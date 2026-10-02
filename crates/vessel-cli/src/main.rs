@@ -1450,10 +1450,27 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 .transpose();
             let runtime_loadable = runtime_probe.as_ref().is_ok_and(|_| runtime_library.is_some());
             let runtime_error = runtime_probe.err().map(|error| error.to_string());
+            let bundle_probe = if let Some(runtime_library) = runtime_library.as_deref()
+                && segmentation_path.is_file()
+                && embedding_path.is_file()
+            {
+                Some(validate_sherpa_bundle(
+                    runtime_library,
+                    &segmentation_path,
+                    &embedding_path,
+                ))
+            } else {
+                None
+            };
+            let bundle_loadable = bundle_probe.as_ref().is_some_and(|result| result.is_ok());
+            let bundle_error = bundle_probe
+                .and_then(|result| result.err())
+                .map(|error| error.to_string());
             let receipt_integrity_ok =
                 (!runtime_integrity.present || runtime_integrity.verified)
                     && (!model_integrity.present || model_integrity.verified);
             let ready = runtime_loadable
+                && bundle_loadable
                 && segmentation_path.is_file()
                 && embedding_path.is_file()
                 && receipt_integrity_ok
@@ -1472,6 +1489,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "runtime_library": runtime_library,
                 "runtime_loadable": runtime_loadable,
                 "runtime_error": runtime_error,
+                "bundle_loadable": bundle_loadable,
+                "bundle_error": bundle_error,
                 "runtime_integrity": integrity_status_json(&runtime_integrity),
                 "model_integrity": integrity_status_json(&model_integrity),
                 "segmentation_model": {
