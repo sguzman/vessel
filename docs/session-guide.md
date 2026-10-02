@@ -181,9 +181,11 @@ Current backends:
 - `whisper-candle`: pure-Rust Whisper, multilingual, timestamp-capable, CPU-first
 - `phonon-2`: Fermion Research CLI backend, English-only fast path, JSON segment timestamps, live stderr progress, local model-directory support
 
-Planned backend:
+Current optional external backend:
 
-- `whisperx`: optional faster-whisper/alignment/diarization pipeline; reserved but not yet executable through Vessel
+- `whisperx`: faster-whisper + forced alignment + optional pyannote diarization, file-local speaker labels, optional speaker embeddings, live progress, and offline cache-only model-directory support
+
+WhisperX is executable through Vessel when the external `whisperx` CLI is installed. Diarization identity remains unresolved until speaker-registry evidence is applied.
 
 Model acquisition supports both:
 
