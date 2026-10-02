@@ -97,6 +97,8 @@ struct UpdateArgs {
     video_ids: Vec<String>,
     #[arg(long = "asr-model")]
     asr_model: Option<String>,
+    #[arg(long = "asr-model-dir")]
+    asr_model_dir: Option<PathBuf>,
     #[arg(long = "asr-device")]
     asr_device: Option<String>,
     #[arg(long = "asr-language")]
@@ -881,6 +883,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         "would_require_local_asr",
                         serde_json::json!({
                             "model": &asr_config.model,
+                            "model_dir": &asr_config.model_dir,
                             "device": &asr_config.device,
                             "caption_probe": caption_probe,
                         }),
@@ -1049,6 +1052,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         "asr": {
             "engine": vessel_asr::ENGINE_NAME,
             "model": asr_config.model,
+            "model_dir": asr_config.model_dir,
             "device": asr_config.device,
             "language": asr_config.language,
             "model_loaded": asr_backend.is_some(),
@@ -1113,6 +1117,9 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     if let Some(model) = args.asr_model.as_deref() {
         config.model = model.to_owned();
     }
+    if let Some(model_dir) = args.asr_model_dir.as_ref() {
+        config.model_dir = Some(model_dir.clone());
+    }
     if let Some(device) = args.asr_device.as_deref() {
         config.device = device.to_owned();
     }
@@ -1128,6 +1135,12 @@ async fn acquire_local_asr_candidate(
     backend: Option<WhisperCandleBackend>,
     config: &AsrConfig,
 ) -> Result<(TranscriptCandidate, PathBuf, WhisperCandleBackend)> {
+    if cfg!(debug_assertions) {
+        warn!(
+            target: "asr",
+            "local ASR is running from an unoptimized debug build; use cargo build --release for real transcription work"
+        );
+    }
     let cache_dir = sourcearium_root
         .join(".cache")
         .join("vessel")
@@ -1158,7 +1171,24 @@ async fn acquire_local_asr_candidate(
 
     let whisper_wav = cache_dir.join("whisper-input.wav");
     if !whisper_wav.is_file() {
+        info!(
+            target: "asr",
+            input = %source_audio.display(),
+            output = %whisper_wav.display(),
+            "ASR audio normalization started"
+        );
         transcode_asr_audio(&source_audio, &whisper_wav).await?;
+        info!(
+            target: "asr",
+            output = %whisper_wav.display(),
+            "ASR audio normalization completed"
+        );
+    } else {
+        info!(
+            target: "asr",
+            input = %whisper_wav.display(),
+            "reusing cached normalized ASR audio"
+        );
     }
 
     let config = config.clone();
@@ -3203,6 +3233,7 @@ mod tests {
             max_videos: None,
             video_ids: Vec::new(),
             asr_model: Some("base".into()),
+            asr_model_dir: Some(PathBuf::from("/models/whisper-base")),
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
             upgrade_check_days: 30,
@@ -3211,6 +3242,10 @@ mod tests {
         };
         let config = resolve_asr_config(&args);
         assert_eq!(config.model, "base");
+        assert_eq!(
+            config.model_dir.as_deref(),
+            Some(std::path::Path::new("/models/whisper-base"))
+        );
         assert_eq!(config.device, "cpu");
         assert_eq!(config.language.as_deref(), Some("es"));
     }
