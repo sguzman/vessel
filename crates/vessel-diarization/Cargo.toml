@@ -6,5 +6,5 @@ license.workspace = true
 
 [dependencies]
 serde_json.workspace = true
-sherpa-onnx = { version = "=1.13.6", default-features = false, features = ["static"] }
+sherpa-onnx = { version = "=1.13.6", default-features = false, features = ["shared"] }
 vessel-core = { path = "../vessel-core" }
