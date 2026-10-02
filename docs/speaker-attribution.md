@@ -314,3 +314,40 @@ which renders:
 ```
 
 Projection is read-only. It does not rewrite the Sourcearium artifact.
+
+
+## Integrated Update Mode
+
+Speaker attribution can also be requested as part of a normal bounded Sourcearium update:
+
+```text
+vessel update \
+  --sourcearium <root> \
+  --asr-backend whisperx \
+  --diarize \
+  --speaker-embeddings \
+  --attribute-speakers
+```
+
+`--attribute-speakers` is deliberately opt-in. It requires all of:
+
+- `--asr-backend whisperx`
+- `--diarize`
+- `--speaker-embeddings`
+- a valid `speakers.toml` for the source
+- compatible cached speaker evidence for the human-confirmed anchor videos
+
+The update path reuses the same matching and metadata-application functions as `vessel speakers match` and `vessel speakers apply`; it does not have a second hidden attribution algorithm.
+
+After a diarized ASR artifact materializes, the integrated update:
+
+1. loads the source speaker registry
+2. matches the target file-local speaker embeddings against compatible human-confirmed anchor centroids
+3. records only threshold-passing `matched` assignments
+4. persists those assignments into the non-destructive `speaker_attribution` extension
+5. leaves the canonical raw diarization labels unchanged
+6. deletes disposable ASR media only after evidence and attribution work complete
+
+Update reports expose attribution attempt, assignment, update/no-op, and skip counts.
+
+Native creator/platform caption artifacts are not relabeled by this path because they do not carry WhisperX diarization evidence.
