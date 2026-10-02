@@ -714,10 +714,7 @@ pub fn render_speaker_attributed_transcript(
         let Some(table) = assignment.as_table() else {
             continue;
         };
-        let Some(label) = table
-            .get("diarization_label")
-            .and_then(toml::Value::as_str)
-        else {
+        let Some(label) = table.get("diarization_label").and_then(toml::Value::as_str) else {
             continue;
         };
         let Some(identity) = table.get("identity").and_then(toml::Value::as_str) else {
