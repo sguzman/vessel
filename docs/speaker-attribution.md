@@ -328,13 +328,27 @@ First cache the default Rust diarization models when network access is available
 vessel diarization fetch
 ```
 
-After the runtime/models are installed, a standalone WAV can be used to test diarization without YouTube, ASR, or Sourcearium mutation:
+After the runtime/models are installed, Vessel can explicitly seed a durable real-audio fixture:
+
+```text
+vessel diarization seed --video-id <youtube-video-id>
+```
+
+Seeding is the only networked part of this acceptance path. It downloads the selected audio, normalizes it to mono 16 kHz PCM WAV, writes a provenance sidecar, and installs the fixture under Vessel's user data directory. Successful Sourcearium ASR materialization deletes its disposable per-video ASR cache, so acceptance tests must not point at those temporary cache paths.
+
+A seeded fixture can then be exercised without YouTube, ASR, Sourcearium mutation, or network access:
+
+```text
+vessel diarization run --fixture-video-id <youtube-video-id> --speaker-embeddings
+```
+
+A direct WAV path remains supported:
 
 ```text
 vessel diarization run <16-kHz-wav> --speaker-embeddings
 ```
 
-The standalone probe uses only already-installed runtime/model files. It reports anonymous speaker labels and time segments, plus embedding dimensions/norms when requested; it does not persist identities or rewrite corpus artifacts.
+The standalone probe reports anonymous speaker labels and time segments, plus embedding dimensions/norms when requested; it does not persist identities or rewrite corpus artifacts.
 
 The fetch boundary is explicit and authenticated. `vessel diarization fetch --plan` performs no network I/O and reports the exact pinned byte count and SHA-256 for each runtime/model artifact. A real fetch verifies the SHA-256 before an archive is extracted or a downloaded model is promoted into place. After installation, Vessel keeps BLAKE3 integrity receipts so `diarization doctor` can detect later offline corruption without contacting the network.
 

@@ -161,6 +161,23 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
             "download response received"
         );
         let append = resumed;
+        let response_bytes = response.content_length();
+        let total_bytes = response_bytes.map(|bytes| {
+            if resumed {
+                existing_bytes.saturating_add(bytes)
+            } else {
+                bytes
+            }
+        });
+        eprintln!(
+            "[download] started video_id={} format_id={} resumed_bytes={} total_bytes={}",
+            plan.video_id,
+            download.format_id,
+            if resumed { existing_bytes } else { 0 },
+            total_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -170,6 +187,7 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
             .await?;
 
         let mut bytes_written = if resumed { existing_bytes } else { 0 };
+        let mut next_report = bytes_written;
         let mut response = response;
         while let Some(chunk) = response
             .chunk()
@@ -178,11 +196,46 @@ pub async fn execute_download(plan: &DownloadPlan) -> Result<DownloadResult> {
         {
             file.write_all(&chunk).await?;
             bytes_written += chunk.len() as u64;
+            if bytes_written >= next_report {
+                if let Some(total_bytes) = total_bytes {
+                    let percent = if total_bytes == 0 {
+                        100.0
+                    } else {
+                        bytes_written as f64 * 100.0 / total_bytes as f64
+                    };
+                    eprintln!(
+                        "[download] progress video_id={} format_id={} {:.1}% ({}/{})",
+                        plan.video_id,
+                        download.format_id,
+                        percent,
+                        bytes_written,
+                        total_bytes
+                    );
+                    next_report =
+                        bytes_written.saturating_add((total_bytes / 20).max(1));
+                } else {
+                    eprintln!(
+                        "[download] progress video_id={} format_id={} bytes={}",
+                        plan.video_id,
+                        download.format_id,
+                        bytes_written
+                    );
+                    next_report = bytes_written.saturating_add(8 * 1024 * 1024);
+                }
+            }
         }
         file.flush().await?;
         drop(file);
 
         fs::rename(&download.temp_path, &download.output_path).await?;
+        eprintln!(
+            "[download] completed video_id={} format_id={} bytes={} resumed={} output={}",
+            plan.video_id,
+            download.format_id,
+            bytes_written,
+            resumed,
+            download.output_path.display()
+        );
         info!(
             target: "download",
             format_id = %download.format_id,

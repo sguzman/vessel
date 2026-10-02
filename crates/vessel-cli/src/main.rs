@@ -235,6 +235,7 @@ enum DiarizationSubcommand {
     Models,
     Fetch(DiarizationFetchArgs),
     Doctor(DiarizationDoctorArgs),
+    Seed(DiarizationSeedArgs),
     Run(DiarizationRunArgs),
 }
 
@@ -265,8 +266,18 @@ struct DiarizationDoctorArgs {
 }
 
 #[derive(Debug, Args)]
+struct DiarizationSeedArgs {
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
 struct DiarizationRunArgs {
-    input: PathBuf,
+    input: Option<PathBuf>,
+    #[arg(long = "fixture-video-id")]
+    fixture_video_id: Option<String>,
     #[arg(long, default_value = "sherpa-onnx")]
     backend: String,
     #[arg(long = "runtime-dir")]
@@ -609,6 +620,7 @@ async fn main() -> Result<()> {
             DiarizationSubcommand::Models => diarization_models(),
             DiarizationSubcommand::Fetch(args) => diarization_fetch(args).await,
             DiarizationSubcommand::Doctor(args) => diarization_doctor(args),
+            DiarizationSubcommand::Seed(args) => diarization_seed(args).await,
             DiarizationSubcommand::Run(args) => diarization_run(args).await,
         },
         Commands::Speakers(cmd) => match cmd.command {
@@ -672,6 +684,33 @@ fn default_diarization_runtime_root() -> PathBuf {
         .join("diarization")
         .join(SHERPA_ONNX_BACKEND_NAME)
         .join(format!("v{SHERPA_ONNX_RUNTIME_VERSION}"))
+}
+
+fn validate_fixture_video_id(video_id: &str) -> Result<&str> {
+    let video_id = video_id.trim();
+    if video_id.is_empty()
+        || !video_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(VesselError::Config(format!(
+            "invalid YouTube video id for diarization fixture: {video_id:?}"
+        )));
+    }
+    Ok(video_id)
+}
+
+fn diarization_fixture_dir(video_id: &str) -> Result<PathBuf> {
+    let video_id = validate_fixture_video_id(video_id)?;
+    Ok(default_vessel_data_root()
+        .join("fixtures")
+        .join("diarization")
+        .join("youtube")
+        .join(video_id))
+}
+
+fn diarization_fixture_wav(video_id: &str) -> Result<PathBuf> {
+    Ok(diarization_fixture_dir(video_id)?.join("input.wav"))
 }
 
 fn sherpa_runtime_archive() -> Result<(String, u64, &'static str)> {
@@ -1694,17 +1733,168 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
     }
 }
 
+async fn diarization_seed(args: DiarizationSeedArgs) -> Result<()> {
+    let video_id = validate_fixture_video_id(&args.video_id)?.to_owned();
+    let target_dir = diarization_fixture_dir(&video_id)?;
+    let target_wav = target_dir.join("input.wav");
+    let provenance_path = target_dir.join("provenance.json");
+
+    if target_wav.is_file() && provenance_path.is_file() && !args.force {
+        let report = serde_json::json!({
+            "status": "already_seeded",
+            "video_id": video_id,
+            "fixture": target_wav,
+            "provenance": provenance_path,
+            "network_io": false,
+            "durable": true,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| VesselError::Config(error.to_string()))?
+        );
+        return Ok(());
+    }
+
+    let parent = target_dir.parent().ok_or_else(|| {
+        VesselError::Config(format!(
+            "diarization fixture directory has no parent: {}",
+            target_dir.display()
+        ))
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let staging_dir = parent.join(format!(".{video_id}.seeding"));
+    if args.force && staging_dir.exists() {
+        tokio::fs::remove_dir_all(&staging_dir).await?;
+    }
+    tokio::fs::create_dir_all(&staging_dir).await?;
+
+    eprintln!(
+        "[diarization] seeding durable fixture video_id={} staging={}",
+        video_id,
+        staging_dir.display()
+    );
+    let video = extract_video(&InputRef {
+        raw: video_id.clone(),
+        kind: InputKind::VideoId,
+    })
+    .await?;
+
+    let output_template = staging_dir
+        .join("source.%(ext)s")
+        .to_string_lossy()
+        .into_owned();
+    let planner = BasicDownloadPlanner;
+    let plan = planner.plan(&video, FormatSelector::BestAudio, &output_template)?;
+    let source_audio = plan
+        .downloads
+        .first()
+        .map(|download| download.output_path.clone())
+        .ok_or_else(|| {
+            VesselError::Extractor(format!(
+                "diarization seed audio planner produced no download for {video_id}"
+            ))
+        })?;
+    if !source_audio.is_file() {
+        execute_download(&plan).await?;
+    }
+
+    let staged_wav = staging_dir.join("input.wav");
+    if !staged_wav.is_file() {
+        eprintln!(
+            "[diarization] normalizing fixture audio input={} output={}",
+            source_audio.display(),
+            staged_wav.display()
+        );
+        transcode_asr_audio(&source_audio, &staged_wav).await?;
+    }
+
+    if !staged_wav.is_file() || std::fs::metadata(&staged_wav)?.len() <= 44 {
+        return Err(VesselError::Extractor(format!(
+            "diarization seed did not produce a valid WAV at {}",
+            staged_wav.display()
+        )));
+    }
+
+    let provenance = serde_json::json!({
+        "schema": 1,
+        "kind": "youtube_diarization_fixture",
+        "video_id": video_id,
+        "source_url": format!("https://www.youtube.com/watch?v={}", video.video_id),
+        "channel_id": video.channel_id,
+        "upload_date": video.upload_date,
+        "sample_rate_hz": 16000,
+        "channels": 1,
+        "codec": "pcm_s16le",
+        "network_phase": "explicit_seed_command",
+        "durable": true,
+    });
+    std::fs::write(
+        staging_dir.join("provenance.json"),
+        serde_json::to_vec_pretty(&provenance)
+            .map_err(|error| VesselError::Config(error.to_string()))?,
+    )?;
+
+    if source_audio.is_file() {
+        let _ = tokio::fs::remove_file(&source_audio).await;
+    }
+
+    install_staged_directory(&staging_dir, &target_dir)?;
+
+    let report = serde_json::json!({
+        "status": "seeded",
+        "video_id": video.video_id,
+        "fixture": target_wav,
+        "provenance": provenance_path,
+        "network_io": true,
+        "durable": true,
+        "reuse_with": {
+            "command": format!(
+                "vessel diarization run --fixture-video-id {} --speaker-embeddings",
+                video.video_id
+            ),
+        },
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
 async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
+    let input = match (args.input.as_ref(), args.fixture_video_id.as_deref()) {
+        (Some(path), None) => path.clone(),
+        (None, Some(video_id)) => diarization_fixture_wav(video_id)?,
+        (Some(_), Some(_)) => {
+            return Err(VesselError::Config(
+                "diarization run accepts either a WAV path or --fixture-video-id, not both".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(VesselError::Config(
+                "diarization run requires a WAV path or --fixture-video-id".into(),
+            ));
+        }
+    };
+
     if args.backend != SHERPA_ONNX_BACKEND_NAME {
         return Err(VesselError::Config(format!(
             "standalone diarization run is not implemented for backend {:?}",
             args.backend
         )));
     }
-    if !args.input.is_file() {
+    if !input.is_file() {
+        let hint = args.fixture_video_id.as_deref().map(|video_id| {
+            format!(
+                "; seed it first with: vessel diarization seed --video-id {video_id}"
+            )
+        }).unwrap_or_default();
         return Err(VesselError::Config(format!(
-            "diarization input does not exist: {}",
-            args.input.display()
+            "diarization input does not exist: {}{}",
+            input.display(),
+            hint
         )));
     }
 
@@ -1776,7 +1966,7 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
 
     let started = Instant::now();
     let (result, _backend) =
-        acquire_local_diarization(&args.input, None, &config).await?;
+        acquire_local_diarization(&input, None, &config).await?;
 
     let mut speaker_labels = result
         .segments
@@ -1816,7 +2006,8 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
     let report = serde_json::json!({
         "status": "ok",
         "backend": SHERPA_ONNX_BACKEND_NAME,
-        "input": args.input,
+        "input": input,
+        "fixture_video_id": args.fixture_video_id,
         "engine": result.engine,
         "model": result.model,
         "elapsed_seconds": started.elapsed().as_secs_f64(),
@@ -5429,14 +5620,24 @@ mod tests {
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
-        install_staged_directory, planned_remaining_bytes, resolve_asr_config,
-        resolve_configured_channels, resolve_diarization_config, sha256_file,
-        transcript_upgrade_probe_due, validate_update_speaker_attribution,
+        diarization_fixture_dir, install_staged_directory, planned_remaining_bytes,
+        resolve_asr_config, resolve_configured_channels, resolve_diarization_config,
+        sha256_file, transcript_upgrade_probe_due, validate_fixture_video_id,
+        validate_update_speaker_attribution,
         verify_integrity_receipt, write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
+
+    #[test]
+    fn diarization_fixture_ids_are_path_safe() {
+        assert_eq!(validate_fixture_video_id("g5o-OpVUHF0").unwrap(), "g5o-OpVUHF0");
+        assert!(validate_fixture_video_id("../escape").is_err());
+        assert!(validate_fixture_video_id("bad/id").is_err());
+        let path = diarization_fixture_dir("g5o-OpVUHF0").expect("fixture path");
+        assert!(path.ends_with("fixtures/diarization/youtube/g5o-OpVUHF0"));
+    }
 
     #[test]
     fn sha256_file_matches_known_vector() {
