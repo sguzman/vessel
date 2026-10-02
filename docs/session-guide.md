@@ -199,7 +199,7 @@ Speaker diarization is a separate operational stage from speech recognition.
 
 Primary backend:
 
-- `sherpa-onnx`: Rust API, offline speaker diarization, Pyannote segmentation ONNX + speaker-embedding ONNX, CPU-first, no Python runtime
+- `sherpa-onnx`: Rust integration over sherpa's C ABI, dynamically loaded at execution time; offline speaker diarization with Pyannote segmentation ONNX + speaker-embedding ONNX, CPU-first, no Python runtime
 
 Optional compatibility backend:
 
@@ -222,10 +222,12 @@ vessel diarization doctor
 
 Vessel does not depend on the `sherpa-onnx` or `sherpa-onnx-sys` Cargo crates. `cargo build` therefore does not run sherpa's downloader or fetch sherpa native runtime/model artifacts. At execution time Vessel dynamically loads the already-fetched sherpa C runtime from the user-data directory. If the runtime or models are missing, `--diarize` fails with an explicit instruction to run `vessel diarization fetch`; it does not silently download them.
 
-Model acquisition supports both:
+Model acquisition is always explicit:
 
-1. automatic first-use download/cache when network access is acceptable
-2. explicit offline/local model paths when the model has been downloaded ahead of time
+1. `vessel diarization fetch` performs the network acquisition when desired
+2. explicit local runtime/model paths support pre-staged or fully offline layouts
+
+Normal `vessel update --diarize` never performs first-use downloads.
 
 Operational model and preflight commands:
 
