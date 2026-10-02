@@ -141,7 +141,7 @@ pub fn fetch_asr_model(
             })
         }
         "whisperx" => Err(asr_error(
-            "ASR backend "whisperx" model fetching is reserved but not implemented yet",
+            "ASR backend \"whisperx\" model fetching is reserved but not implemented yet",
         )),
         other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
     }
@@ -449,7 +449,7 @@ impl Phonon2Backend {
             path.display(),
         );
 
-        let mut child = Command::new(self.executable())
+        let child = Command::new(self.executable())
             .arg("transcribe")
             .arg(&model_argument)
             .arg(path)
@@ -466,9 +466,9 @@ impl Phonon2Backend {
                 ))
             })?;
 
-        let output = child.wait_with_output().map_err(|error| {
-            asr_error(format!("failed while waiting for Phonon CLI: {error}"))
-        })?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| asr_error(format!("failed while waiting for Phonon CLI: {error}")))?;
         if !output.status.success() {
             return Err(asr_error(format!(
                 "Phonon CLI exited unsuccessfully with status {}",
@@ -550,12 +550,7 @@ fn parse_phonon_json(raw: &str, requested_model: &str) -> Result<TranscriptCandi
         })
         .collect::<Vec<_>>();
 
-    candidate_from_segments(
-        &provenance_engine,
-        model,
-        Some("en".into()),
-        segments,
-    )
+    candidate_from_segments(&provenance_engine, model, Some("en".into()), segments)
 }
 
 fn candidate_from_segments(
@@ -674,10 +669,7 @@ mod tests {
             candidate.engine.as_deref(),
             Some("fermion-phonon2-five-value-cpu")
         );
-        assert_eq!(
-            candidate.model.as_deref(),
-            Some("FermionResearch/Phonon-2")
-        );
+        assert_eq!(candidate.model.as_deref(), Some("FermionResearch/Phonon-2"));
         assert_eq!(candidate.language.as_deref(), Some("en"));
         assert_eq!(candidate.segments.len(), 2);
         assert_eq!(candidate.segments[1].start_seconds, Some(5));
@@ -722,7 +714,10 @@ mod tests {
         .expect("candidate");
 
         assert_eq!(candidate.derivation, TranscriptDerivation::LocalAsr);
-        assert_eq!(candidate.engine.as_deref(), Some(WHISPER_CANDLE_ENGINE_NAME));
+        assert_eq!(
+            candidate.engine.as_deref(),
+            Some(WHISPER_CANDLE_ENGINE_NAME)
+        );
         assert_eq!(candidate.model.as_deref(), Some("small"));
         assert_eq!(candidate.language.as_deref(), Some("en"));
         assert_eq!(candidate.segments[0].start_seconds, Some(3));
