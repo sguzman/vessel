@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::Client;
@@ -1192,8 +1193,29 @@ async fn acquire_local_asr_candidate(
     }
 
     let config = config.clone();
+    let heartbeat_model = config.model.clone();
+    let heartbeat_input = whisper_wav.clone();
     let wav_for_worker = whisper_wav.clone();
-    let (candidate, backend) = tokio::task::spawn_blocking(move || {
+
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = std::sync::mpsc::channel::<()>();
+    let heartbeat = std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            match heartbeat_stop_rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "[asr] transcription still running model={} input={} elapsed={:.0}s",
+                        heartbeat_model,
+                        heartbeat_input.display(),
+                        started.elapsed().as_secs_f64(),
+                    );
+                }
+            }
+        }
+    });
+
+    let worker_result = tokio::task::spawn_blocking(move || {
         let mut backend = match backend {
             Some(backend) => backend,
             None => WhisperCandleBackend::load(config)?,
@@ -1204,8 +1226,12 @@ async fn acquire_local_asr_candidate(
     .await
     .map_err(|error| {
         VesselError::Extractor(format!("local ASR worker failed to join: {error}"))
-    })??;
+    });
 
+    let _ = heartbeat_stop_tx.send(());
+    let _ = heartbeat.join();
+
+    let (candidate, backend) = worker_result??;
     Ok((candidate, cache_dir, backend))
 }
 
