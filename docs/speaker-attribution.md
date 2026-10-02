@@ -350,4 +350,14 @@ After a diarized ASR artifact materializes, the integrated update:
 
 Update reports expose attribution attempt, assignment, update/no-op, and skip counts.
 
+Integrated matching uses the same calibration controls as the standalone matcher:
+
+```text
+--speaker-min-similarity <value>
+--speaker-min-margin <value>
+--speaker-min-anchor-dominance <value>
+```
+
+Defaults remain `0.80`, `0.05`, and `0.80` respectively. The selected values are emitted in the update report.
+
 Native creator/platform caption artifacts are not relabeled by this path because they do not carry WhisperX diarization evidence.
