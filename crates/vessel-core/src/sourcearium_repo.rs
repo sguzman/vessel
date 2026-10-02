@@ -545,6 +545,26 @@ pub fn materialize_youtube_transcript(
         extensions.insert("youtube".into(), youtube);
     }
 
+    if let Some(diarization) = candidate.diarization.as_ref() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "engine".into(),
+            toml::Value::String(diarization.engine.clone()),
+        );
+        table.insert(
+            "model".into(),
+            toml::Value::String(diarization.model.clone()),
+        );
+        table.insert(
+            "label_scope".into(),
+            toml::Value::String("file_local".into()),
+        );
+        if let Some(revision) = diarization.registry_revision {
+            table.insert("registry_revision".into(), toml::Value::Integer(revision as i64));
+        }
+        extensions.insert("diarization".into(), table);
+    }
+
     let artifact = SourceariumArtifactV1 {
         schema: 1,
         artifact_id: artifact_id.clone(),
@@ -893,6 +913,50 @@ input = "https://www.youtube.com/@{key}"
                 speaker: None,
             }],
         }
+    }
+
+    #[test]
+    fn materialization_preserves_diarization_provenance_in_extension() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let mut candidate = sample_candidate(TranscriptDerivation::LocalAsr);
+        candidate.diarization = Some(crate::DiarizationProvenance {
+            engine: "pyannote".into(),
+            model: "speaker-diarization-community-1".into(),
+            registry_revision: Some(3),
+        });
+        candidate.segments[0].speaker = Some(crate::TranscriptSpeaker {
+            diarization_label: "SPEAKER_00".into(),
+            identity: None,
+            attribution: crate::SpeakerAttribution::Unresolved,
+        });
+
+        let result = materialize_youtube_transcript(&root, &source, &video, None, &candidate)
+            .expect("materialize");
+        let raw = fs::read_to_string(&result.path).unwrap();
+        let (artifact, body) = SourceariumArtifactV1::parse_markdown(&raw).unwrap();
+
+        assert_eq!(
+            artifact.extensions["diarization"]["engine"].as_str(),
+            Some("pyannote")
+        );
+        assert_eq!(
+            artifact.extensions["diarization"]["model"].as_str(),
+            Some("speaker-diarization-community-1")
+        );
+        assert_eq!(
+            artifact.extensions["diarization"]["label_scope"].as_str(),
+            Some("file_local")
+        );
+        assert_eq!(
+            artifact.extensions["diarization"]["registry_revision"].as_integer(),
+            Some(3)
+        );
+        assert!(body.contains("<speaker:SPEAKER_00>"));
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
