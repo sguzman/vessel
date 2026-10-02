@@ -12,11 +12,11 @@ use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, SpeakerIdentityV1,
-    SpeakerRegistryV1, TranscriptCandidate, VesselError, VideoSelection, apply_sourcearium_prune,
-    discover_youtube_sources, inventory_sourcearium_repository, load_config,
-    load_speaker_registry, load_youtube_transcript_artifact, materialize_youtube_transcript,
-    plan_sourcearium_prune, resolve_runtime_layout, validate_sourcearium_repository,
-    write_speaker_registry,
+    SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, VesselError, VideoSelection,
+    apply_sourcearium_prune, discover_youtube_sources, inventory_sourcearium_repository,
+    load_config, load_speaker_registry, load_youtube_transcript_artifact,
+    match_speakers_from_evidence, materialize_youtube_transcript, plan_sourcearium_prune,
+    resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -180,6 +180,7 @@ enum SpeakersSubcommand {
     Show(SpeakerSourceArgs),
     Init(SpeakerInitArgs),
     Anchor(SpeakerAnchorArgs),
+    Match(SpeakerMatchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -218,6 +219,22 @@ struct SpeakerAnchorArgs {
     start_seconds: u64,
     #[arg(long = "end-seconds")]
     end_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerMatchArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "min-similarity", default_value_t = 0.80)]
+    min_similarity: f64,
+    #[arg(long = "min-margin", default_value_t = 0.05)]
+    min_margin: f64,
+    #[arg(long = "min-anchor-dominance", default_value_t = 0.80)]
+    min_anchor_dominance: f64,
 }
 
 #[derive(Debug, Args)]
@@ -451,6 +468,7 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Show(args) => speakers_show(args),
             SpeakersSubcommand::Init(args) => speakers_init(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
+            SpeakersSubcommand::Match(args) => speakers_match(args),
         },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
@@ -610,6 +628,34 @@ fn speakers_anchor(args: SpeakerAnchorArgs) -> Result<()> {
         "speaker anchor recorded registry={} revision={}",
         path.display(),
         registry.revision
+    );
+    Ok(())
+}
+
+fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
+    let registry = load_speaker_registry(&registry_path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}; initialize it first",
+            registry_path.display()
+        ))
+    })?;
+    let evidence_dir = root.join(".cache").join("vessel").join("speaker-evidence");
+    let report = match_speakers_from_evidence(
+        &registry,
+        &evidence_dir,
+        &args.video_id,
+        SpeakerMatchConfig {
+            min_similarity: args.min_similarity,
+            min_margin: args.min_margin,
+            min_anchor_dominance: args.min_anchor_dominance,
+        },
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
     );
     Ok(())
 }
