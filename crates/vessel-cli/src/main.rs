@@ -19,6 +19,10 @@ use vessel_core::{
     plan_sourcearium_prune, render_speaker_attributed_transcript,
     resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
 };
+use vessel_diarization::{
+    DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
+    SHERPA_ONNX_BACKEND_NAME, SherpaOnnxDiarizer, persist_speaker_evidence,
+};
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
     ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, acquire_best_caption_candidate,
@@ -65,6 +69,7 @@ enum Commands {
     Video(VideoCommand),
     Project(ProjectCommand),
     Asr(AsrCommand),
+    Diarization(DiarizationCommand),
     Speakers(SpeakersCommand),
     Info(UrlArg),
     Formats(UrlArg),
@@ -114,6 +119,26 @@ struct UpdateArgs {
     asr_language: Option<String>,
     #[arg(long)]
     diarize: bool,
+    #[arg(long = "diarization-backend", default_value = "sherpa-onnx")]
+    diarization_backend: String,
+    #[arg(long = "diarization-segmentation-model")]
+    diarization_segmentation_model: Option<PathBuf>,
+    #[arg(long = "diarization-embedding-model")]
+    diarization_embedding_model: Option<PathBuf>,
+    #[arg(long = "diarization-provider", default_value = "cpu")]
+    diarization_provider: String,
+    #[arg(long = "diarization-num-threads", default_value_t = 4)]
+    diarization_num_threads: i32,
+    #[arg(
+        long = "diarization-clustering-threshold",
+        default_value_t = DEFAULT_CLUSTERING_THRESHOLD
+    )]
+    diarization_clustering_threshold: f32,
+    #[arg(
+        long = "diarization-window-shift-ratio",
+        default_value_t = DEFAULT_WINDOW_SHIFT_RATIO
+    )]
+    diarization_window_shift_ratio: f32,
     #[arg(long = "diarization-model")]
     diarization_model: Option<String>,
     #[arg(long = "min-speakers")]
@@ -189,6 +214,30 @@ struct AsrDoctorArgs {
     model_dir: Option<PathBuf>,
     #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
     hf_token_env: String,
+}
+
+#[derive(Debug, Args)]
+struct DiarizationCommand {
+    #[command(subcommand)]
+    command: DiarizationSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DiarizationSubcommand {
+    Models,
+    Doctor(DiarizationDoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct DiarizationDoctorArgs {
+    #[arg(long, default_value = "sherpa-onnx")]
+    backend: String,
+    #[arg(long = "segmentation-model")]
+    segmentation_model: Option<PathBuf>,
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<PathBuf>,
+    #[arg(long = "provider", default_value = "cpu")]
+    provider: String,
 }
 
 #[derive(Debug, Args)]
@@ -501,6 +550,10 @@ async fn main() -> Result<()> {
             AsrSubcommand::Fetch(args) => asr_fetch(args),
             AsrSubcommand::Doctor(args) => asr_doctor(args),
         },
+        Commands::Diarization(cmd) => match cmd.command {
+            DiarizationSubcommand::Models => diarization_models(),
+            DiarizationSubcommand::Doctor(args) => diarization_doctor(args),
+        },
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
             SpeakersSubcommand::Init(args) => speakers_init(args),
@@ -516,6 +569,101 @@ async fn main() -> Result<()> {
             PluginSubcommand::List => plugin_list(&paths, &layout).await,
             PluginSubcommand::Install(args) => plugin_install(args, &paths, &layout).await,
         },
+    }
+}
+
+fn diarization_models() -> Result<()> {
+    let report = serde_json::json!({
+        "backends": [
+            {
+                "name": SHERPA_ONNX_BACKEND_NAME,
+                "status": "implemented",
+                "primary": true,
+                "python_required": false,
+                "rust_api": true,
+                "segmentation_model": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+                "embedding_model": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                "provider": "cpu",
+                "speaker_embeddings": true,
+            },
+            {
+                "name": "whisperx",
+                "status": "compatibility",
+                "primary": false,
+                "python_required": true,
+                "rust_api": false,
+                "speaker_embeddings": true,
+            }
+        ]
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
+    match args.backend.as_str() {
+        SHERPA_ONNX_BACKEND_NAME => {
+            let segmentation = args.segmentation_model.as_ref().map(|path| {
+                serde_json::json!({
+                    "path": path,
+                    "exists": path.is_file(),
+                })
+            });
+            let embedding = args.embedding_model.as_ref().map(|path| {
+                serde_json::json!({
+                    "path": path,
+                    "exists": path.is_file(),
+                })
+            });
+            let ready = args
+                .segmentation_model
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+                && args
+                    .embedding_model
+                    .as_ref()
+                    .is_some_and(|path| path.is_file())
+                && !args.provider.trim().is_empty();
+            let report = serde_json::json!({
+                "backend": SHERPA_ONNX_BACKEND_NAME,
+                "implemented": true,
+                "python_required": false,
+                "rust_api": true,
+                "provider": args.provider,
+                "segmentation_model": segmentation,
+                "embedding_model": embedding,
+                "ready_for_diarization": ready,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| VesselError::Config(error.to_string()))?
+            );
+            Ok(())
+        }
+        "whisperx" => {
+            let report = serde_json::json!({
+                "backend": "whisperx",
+                "implemented": true,
+                "compatibility_only": true,
+                "python_required": true,
+                "ready_for_diarization": false,
+                "message": "Use vessel asr doctor --backend whisperx for the optional Python compatibility backend.",
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| VesselError::Config(error.to_string()))?
+            );
+            Ok(())
+        }
+        other => Err(VesselError::Config(format!(
+            "unsupported diarization backend {other:?}"
+        ))),
     }
 }
 
