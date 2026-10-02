@@ -11,11 +11,12 @@ use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
-    VesselError, VideoSelection, apply_sourcearium_prune, discover_youtube_sources,
-    inventory_sourcearium_repository, load_config, load_youtube_transcript_artifact,
-    materialize_youtube_transcript, plan_sourcearium_prune, resolve_runtime_layout,
-    validate_sourcearium_repository,
+    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, SpeakerIdentityV1,
+    SpeakerRegistryV1, TranscriptCandidate, VesselError, VideoSelection, apply_sourcearium_prune,
+    discover_youtube_sources, inventory_sourcearium_repository, load_config,
+    load_speaker_registry, load_youtube_transcript_artifact, materialize_youtube_transcript,
+    plan_sourcearium_prune, resolve_runtime_layout, validate_sourcearium_repository,
+    write_speaker_registry,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -63,6 +64,7 @@ enum Commands {
     Video(VideoCommand),
     Project(ProjectCommand),
     Asr(AsrCommand),
+    Speakers(SpeakersCommand),
     Info(UrlArg),
     Formats(UrlArg),
     Download(DownloadArgs),
@@ -165,6 +167,57 @@ struct AsrFetchArgs {
     model: Option<String>,
     #[arg(long)]
     executable: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SpeakersCommand {
+    #[command(subcommand)]
+    command: SpeakersSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SpeakersSubcommand {
+    Show(SpeakerSourceArgs),
+    Init(SpeakerInitArgs),
+    Anchor(SpeakerAnchorArgs),
+}
+
+#[derive(Debug, Args)]
+struct SpeakerSourceArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerInitArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "speaker-key", default_value = "creator")]
+    speaker_key: String,
+    #[arg(long = "display-name")]
+    display_name: Option<String>,
+    #[arg(long, default_value = "creator")]
+    relation: String,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerAnchorArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long)]
+    speaker: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "start-seconds")]
+    start_seconds: u64,
+    #[arg(long = "end-seconds")]
+    end_seconds: u64,
 }
 
 #[derive(Debug, Args)]
@@ -394,6 +447,11 @@ async fn main() -> Result<()> {
             AsrSubcommand::Models => asr_models(),
             AsrSubcommand::Fetch(args) => asr_fetch(args),
         },
+        Commands::Speakers(cmd) => match cmd.command {
+            SpeakersSubcommand::Show(args) => speakers_show(args),
+            SpeakersSubcommand::Init(args) => speakers_init(args),
+            SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
+        },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
         Commands::Download(args) => download(args, &layout).await,
@@ -464,6 +522,94 @@ fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&report)
             .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn absolute_sourcearium_root(path: PathBuf) -> Result<PathBuf> {
+    let root = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if !root.join("sourcearium.toml").is_file() {
+        return Err(VesselError::Corpus(format!(
+            "{} does not look like a Sourcearium root; sourcearium.toml is missing",
+            root.display()
+        )));
+    }
+    Ok(root)
+}
+
+fn speaker_registry_path(sourcearium: PathBuf, source_key: &str) -> Result<(PathBuf, String)> {
+    let root = absolute_sourcearium_root(sourcearium)?;
+    let source = discover_youtube_sources(&root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == source_key)
+        .ok_or_else(|| VesselError::Corpus(format!("unknown YouTube source key {source_key:?}")))?;
+    let source_id = source.policy.channel.id.clone().ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "source {source_key:?} needs a stable channel id before speaker registry initialization"
+        ))
+    })?;
+    Ok((source.source_dir.join("speakers.toml"), source_id))
+}
+
+fn speakers_show(args: SpeakerSourceArgs) -> Result<()> {
+    let (path, _) = speaker_registry_path(args.sourcearium, &args.source_key)?;
+    let registry = load_speaker_registry(&path)?.ok_or_else(|| {
+        VesselError::Corpus(format!("speaker registry does not exist: {}", path.display()))
+    })?;
+    let rendered = toml::to_string_pretty(&registry)
+        .map_err(|error| VesselError::Config(error.to_string()))?;
+    print!("{rendered}");
+    Ok(())
+}
+
+fn speakers_init(args: SpeakerInitArgs) -> Result<()> {
+    let (path, source_id) = speaker_registry_path(args.sourcearium, &args.source_key)?;
+    if path.exists() {
+        return Err(VesselError::Corpus(format!(
+            "speaker registry already exists: {}",
+            path.display()
+        )));
+    }
+    let registry = SpeakerRegistryV1 {
+        schema: 1,
+        source_family: "youtube".into(),
+        source_id,
+        revision: 1,
+        speakers: vec![SpeakerIdentityV1 {
+            key: args.speaker_key,
+            display_name: args.display_name,
+            relation: Some(args.relation),
+            anchors: Vec::new(),
+        }],
+    };
+    write_speaker_registry(&path, &registry)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn speakers_anchor(args: SpeakerAnchorArgs) -> Result<()> {
+    let (path, _) = speaker_registry_path(args.sourcearium, &args.source_key)?;
+    let mut registry = load_speaker_registry(&path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}; initialize it first",
+            path.display()
+        ))
+    })?;
+    registry.add_human_anchor(
+        &args.speaker,
+        &args.video_id,
+        args.start_seconds,
+        args.end_seconds,
+    )?;
+    write_speaker_registry(&path, &registry)?;
+    println!(
+        "speaker anchor recorded registry={} revision={}",
+        path.display(),
+        registry.revision
     );
     Ok(())
 }
