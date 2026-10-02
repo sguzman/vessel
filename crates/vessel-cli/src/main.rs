@@ -1993,6 +1993,13 @@ async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
     let evidence_path = persist_speaker_evidence(&evidence_dir, &evidence)?;
     let applied =
         apply_youtube_transcript_diarization(&source, &args.video_id, &candidate)?;
+    let transcript_segments = candidate.segments.len();
+    let speaker_assigned_segments = candidate
+        .segments
+        .iter()
+        .filter(|segment| segment.speaker.is_some())
+        .count();
+    let speaker_unresolved_segments = transcript_segments.saturating_sub(speaker_assigned_segments);
 
     let speaker_count = result
         .segments
@@ -2015,6 +2022,9 @@ async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
         "speaker_count": speaker_count,
         "segment_count": result.segments.len(),
         "speaker_embedding_count": result.speaker_embeddings.len(),
+        "transcript_segments": transcript_segments,
+        "speaker_assigned_segments": speaker_assigned_segments,
+        "speaker_unresolved_segments": speaker_unresolved_segments,
         "network_io": false,
         "asr_invoked": false,
         "sourcearium_mutation": true,

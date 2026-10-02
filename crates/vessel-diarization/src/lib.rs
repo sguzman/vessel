@@ -16,6 +16,9 @@ pub const SHERPA_ONNX_ENGINE_NAME: &str = "sherpa-onnx";
 pub const SHERPA_ONNX_RUNTIME_VERSION: &str = "1.13.6";
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_WINDOW_SHIFT_RATIO: f32 = 0.1;
+const TRANSCRIPT_ALIGNMENT_MIN_OVERLAP_SECONDS: f64 = 0.25;
+const TRANSCRIPT_ALIGNMENT_MIN_DOMINANCE: f64 = 0.60;
+const TRANSCRIPT_ALIGNMENT_MIN_MARGIN: f64 = 0.15;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarizationConfig {
@@ -170,27 +173,38 @@ impl DiarizationResult {
             registry_revision: None,
         });
 
-        for segment in &mut candidate.segments {
+        let diarization_end = self
+            .segments
+            .iter()
+            .map(|segment| segment.end_seconds)
+            .fold(0.0_f64, f64::max);
+        let starts = candidate
+            .segments
+            .iter()
+            .map(|segment| segment.start_seconds)
+            .collect::<Vec<_>>();
+
+        for (index, segment) in candidate.segments.iter_mut().enumerate() {
             let Some(start_seconds) = segment.start_seconds else {
                 segment.speaker = None;
                 continue;
             };
-            let time = start_seconds as f64;
-            let speakers = self
-                .segments
+            let start = start_seconds as f64;
+            let end = starts
                 .iter()
-                .filter(|item| item.start_seconds <= time && time < item.end_seconds)
-                .map(|item| item.speaker.as_str())
-                .collect::<BTreeSet<_>>();
-            segment.speaker = if speakers.len() == 1 {
-                Some(TranscriptSpeaker {
-                    diarization_label: (*speakers.iter().next().expect("one speaker")).to_owned(),
+                .skip(index + 1)
+                .flatten()
+                .map(|value| *value as f64)
+                .find(|next| *next > start)
+                .unwrap_or(diarization_end);
+
+            segment.speaker = align_transcript_interval(&self.segments, start, end).map(|label| {
+                TranscriptSpeaker {
+                    diarization_label: label,
                     identity: None,
                     attribution: SpeakerAttribution::Unresolved,
-                })
-            } else {
-                None
-            };
+                }
+            });
         }
 
         candidate.validate()
@@ -989,6 +1003,53 @@ pub fn persist_speaker_evidence(
     Ok(path)
 }
 
+fn align_transcript_interval(
+    diarization: &[DiarizationSegment],
+    start: f64,
+    end: f64,
+) -> Option<String> {
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return None;
+    }
+
+    let mut overlap_by_speaker = BTreeMap::<&str, f64>::new();
+    for segment in diarization {
+        let overlap_start = start.max(segment.start_seconds);
+        let overlap_end = end.min(segment.end_seconds);
+        let overlap = overlap_end - overlap_start;
+        if overlap > 0.0 {
+            *overlap_by_speaker
+                .entry(segment.speaker.as_str())
+                .or_default() += overlap;
+        }
+    }
+
+    let total_overlap = overlap_by_speaker.values().copied().sum::<f64>();
+    if total_overlap < TRANSCRIPT_ALIGNMENT_MIN_OVERLAP_SECONDS {
+        return None;
+    }
+
+    let mut ranked = overlap_by_speaker.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let (best_speaker, best_overlap) = *ranked.first()?;
+    let second_overlap = ranked.get(1).map(|(_, overlap)| *overlap).unwrap_or(0.0);
+    let dominance = best_overlap / total_overlap;
+    let margin = (best_overlap - second_overlap) / total_overlap;
+
+    if dominance < TRANSCRIPT_ALIGNMENT_MIN_DOMINANCE
+        || (ranked.len() > 1 && margin < TRANSCRIPT_ALIGNMENT_MIN_MARGIN)
+    {
+        return None;
+    }
+
+    Some(best_speaker.to_owned())
+}
+
 fn concatenate_speaker_audio(
     samples: &[f32],
     sample_rate: i32,
@@ -1153,6 +1214,97 @@ mod tests {
         let mut candidate = candidate();
         result.apply_to_candidate(&mut candidate).expect("apply");
         assert!(candidate.segments[0].speaker.is_none());
+    }
+
+    #[test]
+    fn interval_overlap_labels_segment_that_starts_before_first_speech_frame() {
+        let result = DiarizationResult {
+            engine: SHERPA_ONNX_ENGINE_NAME.into(),
+            model: "segmentation=seg/model.onnx;embedding=emb/model.onnx".into(),
+            segments: vec![DiarizationSegment {
+                start_seconds: 0.031,
+                end_seconds: 15.978,
+                speaker: "SPEAKER_00".into(),
+            }],
+            speaker_embeddings: BTreeMap::new(),
+        };
+        let mut candidate = TranscriptCandidate {
+            derivation: TranscriptDerivation::LocalAsr,
+            language: Some("en".into()),
+            timestamps: true,
+            engine: Some("whisper-candle".into()),
+            model: Some("small".into()),
+            diarization: None,
+            segments: vec![
+                TranscriptSegment {
+                    start_seconds: Some(0),
+                    text: "Opening.".into(),
+                    speaker: None,
+                },
+                TranscriptSegment {
+                    start_seconds: Some(4),
+                    text: "Continuation.".into(),
+                    speaker: None,
+                },
+            ],
+        };
+
+        result.apply_to_candidate(&mut candidate).expect("apply");
+        assert_eq!(
+            candidate.segments[0]
+                .speaker
+                .as_ref()
+                .map(|speaker| speaker.diarization_label.as_str()),
+            Some("SPEAKER_00")
+        );
+    }
+
+    #[test]
+    fn near_even_speaker_change_remains_unresolved() {
+        let diarization = vec![
+            DiarizationSegment {
+                start_seconds: 15.978,
+                end_seconds: 24.044,
+                speaker: "SPEAKER_01".into(),
+            },
+            DiarizationSegment {
+                start_seconds: 24.044,
+                end_seconds: 26.761,
+                speaker: "SPEAKER_02".into(),
+            },
+            DiarizationSegment {
+                start_seconds: 26.761,
+                end_seconds: 47.197,
+                speaker: "SPEAKER_01".into(),
+            },
+        ];
+
+        assert_eq!(align_transcript_interval(&diarization, 21.0, 27.0), None);
+        assert_eq!(
+            align_transcript_interval(&diarization, 27.0, 31.0).as_deref(),
+            Some("SPEAKER_01")
+        );
+    }
+
+    #[test]
+    fn silence_gap_does_not_defeat_single_speaker_overlap() {
+        let diarization = vec![
+            DiarizationSegment {
+                start_seconds: 26.761,
+                end_seconds: 47.197,
+                speaker: "SPEAKER_01".into(),
+            },
+            DiarizationSegment {
+                start_seconds: 52.630,
+                end_seconds: 61.068,
+                speaker: "SPEAKER_01".into(),
+            },
+        ];
+
+        assert_eq!(
+            align_transcript_interval(&diarization, 47.0, 57.0).as_deref(),
+            Some("SPEAKER_01")
+        );
     }
 
     #[test]

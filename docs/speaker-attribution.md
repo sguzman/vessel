@@ -358,6 +358,8 @@ vessel diarization apply --sourcearium <root> --source-key <source> --video-id <
 
 `diarization apply` is an explicit local mutation. It requires the durable fixture for the same video id, runs sherpa with speaker embeddings enabled, attaches anonymous file-local speaker labels to the existing transcript, persists speaker evidence under `.cache/vessel/speaker-evidence`, and updates only the diarization enrichment. It refuses to change the transcript's derivation, language, timestamp policy, ASR engine, or ASR model. If re-diarization changes the anonymous labeling, any prior speaker-attribution extension is cleared rather than left stale.
 
+Transcript-to-diarization alignment is interval-based rather than point-sampled. Vessel infers each transcript segment's interval from its timestamp to the next timestamp, accumulates diarization overlap by speaker, and assigns a label only when the leading speaker has enough overlap, dominance, and margin. This intentionally labels boundary cases such as an ASR segment beginning at 0.000s when detected speech begins a few milliseconds later, while leaving near-even speaker-change chunks unresolved instead of forcing a false identity.
+
 The fetch boundary is explicit and authenticated. `vessel diarization fetch --plan` performs no network I/O and reports the exact pinned byte count and SHA-256 for each runtime/model artifact. A real fetch verifies the SHA-256 before an archive is extracted or a downloaded model is promoted into place. After installation, Vessel keeps BLAKE3 integrity receipts so `diarization doctor` can detect later offline corruption without contacting the network.
 
 Then any supported ASR backend can feed the primary Rust diarization path:
