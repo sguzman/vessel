@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::{Client, StatusCode};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
@@ -600,9 +602,13 @@ const SHERPA_EMBEDDING_MODEL_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const SHERPA_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 const SHERPA_SEGMENTATION_ARCHIVE_BYTES: u64 = 6_958_444;
+const SHERPA_SEGMENTATION_ARCHIVE_SHA256: &str =
+    "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488";
 const SHERPA_EMBEDDING_FILENAME: &str =
     "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const SHERPA_EMBEDDING_BYTES: u64 = 39_593_761;
+const SHERPA_EMBEDDING_SHA256: &str =
+    "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b";
 const SHERPA_RUNTIME_RECEIPT_FILENAME: &str = "vessel-runtime-integrity.json";
 const SHERPA_MODELS_RECEIPT_FILENAME: &str = "vessel-models-integrity.json";
 
@@ -635,32 +641,37 @@ fn default_diarization_runtime_root() -> PathBuf {
         .join(format!("v{SHERPA_ONNX_RUNTIME_VERSION}"))
 }
 
-fn sherpa_runtime_archive() -> Result<(String, u64)> {
+fn sherpa_runtime_archive() -> Result<(String, u64, &'static str)> {
     let version = SHERPA_ONNX_RUNTIME_VERSION;
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Ok((
             format!("sherpa-onnx-v{version}-linux-x64-shared-lib.tar.bz2"),
             9_547_977,
+            "bbeb203da0f69e37235b50e168d61d1f64ad2de256490cc64ed5535957415a97",
         ))
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         Ok((
             format!("sherpa-onnx-v{version}-linux-aarch64-shared-cpu-lib.tar.bz2"),
             12_331_011,
+            "3575bde0543da12fc626c814c14287455f70a22b72caa483c7398d5f20f4cb12",
         ))
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         Ok((
             format!("sherpa-onnx-v{version}-win-x64-shared-MT-Release-lib.tar.bz2"),
             7_890_278,
+            "e539a6859e67faf6450473c4a3e0b1a6674b9f45df63c1483dbe8dca3a04f222",
         ))
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         Ok((
             format!("sherpa-onnx-v{version}-osx-x64-shared-lib.tar.bz2"),
             9_770_199,
+            "dbe7e7aa269f742efec7366d5c4d8020cc32fc833023b9b87e5d6282d70a62b8",
         ))
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok((
             format!("sherpa-onnx-v{version}-osx-arm64-shared-lib.tar.bz2"),
             8_512_718,
+            "d628e43aed6b719be163549876f41c909b75df26b8f439a5af69de03896bc6f5",
         ))
     } else {
         Err(VesselError::Config(format!(
@@ -696,6 +707,35 @@ fn blake3_file(path: &Path) -> Result<String> {
             path.display()
         )))?;
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_sha256(path: &Path, label: &str, expected_sha256: &str) -> Result<()> {
+    let expected = expected_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_sha256)
+        .to_ascii_lowercase();
+    let actual = sha256_file(path)?;
+    if actual != expected {
+        return Err(VesselError::Extractor(format!(
+            "{label} SHA-256 mismatch: expected {expected}, got {actual} for {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn write_integrity_receipt(
@@ -954,7 +994,8 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         .runtime_dir
         .unwrap_or_else(default_diarization_runtime_root);
     let (segmentation_model, embedding_model) = sherpa_model_paths(&model_root);
-    let (runtime_archive_name, runtime_archive_bytes) = sherpa_runtime_archive()?;
+    let (runtime_archive_name, runtime_archive_bytes, runtime_archive_sha256) =
+        sherpa_runtime_archive()?;
     let runtime_url = format!(
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/v{}/{}",
         SHERPA_ONNX_RUNTIME_VERSION, runtime_archive_name
@@ -998,7 +1039,8 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             "build_time_fetch": false,
             "transactional_install": true,
             "integrity": {
-                "algorithm": "blake3",
+                "download_algorithm": "sha256",
+                "installed_receipt_algorithm": "blake3",
                 "runtime_receipt": runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
                 "model_receipt": model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
                 "network_required_for_verification": false,
@@ -1008,6 +1050,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                     "kind": "native_runtime",
                     "url": runtime_url,
                     "expected_bytes": runtime_archive_bytes,
+                    "expected_sha256": runtime_archive_sha256,
                     "destination_root": runtime_root,
                     "already_available": runtime_available,
                     "resume_bytes": runtime_resume_bytes,
@@ -1017,6 +1060,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                     "kind": "segmentation_model",
                     "url": SHERPA_SEGMENTATION_ARCHIVE_URL,
                     "expected_bytes": SHERPA_SEGMENTATION_ARCHIVE_BYTES,
+                    "expected_sha256": SHERPA_SEGMENTATION_ARCHIVE_SHA256,
                     "destination": segmentation_model,
                     "already_available": segmentation_available,
                     "resume_bytes": segmentation_resume_bytes,
@@ -1026,6 +1070,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                     "kind": "speaker_embedding_model",
                     "url": SHERPA_EMBEDDING_MODEL_URL,
                     "expected_bytes": SHERPA_EMBEDDING_BYTES,
+                    "expected_sha256": SHERPA_EMBEDDING_SHA256,
                     "destination": embedding_model,
                     "already_available": embedding_available,
                     "resume_bytes": embedding_resume_bytes,
@@ -1074,6 +1119,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                 &archive_path,
                 "sherpa native runtime",
                 Some(runtime_archive_bytes),
+                Some(runtime_archive_sha256),
             )
             .await?;
 
@@ -1143,6 +1189,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             &archive_path,
             "sherpa segmentation model",
             Some(SHERPA_SEGMENTATION_ARCHIVE_BYTES),
+            Some(SHERPA_SEGMENTATION_ARCHIVE_SHA256),
         )
         .await?;
 
@@ -1198,6 +1245,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             &embedding_model,
             "sherpa speaker embedding model",
             Some(SHERPA_EMBEDDING_BYTES),
+            Some(SHERPA_EMBEDDING_SHA256),
         )
         .await?;
     } else {
@@ -1276,6 +1324,7 @@ async fn download_with_progress(
     destination: &Path,
     label: &str,
     expected_bytes: Option<u64>,
+    expected_sha256: Option<&str>,
 ) -> Result<()> {
     let parent = destination.parent().ok_or_else(|| {
         VesselError::Config(format!(
@@ -1287,15 +1336,29 @@ async fn download_with_progress(
 
     if destination.is_file() {
         let actual = tokio::fs::metadata(destination).await?.len();
-        if expected_bytes.is_none_or(|expected| expected == actual) {
+        let size_matches = expected_bytes.is_none_or(|expected| expected == actual);
+        let digest_matches = if size_matches {
+            expected_sha256
+                .map(|expected| verify_sha256(destination, label, expected).is_ok())
+                .unwrap_or(true)
+        } else {
+            false
+        };
+        if size_matches && digest_matches {
             eprintln!(
-                "[diarization] completed download already available label={} bytes={} path={}",
+                "[diarization] completed download already available label={} bytes={} sha256_verified={} path={}",
                 label,
                 actual,
+                expected_sha256.is_some(),
                 destination.display()
             );
             return Ok(());
         }
+        eprintln!(
+            "[diarization] existing artifact failed pinned integrity checks; fetching replacement label={} path={}",
+            label,
+            destination.display()
+        );
     }
 
     let temp = destination.with_extension("download");
@@ -1415,11 +1478,23 @@ async fn download_with_progress(
         )));
     }
 
+    if let Some(expected_sha256) = expected_sha256 {
+        verify_sha256(&temp, label, expected_sha256)?;
+        eprintln!(
+            "[diarization] SHA-256 verified label={} sha256={}",
+            label, expected_sha256
+        );
+    }
+
+    if destination.exists() {
+        tokio::fs::remove_file(destination).await?;
+    }
     tokio::fs::rename(&temp, destination).await?;
     eprintln!(
-        "[diarization] download completed label={} bytes={} path={}",
+        "[diarization] download completed label={} bytes={} sha256_verified={} path={}",
         label,
         downloaded,
+        expected_sha256.is_some(),
         destination.display()
     );
     Ok(())
@@ -1439,7 +1514,7 @@ fn diarization_models() -> Result<()> {
                 "runtime_loading": "dynamic_at_execution",
                 "build_time_fetch": false,
                 "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
-                "runtime_archive_bytes": sherpa_runtime_archive().ok().map(|(_, bytes)| bytes),
+                "runtime_archive_bytes": sherpa_runtime_archive().ok().map(|(_, bytes, _)| bytes),
                 "segmentation_archive_bytes": SHERPA_SEGMENTATION_ARCHIVE_BYTES,
                 "embedding_model_bytes": SHERPA_EMBEDDING_BYTES,
                 "segmentation_model": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
@@ -5175,13 +5250,30 @@ mod tests {
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
         install_staged_directory, planned_remaining_bytes, resolve_asr_config,
-        resolve_configured_channels, resolve_diarization_config, transcript_upgrade_probe_due,
-        validate_update_speaker_attribution, verify_integrity_receipt,
-        write_integrity_receipt,
+        resolve_configured_channels, resolve_diarization_config, sha256_file,
+        transcript_upgrade_probe_due, validate_update_speaker_attribution,
+        verify_integrity_receipt, write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
+
+    #[test]
+    fn sha256_file_matches_known_vector() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-sha256-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("hash temp root");
+        let path = root.join("abc.txt");
+        fs::write(&path, b"abc").expect("hash fixture");
+        assert_eq!(
+            sha256_file(&path).expect("sha256"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn diarization_plan_accounts_for_resumable_partial_bytes() {

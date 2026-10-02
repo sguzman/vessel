@@ -328,6 +328,8 @@ First cache the default Rust diarization models when network access is available
 vessel diarization fetch
 ```
 
+The fetch boundary is explicit and authenticated. `vessel diarization fetch --plan` performs no network I/O and reports the exact pinned byte count and SHA-256 for each runtime/model artifact. A real fetch verifies the SHA-256 before an archive is extracted or a downloaded model is promoted into place. After installation, Vessel keeps BLAKE3 integrity receipts so `diarization doctor` can detect later offline corruption without contacting the network.
+
 Then any supported ASR backend can feed the primary Rust diarization path:
 
 ```text
