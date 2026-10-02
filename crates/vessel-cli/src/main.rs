@@ -987,6 +987,7 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
     validate_update_speaker_attribution(&args, &asr_config)?;
+    let diarization_config = resolve_diarization_config(&args)?;
     let speaker_match_config = SpeakerMatchConfig {
         min_similarity: args.speaker_min_similarity,
         min_margin: args.speaker_min_margin,
@@ -1014,6 +1015,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         .join("vessel.sqlite");
     let (operational_store, _) = init_sqlite_database_path(&operational_db_path).await?;
     let mut asr_backend: Option<LoadedAsrBackend> = None;
+    let mut diarization_backend: Option<SherpaOnnxDiarizer> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
     let mut limit_reached = false;
@@ -1892,17 +1894,79 @@ fn validate_update_speaker_attribution(args: &UpdateArgs, config: &AsrConfig) ->
     if !args.attribute_speakers {
         return Ok(());
     }
-    if config.backend != vessel_asr::WHISPERX_BACKEND_NAME {
-        return Err(VesselError::Config(
-            "--attribute-speakers requires --asr-backend whisperx".into(),
-        ));
-    }
-    if !config.diarize || !config.speaker_embeddings {
+    if !args.diarize || !args.speaker_embeddings {
         return Err(VesselError::Config(
             "--attribute-speakers requires --diarize and --speaker-embeddings".into(),
         ));
     }
+    if args.diarization_backend == "whisperx"
+        && config.backend != vessel_asr::WHISPERX_BACKEND_NAME
+    {
+        return Err(VesselError::Config(
+            "WhisperX diarization requires --asr-backend whisperx".into(),
+        ));
+    }
     Ok(())
+}
+
+fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationConfig>> {
+    if !args.diarize || args.diarization_backend == "whisperx" {
+        return Ok(None);
+    }
+    if args.diarization_backend != SHERPA_ONNX_BACKEND_NAME {
+        return Err(VesselError::Config(format!(
+            "unsupported diarization backend {:?}",
+            args.diarization_backend
+        )));
+    }
+
+    let segmentation_model = args
+        .diarization_segmentation_model
+        .clone()
+        .ok_or_else(|| {
+            VesselError::Config(
+                "--diarize with sherpa-onnx requires --diarization-segmentation-model".into(),
+            )
+        })?;
+    let embedding_model = args
+        .diarization_embedding_model
+        .clone()
+        .ok_or_else(|| {
+            VesselError::Config(
+                "--diarize with sherpa-onnx requires --diarization-embedding-model".into(),
+            )
+        })?;
+
+    let num_speakers = match (args.min_speakers, args.max_speakers) {
+        (None, None) => None,
+        (Some(min), Some(max)) if min == max => Some(min),
+        (Some(_), Some(_)) => {
+            return Err(VesselError::Config(
+                "sherpa-onnx currently accepts an exact speaker count; set --min-speakers and --max-speakers to the same value, or omit both".into(),
+            ));
+        }
+        _ => {
+            return Err(VesselError::Config(
+                "sherpa-onnx speaker-count hints require both --min-speakers and --max-speakers with the same value".into(),
+            ));
+        }
+    };
+
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        segmentation_model,
+        embedding_model,
+        provider: args.diarization_provider.clone(),
+        num_threads: args.diarization_num_threads,
+        num_speakers,
+        clustering_threshold: args.diarization_clustering_threshold,
+        window_shift_ratio: args.diarization_window_shift_ratio,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: args.speaker_embeddings,
+    };
+    config.validate()?;
+    Ok(Some(config))
 }
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
@@ -1932,13 +1996,13 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     if let Some(language) = args.asr_language.as_deref() {
         config.language = Some(language.to_owned());
     }
-    config.diarize = args.diarize;
+    config.diarize = args.diarize && args.diarization_backend == "whisperx";
     if let Some(model) = args.diarization_model.as_deref() {
         config.diarization_model = model.to_owned();
     }
-    config.min_speakers = args.min_speakers;
-    config.max_speakers = args.max_speakers;
-    config.speaker_embeddings = args.speaker_embeddings;
+    config.min_speakers = config.diarize.then_some(args.min_speakers).flatten();
+    config.max_speakers = config.diarize.then_some(args.max_speakers).flatten();
+    config.speaker_embeddings = config.diarize && args.speaker_embeddings;
     config.hf_token_env = args.hf_token_env.clone();
     config
 }
