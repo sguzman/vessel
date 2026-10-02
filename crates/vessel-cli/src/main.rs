@@ -102,6 +102,8 @@ struct UpdateArgs {
     asr_model: Option<String>,
     #[arg(long = "asr-model-dir")]
     asr_model_dir: Option<PathBuf>,
+    #[arg(long = "asr-executable")]
+    asr_executable: Option<PathBuf>,
     #[arg(long = "asr-device")]
     asr_device: Option<String>,
     #[arg(long = "asr-language")]
@@ -887,6 +889,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         serde_json::json!({
                             "model": &asr_config.model,
                             "model_dir": &asr_config.model_dir,
+                            "executable": &asr_config.executable,
                             "device": &asr_config.device,
                             "caption_probe": caption_probe,
                         }),
@@ -1056,6 +1059,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "engine": asr_config.backend,
             "model": asr_config.model,
             "model_dir": asr_config.model_dir,
+            "executable": asr_config.executable,
             "device": asr_config.device,
             "language": asr_config.language,
             "model_loaded": asr_backend.is_some(),
@@ -1119,12 +1123,18 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     let mut config = AsrConfig::default();
     if let Some(backend) = args.asr_backend.as_deref() {
         config.backend = backend.to_owned();
+        if args.asr_model.is_none() && backend == vessel_asr::PHONON2_BACKEND_NAME {
+            config.model = vessel_asr::PHONON2_BACKEND_NAME.to_owned();
+        }
     }
     if let Some(model) = args.asr_model.as_deref() {
         config.model = model.to_owned();
     }
     if let Some(model_dir) = args.asr_model_dir.as_ref() {
         config.model_dir = Some(model_dir.clone());
+    }
+    if let Some(executable) = args.asr_executable.as_ref() {
+        config.executable = Some(executable.clone());
     }
     if let Some(device) = args.asr_device.as_deref() {
         config.device = device.to_owned();
@@ -3268,6 +3278,7 @@ mod tests {
             asr_backend: Some("whisper-candle".into()),
             asr_model: Some("base".into()),
             asr_model_dir: Some(PathBuf::from("/models/whisper-base")),
+            asr_executable: Some(PathBuf::from("/bin/asr")),
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
             upgrade_check_days: 30,
@@ -3281,8 +3292,33 @@ mod tests {
             config.model_dir.as_deref(),
             Some(std::path::Path::new("/models/whisper-base"))
         );
+        assert_eq!(
+            config.executable.as_deref(),
+            Some(std::path::Path::new("/bin/asr"))
+        );
         assert_eq!(config.device, "cpu");
         assert_eq!(config.language.as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn phonon_backend_gets_phonon_default_model() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            asr_backend: Some("phonon-2".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+        let config = resolve_asr_config(&args);
+        assert_eq!(config.backend, "phonon-2");
+        assert_eq!(config.model, "phonon-2");
     }
 
     #[test]
