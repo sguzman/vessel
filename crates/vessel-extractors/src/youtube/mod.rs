@@ -2056,7 +2056,7 @@ mod tests {
             }
         });
 
-        merge_streaming_data(&mut player, &android);
+        merge_player_fallback(&mut player, &android);
         let streaming = player.get("streamingData").expect("streaming data");
         assert_eq!(
             streaming["formats"][0]["url"].as_str(),
