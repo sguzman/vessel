@@ -683,6 +683,74 @@ pub fn apply_speaker_match_report(
     })
 }
 
+pub fn render_speaker_attributed_transcript(
+    source: &SourceariumYoutubeSource,
+    video_id: &str,
+    include_diarization_label: bool,
+) -> Result<String> {
+    let artifact_id = format!("youtube:video:{video_id}:transcript");
+    let transcripts_dir = source.source_dir.join("transcripts");
+    let path = find_artifact_path(&transcripts_dir, &artifact_id)?.ok_or_else(|| {
+        corpus_error(format!(
+            "Sourcearium transcript artifact does not exist for video {video_id:?}"
+        ))
+    })?;
+    let raw = fs::read_to_string(&path)?;
+    let (artifact, body) = SourceariumArtifactV1::parse_markdown(&raw)
+        .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
+
+    let Some(attribution) = artifact.extensions.get("speaker_attribution") else {
+        return Ok(body);
+    };
+    let Some(assignments) = attribution
+        .get("assignments")
+        .and_then(toml::Value::as_array)
+    else {
+        return Ok(body);
+    };
+
+    let mut identities = BTreeMap::<String, String>::new();
+    for assignment in assignments {
+        let Some(table) = assignment.as_table() else {
+            continue;
+        };
+        let Some(label) = table
+            .get("diarization_label")
+            .and_then(toml::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(identity) = table.get("identity").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        identities.insert(label.to_owned(), identity.to_owned());
+    }
+
+    if identities.is_empty() {
+        return Ok(body);
+    }
+
+    let mut rendered = String::with_capacity(body.len());
+    for line in body.lines() {
+        let mut projected = line.to_owned();
+        for (label, identity) in &identities {
+            let raw_tag = format!("<speaker:{label}>");
+            if projected.contains(&raw_tag) {
+                let projected_tag = if include_diarization_label {
+                    format!("<speaker:{identity}|{label}>")
+                } else {
+                    format!("<speaker:{identity}>")
+                };
+                projected = projected.replace(&raw_tag, &projected_tag);
+            }
+        }
+        rendered.push_str(&projected);
+        rendered.push('\n');
+    }
+
+    Ok(rendered)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterializeStatus {
     Created,
