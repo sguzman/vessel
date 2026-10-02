@@ -8,6 +8,7 @@ members = [
     "crates/vessel-logging",
     "crates/vessel-formats",
     "crates/vessel-download",
+    "crates/vessel-diarization",
     "crates/vessel-postprocess",
     "crates/vessel-asr",
     "crates/vessel-testing",
