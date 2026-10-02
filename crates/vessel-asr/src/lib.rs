@@ -251,6 +251,11 @@ pub struct WhisperCandleBackend {
 
 impl WhisperCandleBackend {
     pub fn load(config: AsrConfig) -> Result<Self> {
+        if config.diarize {
+            return Err(asr_error(
+                "whisper-candle does not support speaker diarization; use --asr-backend whisperx",
+            ));
+        }
         let started = Instant::now();
         eprintln!(
             "[asr] model load started engine={} model={} model_dir={} device={}",
@@ -411,6 +416,15 @@ pub struct WhisperXBackend {
 
 impl WhisperXBackend {
     pub fn load(config: AsrConfig) -> Result<Self> {
+        if !config.diarize
+            && (config.min_speakers.is_some()
+                || config.max_speakers.is_some()
+                || config.speaker_embeddings)
+        {
+            return Err(asr_error(
+                "WhisperX speaker-count and speaker-embedding options require --diarize",
+            ));
+        }
         if config.diarize
             && config
                 .min_speakers
@@ -643,6 +657,11 @@ pub struct Phonon2Backend {
 
 impl Phonon2Backend {
     pub fn load(config: AsrConfig) -> Result<Self> {
+        if config.diarize {
+            return Err(asr_error(
+                "phonon-2 does not support speaker diarization; use --asr-backend whisperx",
+            ));
+        }
         if let Some(language) = config.language.as_deref()
             && !language.eq_ignore_ascii_case("en")
             && !language.to_ascii_lowercase().starts_with("en-")
@@ -896,6 +915,36 @@ mod tests {
     fn loaded_backend_wrapper_is_safe_to_move_to_blocking_worker() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<LoadedAsrBackend>();
+    }
+
+    #[test]
+    fn non_diarizing_backends_refuse_diarization_requests() {
+        let mut whisper = AsrConfig::default();
+        whisper.diarize = true;
+        let error = WhisperCandleBackend::load(whisper)
+            .err()
+            .expect("whisper-candle diarization must fail explicitly");
+        assert!(error.to_string().contains("does not support speaker diarization"));
+
+        let mut phonon = AsrConfig::default();
+        phonon.backend = PHONON2_BACKEND_NAME.into();
+        phonon.model = PHONON2_BACKEND_NAME.into();
+        phonon.diarize = true;
+        let error = Phonon2Backend::load(phonon)
+            .err()
+            .expect("phonon diarization must fail explicitly");
+        assert!(error.to_string().contains("does not support speaker diarization"));
+    }
+
+    #[test]
+    fn whisperx_speaker_controls_require_diarization() {
+        let mut config = AsrConfig::default();
+        config.backend = WHISPERX_BACKEND_NAME.into();
+        config.speaker_embeddings = true;
+        let error = WhisperXBackend::load(config)
+            .err()
+            .expect("speaker embedding request without diarization must fail");
+        assert!(error.to_string().contains("require --diarize"));
     }
 
     #[test]
