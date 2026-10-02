@@ -93,6 +93,8 @@ struct UpdateArgs {
     sourcearium: PathBuf,
     #[arg(long = "max-videos")]
     max_videos: Option<usize>,
+    #[arg(long = "video-id")]
+    video_ids: Vec<String>,
     #[arg(long = "asr-model")]
     asr_model: Option<String>,
     #[arg(long = "asr-device")]
@@ -595,6 +597,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                     published_at: None,
                 });
             }
+        }
+
+        if !args.video_ids.is_empty() {
+            candidates.retain(|video| args.video_ids.contains(&video.video_id));
+            summary["video_filter"] = serde_json::json!(&args.video_ids);
+            summary["video_filter_matches"] =
+                serde_json::Value::from(candidates.len() as u64);
         }
 
         for video_ref in candidates {
@@ -3192,6 +3201,7 @@ mod tests {
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
             max_videos: None,
+            video_ids: Vec::new(),
             asr_model: Some("base".into()),
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
