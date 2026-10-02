@@ -1030,12 +1030,7 @@ fn align_transcript_interval(
     }
 
     let mut ranked = overlap_by_speaker.into_iter().collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(right.0))
-    });
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(right.0)));
     let (best_speaker, best_overlap) = *ranked.first()?;
     let second_overlap = ranked.get(1).map(|(_, overlap)| *overlap).unwrap_or(0.0);
     let dominance = best_overlap / total_overlap;
