@@ -558,6 +558,13 @@ impl WhisperXBackend {
             ))
         })?;
         let candidate = parse_whisperx_json(&raw, &self.config)?;
+        if self.config.diarize {
+            let evidence_path = persist_whisperx_speaker_evidence(path, &raw, &self.config)?;
+            eprintln!(
+                "[asr] speaker evidence persisted path={}",
+                evidence_path.display()
+            );
+        }
 
         eprintln!(
             "[asr] transcription completed engine={} model={} diarize={} elapsed={:.1}s segments={}",
@@ -649,6 +656,109 @@ fn parse_whisperx_json(raw: &str, config: &AsrConfig) -> Result<TranscriptCandid
     };
     candidate.validate()?;
     Ok(candidate)
+}
+
+fn persist_whisperx_speaker_evidence(
+    input: &Path,
+    raw: &str,
+    config: &AsrConfig,
+) -> Result<PathBuf> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|error| asr_error(format!("invalid WhisperX JSON output: {error}")))?;
+
+    let video_dir = input.parent().ok_or_else(|| {
+        asr_error(format!(
+            "WhisperX input has no parent directory: {}",
+            input.display()
+        ))
+    })?;
+    let video_id = video_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            asr_error(format!(
+                "WhisperX input parent has no UTF-8 video id: {}",
+                video_dir.display()
+            ))
+        })?;
+    let vessel_cache = video_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            asr_error(format!(
+                "cannot resolve Vessel cache root from {}",
+                input.display()
+            ))
+        })?;
+    let evidence_dir = vessel_cache.join("speaker-evidence");
+    fs::create_dir_all(&evidence_dir).map_err(|error| {
+        asr_error(format!(
+            "failed to create speaker evidence directory {}: {error}",
+            evidence_dir.display()
+        ))
+    })?;
+
+    let segments = value
+        .get("segments")
+        .and_then(Value::as_array)
+        .map(|segments| {
+            segments
+                .iter()
+                .filter_map(|segment| {
+                    let speaker = segment.get("speaker")?.as_str()?;
+                    let start = segment.get("start")?.as_f64()?;
+                    let end = segment.get("end")?.as_f64()?;
+                    Some(serde_json::json!({
+                        "start": start,
+                        "end": end,
+                        "speaker": speaker,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let embeddings = if config.speaker_embeddings {
+        value
+            .get("speaker_embeddings")
+            .cloned()
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+
+    let evidence = serde_json::json!({
+        "schema": 1,
+        "video_id": video_id,
+        "asr": {
+            "engine": WHISPERX_ENGINE_NAME,
+            "model": config.model,
+        },
+        "diarization": {
+            "engine": "pyannote-audio",
+            "model": config.diarization_model,
+            "label_scope": "file_local",
+        },
+        "segments": segments,
+        "speaker_embeddings": embeddings,
+    });
+    let rendered = serde_json::to_vec_pretty(&evidence)
+        .map_err(|error| asr_error(format!("speaker evidence serialization failed: {error}")))?;
+    let path = evidence_dir.join(format!("{video_id}.json"));
+    let temp = evidence_dir.join(format!("{video_id}.json.tmp"));
+    fs::write(&temp, rendered).map_err(|error| {
+        asr_error(format!(
+            "failed to write speaker evidence temp file {}: {error}",
+            temp.display()
+        ))
+    })?;
+    fs::rename(&temp, &path).map_err(|error| {
+        asr_error(format!(
+            "failed to finalize speaker evidence {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 pub struct Phonon2Backend {
@@ -945,6 +1055,52 @@ mod tests {
             .err()
             .expect("speaker embedding request without diarization must fail");
         assert!(error.to_string().contains("require --diarize"));
+    }
+
+    #[test]
+    fn speaker_evidence_path_is_outside_disposable_video_asr_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-speaker-evidence-{}",
+            std::process::id()
+        ));
+        let video_dir = root.join(".cache/vessel/asr/video123");
+        fs::create_dir_all(&video_dir).expect("video dir");
+        let input = video_dir.join("whisper-input.wav");
+        fs::write(&input, b"").expect("input");
+
+        let mut config = AsrConfig::default();
+        config.backend = WHISPERX_BACKEND_NAME.into();
+        config.model = "large-v3".into();
+        config.diarize = true;
+        config.speaker_embeddings = true;
+
+        let raw = r#"{
+          "segments": [
+            {"start": 1.0, "end": 2.0, "text": "hello", "speaker": "SPEAKER_00"}
+          ],
+          "speaker_embeddings": {
+            "SPEAKER_00": [0.1, 0.2, 0.3]
+          }
+        }"#;
+        let path =
+            persist_whisperx_speaker_evidence(&input, raw, &config).expect("speaker evidence");
+        assert_eq!(
+            path,
+            root.join(".cache/vessel/speaker-evidence/video123.json")
+        );
+        assert!(path.is_file());
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted["video_id"], "video123");
+        assert_eq!(persisted["segments"][0]["speaker"], "SPEAKER_00");
+        assert_eq!(
+            persisted["speaker_embeddings"]["SPEAKER_00"][1]
+                .as_f64()
+                .unwrap(),
+            0.2
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
