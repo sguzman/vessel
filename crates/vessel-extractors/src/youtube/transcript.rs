@@ -198,6 +198,7 @@ pub fn parse_youtube_json3(
         segments.push(TranscriptSegment {
             start_seconds: Some(start_ms / 1_000),
             text,
+            speaker: None,
         });
     }
 
@@ -207,6 +208,7 @@ pub fn parse_youtube_json3(
         timestamps: true,
         engine: None,
         model: None,
+        diarization: None,
         segments,
     };
     candidate.validate()?;
