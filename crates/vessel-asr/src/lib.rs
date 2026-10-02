@@ -1,16 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-
 use vessel_core::{
     Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
 };
 use whisper_core::{TranscribeOptions, WhisperModel, device, load_model, transcribe_file};
 
-pub const ENGINE_NAME: &str = "whisper-candle";
+pub const WHISPER_CANDLE_ENGINE_NAME: &str = "whisper-candle";
+pub const ENGINE_NAME: &str = WHISPER_CANDLE_ENGINE_NAME;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsrConfig {
+    pub backend: String,
     pub model: String,
     pub model_dir: Option<PathBuf>,
     pub device: String,
@@ -21,6 +22,7 @@ pub struct AsrConfig {
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
+            backend: WHISPER_CANDLE_ENGINE_NAME.into(),
             model: "small".into(),
             model_dir: None,
             device: "cpu".into(),
@@ -36,6 +38,51 @@ struct AsrSegment {
     text: String,
 }
 
+pub trait LocalAsrBackend: Send + Sync {
+    fn engine_name(&self) -> &'static str;
+    fn model_name(&self) -> &str;
+    fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate>;
+}
+
+pub enum LoadedAsrBackend {
+    WhisperCandle(WhisperCandleBackend),
+}
+
+impl LoadedAsrBackend {
+    pub fn load(config: AsrConfig) -> Result<Self> {
+        match config.backend.as_str() {
+            WHISPER_CANDLE_ENGINE_NAME => {
+                Ok(Self::WhisperCandle(WhisperCandleBackend::load(config)?))
+            }
+            "whisperx" => Err(asr_error(
+                "ASR backend "whisperx" is reserved but not implemented yet",
+            )),
+            "phonon-2" => Err(asr_error(
+                "ASR backend "phonon-2" is reserved but not implemented yet",
+            )),
+            other => Err(asr_error(format!("unsupported ASR backend {other:?}"))),
+        }
+    }
+
+    pub fn engine_name(&self) -> &'static str {
+        match self {
+            Self::WhisperCandle(backend) => backend.engine_name(),
+        }
+    }
+
+    pub fn model_name(&self) -> &str {
+        match self {
+            Self::WhisperCandle(backend) => backend.model_name(),
+        }
+    }
+
+    fn transcribe_internal(&mut self, path: &Path) -> Result<TranscriptCandidate> {
+        match self {
+            Self::WhisperCandle(backend) => backend.transcribe_path(path),
+        }
+    }
+}
+
 pub struct WhisperCandleBackend {
     config: AsrConfig,
     model: WhisperModel,
@@ -46,7 +93,7 @@ impl WhisperCandleBackend {
         let started = Instant::now();
         eprintln!(
             "[asr] model load started engine={} model={} model_dir={} device={}",
-            ENGINE_NAME,
+            WHISPER_CANDLE_ENGINE_NAME,
             config.model,
             config
                 .model_dir
@@ -115,7 +162,7 @@ impl WhisperCandleBackend {
 
         eprintln!(
             "[asr] model load completed engine={} model={} elapsed={:.1}s",
-            ENGINE_NAME,
+            WHISPER_CANDLE_ENGINE_NAME,
             config.model,
             started.elapsed().as_secs_f64(),
         );
@@ -145,7 +192,7 @@ impl WhisperCandleBackend {
         let started = Instant::now();
         eprintln!(
             "[asr] transcription started engine={} model={} input={}",
-            ENGINE_NAME,
+            WHISPER_CANDLE_ENGINE_NAME,
             self.config.model,
             path.display(),
         );
@@ -159,7 +206,7 @@ impl WhisperCandleBackend {
 
         eprintln!(
             "[asr] transcription completed engine={} model={} elapsed={:.1}s segments={}",
-            ENGINE_NAME,
+            WHISPER_CANDLE_ENGINE_NAME,
             self.config.model,
             started.elapsed().as_secs_f64(),
             result.segments.len(),
@@ -175,6 +222,20 @@ impl WhisperCandleBackend {
             .collect::<Vec<_>>();
 
         candidate_from_segments(&self.config.model, Some(result.language), segments)
+    }
+}
+
+impl LocalAsrBackend for WhisperCandleBackend {
+    fn engine_name(&self) -> &'static str {
+        WHISPER_CANDLE_ENGINE_NAME
+    }
+
+    fn model_name(&self) -> &str {
+        &self.config.model
+    }
+
+    fn transcribe_path(&mut self, path: &Path) -> Result<TranscriptCandidate> {
+        self.transcribe_internal(path)
     }
 }
 
@@ -205,7 +266,7 @@ fn candidate_from_segments(
         derivation: TranscriptDerivation::LocalAsr,
         language: language.filter(|language| !language.trim().is_empty()),
         timestamps: true,
-        engine: Some(ENGINE_NAME.into()),
+        engine: Some(WHISPER_CANDLE_ENGINE_NAME.into()),
         model: Some(model.to_owned()),
         segments: normalized,
     };
@@ -234,11 +295,30 @@ mod tests {
     #[test]
     fn defaults_are_cpu_first_and_multilingual() {
         let config = AsrConfig::default();
+        assert_eq!(config.backend, WHISPER_CANDLE_ENGINE_NAME);
         assert_eq!(config.device, "cpu");
         assert_eq!(config.model, "small");
         assert_eq!(config.model_dir, None);
         assert_eq!(config.language, None);
         assert!(!config.word_timestamps);
+    }
+
+    #[test]
+    fn loaded_backend_wrapper_is_safe_to_move_to_blocking_worker() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LoadedAsrBackend>();
+    }
+
+    #[test]
+    fn future_backend_names_fail_explicitly_until_implemented() {
+        for backend in ["whisperx", "phonon-2"] {
+            let mut config = AsrConfig::default();
+            config.backend = backend.into();
+            let error = LoadedAsrBackend::load(config)
+                .err()
+                .expect("reserved backend should not silently fall back");
+            assert!(error.to_string().contains("reserved"));
+        }
     }
 
     #[test]
@@ -260,7 +340,7 @@ mod tests {
         .expect("candidate");
 
         assert_eq!(candidate.derivation, TranscriptDerivation::LocalAsr);
-        assert_eq!(candidate.engine.as_deref(), Some(ENGINE_NAME));
+        assert_eq!(candidate.engine.as_deref(), Some(WHISPER_CANDLE_ENGINE_NAME));
         assert_eq!(candidate.model.as_deref(), Some("small"));
         assert_eq!(candidate.language.as_deref(), Some("en"));
         assert_eq!(candidate.segments[0].start_seconds, Some(3));
