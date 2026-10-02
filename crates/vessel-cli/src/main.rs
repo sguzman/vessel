@@ -888,6 +888,36 @@ fn reset_staging_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_sherpa_bundle(
+    runtime_library: &Path,
+    segmentation_model: &Path,
+    embedding_model: &Path,
+) -> Result<()> {
+    eprintln!(
+        "[diarization] validating fetched runtime and models runtime={} segmentation={} embedding={}",
+        runtime_library.display(),
+        segmentation_model.display(),
+        embedding_model.display(),
+    );
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library: runtime_library.to_path_buf(),
+        segmentation_model: segmentation_model.to_path_buf(),
+        embedding_model: embedding_model.to_path_buf(),
+        provider: "cpu".into(),
+        num_threads: 1,
+        num_speakers: None,
+        clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+        window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: true,
+    };
+    let _backend = SherpaOnnxDiarizer::load(config)?;
+    eprintln!("[diarization] fetched runtime and models validated");
+    Ok(())
+}
+
 async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     if args.backend != SHERPA_ONNX_BACKEND_NAME {
         return Err(VesselError::Config(format!(
@@ -1024,12 +1054,21 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             })?;
             if let Err(error) = extraction {
                 let _ = std::fs::remove_dir_all(&staging_root);
+                let _ = std::fs::remove_file(&archive_path);
                 return Err(error);
             }
 
-            let staged_runtime = find_sherpa_runtime_library(&staging_root)?;
+            let staged_runtime = match find_sherpa_runtime_library(&staging_root) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&staging_root);
+                    let _ = std::fs::remove_file(&archive_path);
+                    return Err(error);
+                }
+            };
             if let Err(error) = probe_sherpa_runtime(&staged_runtime) {
                 let _ = std::fs::remove_dir_all(&staging_root);
+                let _ = std::fs::remove_file(&archive_path);
                 return Err(VesselError::Extractor(format!(
                     "staged sherpa runtime failed validation: {error}"
                 )));
@@ -1073,6 +1112,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         })?;
         if let Err(error) = extraction {
             let _ = std::fs::remove_dir_all(&staging_root);
+            let _ = std::fs::remove_file(&archive_path);
             return Err(error);
         }
 
@@ -1080,6 +1120,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         let staged_model = staged_model_dir.join("model.onnx");
         if !staged_model.is_file() {
             let _ = std::fs::remove_dir_all(&staging_root);
+            let _ = std::fs::remove_file(&archive_path);
             return Err(VesselError::Extractor(format!(
                 "segmentation archive did not contain expected model {}",
                 staged_model.display()
@@ -1121,6 +1162,11 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     }
 
     probe_sherpa_runtime(&runtime_library)?;
+    validate_sherpa_bundle(
+        &runtime_library,
+        &segmentation_model,
+        &embedding_model,
+    )?;
 
     let runtime_receipt = runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME);
     write_integrity_receipt(
@@ -1146,6 +1192,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "network_phase": "explicit_runtime_command",
         "build_time_fetch": false,
         "transactional_install": true,
+        "bundle_load_validated": true,
         "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
         "runtime_directory": runtime_root,
         "runtime_library": runtime_library,
