@@ -603,6 +603,8 @@ const SHERPA_SEGMENTATION_ARCHIVE_BYTES: u64 = 6_958_444;
 const SHERPA_EMBEDDING_FILENAME: &str =
     "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const SHERPA_EMBEDDING_BYTES: u64 = 39_593_761;
+const SHERPA_RUNTIME_RECEIPT_FILENAME: &str = "vessel-runtime-integrity.json";
+const SHERPA_MODELS_RECEIPT_FILENAME: &str = "vessel-models-integrity.json";
 
 fn default_vessel_data_root() -> PathBuf {
     env::var_os("XDG_DATA_HOME")
@@ -674,6 +676,154 @@ fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
         root.join(SHERPA_SEGMENTATION_DIR).join("model.onnx"),
         root.join(SHERPA_EMBEDDING_FILENAME),
     )
+}
+
+#[derive(Debug)]
+struct IntegrityStatus {
+    receipt: PathBuf,
+    present: bool,
+    verified: bool,
+    errors: Vec<String>,
+}
+
+fn blake3_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher
+        .update_reader(&mut file)
+        .map_err(|error| VesselError::Extractor(format!(
+            "failed to hash {}: {error}",
+            path.display()
+        )))?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn write_integrity_receipt(
+    receipt: &Path,
+    root: &Path,
+    kind: &str,
+    files: &[(&str, &Path)],
+) -> Result<()> {
+    let mut entries = serde_json::Map::new();
+    for (name, path) in files {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            VesselError::Config(format!(
+                "integrity file {} is outside receipt root {}",
+                path.display(),
+                root.display()
+            ))
+        })?;
+        entries.insert(
+            (*name).to_owned(),
+            serde_json::json!({
+                "relative_path": relative,
+                "bytes": std::fs::metadata(path)?.len(),
+                "blake3": blake3_file(path)?,
+            }),
+        );
+    }
+
+    let value = serde_json::json!({
+        "schema": 1,
+        "backend": SHERPA_ONNX_BACKEND_NAME,
+        "kind": kind,
+        "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
+        "files": entries,
+    });
+    let rendered = serde_json::to_vec_pretty(&value)
+        .map_err(|error| VesselError::Config(error.to_string()))?;
+    let temp = receipt.with_extension("json.tmp");
+    std::fs::write(&temp, rendered)?;
+    std::fs::rename(&temp, receipt)?;
+    Ok(())
+}
+
+fn verify_integrity_receipt(receipt: &Path, root: &Path) -> IntegrityStatus {
+    if !receipt.is_file() {
+        return IntegrityStatus {
+            receipt: receipt.to_path_buf(),
+            present: false,
+            verified: false,
+            errors: Vec::new(),
+        };
+    }
+
+    let mut errors = Vec::new();
+    let value = match std::fs::read_to_string(receipt)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    {
+        Some(value) => value,
+        None => {
+            return IntegrityStatus {
+                receipt: receipt.to_path_buf(),
+                present: true,
+                verified: false,
+                errors: vec!["receipt is not valid JSON".into()],
+            };
+        }
+    };
+
+    let Some(files) = value.get("files").and_then(serde_json::Value::as_object) else {
+        return IntegrityStatus {
+            receipt: receipt.to_path_buf(),
+            present: true,
+            verified: false,
+            errors: vec!["receipt has no files object".into()],
+        };
+    };
+
+    for (name, entry) in files {
+        let Some(relative) = entry
+            .get("relative_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            errors.push(format!("{name}: missing relative_path"));
+            continue;
+        };
+        let path = root.join(relative);
+        if !path.is_file() {
+            errors.push(format!("{name}: missing {}", path.display()));
+            continue;
+        }
+
+        let expected_bytes = entry.get("bytes").and_then(serde_json::Value::as_u64);
+        let actual_bytes = std::fs::metadata(&path).map(|metadata| metadata.len());
+        match (expected_bytes, actual_bytes) {
+            (Some(expected), Ok(actual)) if expected == actual => {}
+            (Some(expected), Ok(actual)) => errors.push(format!(
+                "{name}: size mismatch expected={expected} actual={actual}"
+            )),
+            (_, Err(error)) => errors.push(format!("{name}: metadata failed: {error}")),
+            (None, _) => errors.push(format!("{name}: receipt missing byte count")),
+        }
+
+        let expected_hash = entry.get("blake3").and_then(serde_json::Value::as_str);
+        match (expected_hash, blake3_file(&path)) {
+            (Some(expected), Ok(actual)) if expected == actual => {}
+            (Some(expected), Ok(actual)) => errors.push(format!(
+                "{name}: BLAKE3 mismatch expected={expected} actual={actual}"
+            )),
+            (_, Err(error)) => errors.push(format!("{name}: hash failed: {error}")),
+            (None, _) => errors.push(format!("{name}: receipt missing BLAKE3 hash")),
+        }
+    }
+
+    IntegrityStatus {
+        receipt: receipt.to_path_buf(),
+        present: true,
+        verified: errors.is_empty(),
+        errors,
+    }
+}
+
+fn integrity_status_json(status: &IntegrityStatus) -> serde_json::Value {
+    serde_json::json!({
+        "receipt": status.receipt,
+        "present": status.present,
+        "verified": status.verified,
+        "errors": status.errors,
+    })
 }
 
 async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
@@ -838,6 +988,24 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
 
     probe_sherpa_runtime(&runtime_library)?;
 
+    let runtime_receipt = runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME);
+    write_integrity_receipt(
+        &runtime_receipt,
+        &runtime_root,
+        "native_runtime",
+        &[("runtime_library", &runtime_library)],
+    )?;
+    let models_receipt = model_root.join(SHERPA_MODELS_RECEIPT_FILENAME);
+    write_integrity_receipt(
+        &models_receipt,
+        &model_root,
+        "inference_models",
+        &[
+            ("segmentation_model", &segmentation_model),
+            ("speaker_embedding_model", &embedding_model),
+        ],
+    )?;
+
     let report = serde_json::json!({
         "status": "ok",
         "backend": SHERPA_ONNX_BACKEND_NAME,
@@ -849,6 +1017,8 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "model_directory": model_root,
         "segmentation_model": segmentation_model,
         "embedding_model": embedding_model,
+        "runtime_integrity_receipt": runtime_receipt,
+        "model_integrity_receipt": models_receipt,
         "python_required": false,
         "reuse_with": {
             "diarization_backend": SHERPA_ONNX_BACKEND_NAME,
@@ -1060,15 +1230,27 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 .runtime_dir
                 .unwrap_or_else(default_diarization_runtime_root);
             let runtime_library = find_sherpa_runtime_library(&runtime_root).ok();
+            let runtime_integrity = verify_integrity_receipt(
+                &runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
+                &runtime_root,
+            );
+            let model_integrity = verify_integrity_receipt(
+                &default_model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
+                &default_model_root,
+            );
             let runtime_probe = runtime_library
                 .as_deref()
                 .map(probe_sherpa_runtime)
                 .transpose();
             let runtime_loadable = runtime_probe.as_ref().is_ok_and(|_| runtime_library.is_some());
             let runtime_error = runtime_probe.err().map(|error| error.to_string());
+            let receipt_integrity_ok =
+                (!runtime_integrity.present || runtime_integrity.verified)
+                    && (!model_integrity.present || model_integrity.verified);
             let ready = runtime_loadable
                 && segmentation_path.is_file()
                 && embedding_path.is_file()
+                && receipt_integrity_ok
                 && !args.provider.trim().is_empty();
             let report = serde_json::json!({
                 "backend": SHERPA_ONNX_BACKEND_NAME,
@@ -1084,6 +1266,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "runtime_library": runtime_library,
                 "runtime_loadable": runtime_loadable,
                 "runtime_error": runtime_error,
+                "runtime_integrity": integrity_status_json(&runtime_integrity),
+                "model_integrity": integrity_status_json(&model_integrity),
                 "segmentation_model": {
                     "path": segmentation_path,
                     "exists": segmentation_path.is_file(),
