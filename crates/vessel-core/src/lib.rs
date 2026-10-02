@@ -25,6 +25,6 @@ pub use sourcearium_repo::{
     materialize_youtube_transcript, plan_sourcearium_prune, validate_sourcearium_repository,
 };
 pub use transcript::{
-    TranscriptCandidate, TranscriptDerivation, TranscriptProvider, TranscriptRequest,
-    TranscriptSegment,
+    DiarizationProvenance, SpeakerAttribution, TranscriptCandidate, TranscriptDerivation,
+    TranscriptProvider, TranscriptRequest, TranscriptSegment, TranscriptSpeaker,
 };
