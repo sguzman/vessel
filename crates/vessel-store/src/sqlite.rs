@@ -218,6 +218,15 @@ impl SqliteStore {
         &self.pool
     }
 
+    pub async fn checkpoint_and_close(self) -> Result<()> {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await
+            .map_err(|err| VesselError::Database(err.to_string()))?;
+        self.pool.close().await;
+        Ok(())
+    }
+
     pub async fn add_tracked_channel(&self, channel: &ChannelMetadata, category: &str) -> Result<()> {
         let added_at = channel
             .fetched_at
@@ -1905,6 +1914,59 @@ mod tests {
         assert!(store.list_tracked_channels().await.is_ok());
 
         drop(store);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_and_close_folds_wal_into_main_database() {
+        let path = temp_db_path("checkpoint-close");
+        let (store, _) = super::init_sqlite_database_path(&path)
+            .await
+            .expect("path db init");
+
+        store
+            .upsert_video_snapshot(&sample_video(OffsetDateTime::now_utc()))
+            .await
+            .expect("video snapshot");
+
+        store
+            .checkpoint_and_close()
+            .await
+            .expect("checkpoint and close");
+
+        let main_len = fs::metadata(&path).expect("main sqlite metadata").len();
+        assert!(
+            main_len > 4096,
+            "checkpointed database should contain more than the SQLite header page"
+        );
+
+        let wal = path.with_extension("sqlite-wal");
+        if let Ok(metadata) = fs::metadata(&wal) {
+            assert_eq!(
+                metadata.len(),
+                0,
+                "checkpointed WAL should be empty when it remains on disk"
+            );
+        }
+
+        let (reopened, _) = super::init_sqlite_database_path(&path)
+            .await
+            .expect("reopen db");
+        assert!(
+            reopened
+                .load_video_history("video-123")
+                .await
+                .expect("history after reopen")
+                .current
+                .is_some()
+        );
+        reopened
+            .checkpoint_and_close()
+            .await
+            .expect("close reopened db");
+
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
