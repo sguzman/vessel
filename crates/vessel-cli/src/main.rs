@@ -62,6 +62,7 @@ enum Commands {
     Channel(ChannelCommand),
     Video(VideoCommand),
     Project(ProjectCommand),
+    Asr(AsrCommand),
     Info(UrlArg),
     Formats(UrlArg),
     Download(DownloadArgs),
@@ -130,6 +131,28 @@ struct ProjectCommand {
 #[derive(Debug, Subcommand)]
 enum ProjectSubcommand {
     List,
+}
+
+#[derive(Debug, Args)]
+struct AsrCommand {
+    #[command(subcommand)]
+    command: AsrSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AsrSubcommand {
+    Models,
+    Fetch(AsrFetchArgs),
+}
+
+#[derive(Debug, Args)]
+struct AsrFetchArgs {
+    #[arg(long, default_value = "whisper-candle")]
+    backend: String,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -355,6 +378,10 @@ async fn main() -> Result<()> {
         Commands::Project(cmd) => match cmd.command {
             ProjectSubcommand::List => project_list(&layout).await,
         },
+        Commands::Asr(cmd) => match cmd.command {
+            AsrSubcommand::Models => asr_models(),
+            AsrSubcommand::Fetch(args) => asr_fetch(args),
+        },
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
         Commands::Download(args) => download(args, &layout).await,
@@ -363,6 +390,69 @@ async fn main() -> Result<()> {
             PluginSubcommand::Install(args) => plugin_install(args, &paths, &layout).await,
         },
     }
+}
+
+fn asr_models() -> Result<()> {
+    let report = serde_json::json!({
+        "backends": [
+            {
+                "name": vessel_asr::WHISPER_CANDLE_ENGINE_NAME,
+                "status": "available",
+                "default_model": "small",
+                "models": vessel_asr::WHISPER_MODEL_NAMES,
+                "languages": "multilingual",
+                "offline_model_dir": true,
+                "diarization": false,
+            },
+            {
+                "name": vessel_asr::PHONON2_BACKEND_NAME,
+                "status": "available",
+                "default_model": "phonon-2",
+                "models": vessel_asr::PHONON_MODEL_NAMES,
+                "languages": ["en"],
+                "offline_model_dir": true,
+                "diarization": false,
+            },
+            {
+                "name": "whisperx",
+                "status": "planned",
+                "default_model": "large-v3",
+                "languages": "multilingual",
+                "offline_model_dir": true,
+                "diarization": true,
+            }
+        ]
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
+    let location = vessel_asr::fetch_asr_model(
+        &args.backend,
+        args.model.as_deref(),
+        args.executable.as_deref(),
+    )?;
+    let report = serde_json::json!({
+        "status": "ok",
+        "backend": location.backend,
+        "model": location.model,
+        "directory": location.directory,
+        "reuse_with": {
+            "asr_backend": args.backend,
+            "asr_model_dir": location.directory,
+        }
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
 }
 
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
