@@ -1224,6 +1224,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
             let default_model_root = default_diarization_model_root();
             let (default_segmentation, default_embedding) =
                 sherpa_model_paths(&default_model_root);
+            let using_default_models =
+                args.segmentation_model.is_none() && args.embedding_model.is_none();
             let segmentation_path = args.segmentation_model.unwrap_or(default_segmentation);
             let embedding_path = args.embedding_model.unwrap_or(default_embedding);
             let runtime_root = args
@@ -1234,10 +1236,19 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 &runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME),
                 &runtime_root,
             );
-            let model_integrity = verify_integrity_receipt(
-                &default_model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
-                &default_model_root,
-            );
+            let model_integrity = if using_default_models {
+                verify_integrity_receipt(
+                    &default_model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
+                    &default_model_root,
+                )
+            } else {
+                IntegrityStatus {
+                    receipt: default_model_root.join(SHERPA_MODELS_RECEIPT_FILENAME),
+                    present: false,
+                    verified: false,
+                    errors: Vec::new(),
+                }
+            };
             let runtime_probe = runtime_library
                 .as_deref()
                 .map(probe_sherpa_runtime)
