@@ -47,9 +47,12 @@ pub async fn acquire_best_caption_candidate(
             continue;
         };
 
-        return fetch_caption_candidate(base_url, &track.language, derivation, &http_client()?)
-            .await
-            .map(Some);
+        match fetch_caption_candidate(base_url, &track.language, derivation, &http_client()?)
+            .await?
+        {
+            Some(candidate) => return Ok(Some(candidate)),
+            None => continue,
+        }
     }
 
     Ok(None)
@@ -89,7 +92,7 @@ async fn fetch_caption_candidate(
     language: &str,
     derivation: TranscriptDerivation,
     client: &Client,
-) -> Result<TranscriptCandidate> {
+) -> Result<Option<TranscriptCandidate>> {
     let url = json3_url(base_url)?;
     let response = client.get(url).send().await.map_err(|error| {
         VesselError::Extractor(format!("youtube caption request failed: {error}"))
@@ -104,9 +107,21 @@ async fn fetch_caption_candidate(
     let raw = response.text().await.map_err(|error| {
         VesselError::Extractor(format!("youtube caption response decode failed: {error}"))
     })?;
-    let candidate = parse_youtube_json3(&raw, derivation, language)?;
+    parse_caption_response(&raw, derivation, language)
+}
+
+fn parse_caption_response(
+    raw: &str,
+    derivation: TranscriptDerivation,
+    language: &str,
+) -> Result<Option<TranscriptCandidate>> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let candidate = parse_youtube_json3(raw, derivation, language)?;
     candidate.validate()?;
-    Ok(candidate)
+    Ok(Some(candidate))
 }
 
 fn json3_url(base_url: &str) -> Result<Url> {
@@ -236,6 +251,18 @@ mod tests {
             fetched_at: OffsetDateTime::UNIX_EPOCH,
             raw: Value::Null,
         }
+    }
+
+    #[test]
+    fn empty_caption_response_is_treated_as_unavailable() {
+        let candidate = parse_caption_response(
+            "",
+            TranscriptDerivation::CreatorSubtitles,
+            "en",
+        )
+        .expect("empty response should not be fatal");
+
+        assert!(candidate.is_none());
     }
 
     #[test]
