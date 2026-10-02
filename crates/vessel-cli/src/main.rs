@@ -5174,14 +5174,43 @@ mod tests {
     use super::{
         UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
         preview_materialization_action, push_update_error, push_update_item,
-        install_staged_directory, resolve_asr_config, resolve_configured_channels,
-        resolve_diarization_config, transcript_upgrade_probe_due,
+        install_staged_directory, planned_remaining_bytes, resolve_asr_config,
+        resolve_configured_channels, resolve_diarization_config, transcript_upgrade_probe_due,
         validate_update_speaker_attribution, verify_integrity_receipt,
         write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
+
+    #[test]
+    fn diarization_plan_accounts_for_resumable_partial_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-diarization-plan-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("plan temp root");
+
+        let destination = root.join("runtime.tar.bz2");
+        let partial = destination.with_extension("download");
+        fs::write(&partial, vec![0u8; 40]).expect("partial download");
+
+        let (resume, remaining) = planned_remaining_bytes(&destination, 100, false);
+        assert_eq!(resume, 40);
+        assert_eq!(remaining, 60);
+
+        fs::write(&destination, vec![0u8; 100]).expect("complete archive");
+        let (resume, remaining) = planned_remaining_bytes(&destination, 100, false);
+        assert_eq!(resume, 100);
+        assert_eq!(remaining, 0);
+
+        let (resume, remaining) = planned_remaining_bytes(&destination, 100, true);
+        assert_eq!(resume, 0);
+        assert_eq!(remaining, 0);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn staged_directory_install_replaces_live_tree_only_after_stage_exists() {
