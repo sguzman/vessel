@@ -897,6 +897,9 @@ fn diarization_models() -> Result<()> {
                 "primary": true,
                 "python_required": false,
                 "rust_api": true,
+                "runtime_loading": "dynamic_at_execution",
+                "build_time_fetch": false,
+                "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
                 "segmentation_model": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
                 "embedding_model": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
                 "provider": "cpu",
@@ -923,11 +926,17 @@ fn diarization_models() -> Result<()> {
 fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
     match args.backend.as_str() {
         SHERPA_ONNX_BACKEND_NAME => {
-            let default_root = default_diarization_model_root();
-            let (default_segmentation, default_embedding) = sherpa_model_paths(&default_root);
+            let default_model_root = default_diarization_model_root();
+            let (default_segmentation, default_embedding) =
+                sherpa_model_paths(&default_model_root);
             let segmentation_path = args.segmentation_model.unwrap_or(default_segmentation);
             let embedding_path = args.embedding_model.unwrap_or(default_embedding);
-            let ready = segmentation_path.is_file()
+            let runtime_root = args
+                .runtime_dir
+                .unwrap_or_else(default_diarization_runtime_root);
+            let runtime_library = find_sherpa_runtime_library(&runtime_root).ok();
+            let ready = runtime_library.is_some()
+                && segmentation_path.is_file()
                 && embedding_path.is_file()
                 && !args.provider.trim().is_empty();
             let report = serde_json::json!({
@@ -935,7 +944,12 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 "implemented": true,
                 "python_required": false,
                 "rust_api": true,
+                "runtime_loading": "dynamic_at_execution",
+                "build_time_fetch": false,
+                "runtime_version": SHERPA_ONNX_RUNTIME_VERSION,
                 "provider": args.provider,
+                "runtime_directory": runtime_root,
+                "runtime_library": runtime_library,
                 "segmentation_model": {
                     "path": segmentation_path,
                     "exists": segmentation_path.is_file(),
@@ -2318,6 +2332,16 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
 
     let default_root = default_diarization_model_root();
     let (default_segmentation, default_embedding) = sherpa_model_paths(&default_root);
+    let runtime_root = args
+        .diarization_runtime_dir
+        .clone()
+        .unwrap_or_else(default_diarization_runtime_root);
+    let runtime_library = find_sherpa_runtime_library(&runtime_root).map_err(|_| {
+        VesselError::Config(format!(
+            "sherpa-onnx runtime is missing; run vessel diarization fetch or pass --diarization-runtime-dir explicitly (expected default under {})",
+            runtime_root.display()
+        ))
+    })?;
     let segmentation_model = args
         .diarization_segmentation_model
         .clone()
@@ -2350,6 +2374,7 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
 
     let config = DiarizationConfig {
         backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library,
         segmentation_model,
         embedding_model,
         provider: args.diarization_provider.clone(),
