@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use tracing::info;
 
 use vessel_core::{
     Result, TranscriptCandidate, TranscriptDerivation, TranscriptSegment, VesselError,
@@ -10,6 +13,7 @@ pub const ENGINE_NAME: &str = "whisper-candle";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsrConfig {
     pub model: String,
+    pub model_dir: Option<PathBuf>,
     pub device: String,
     pub language: Option<String>,
     pub word_timestamps: bool,
@@ -19,6 +23,7 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             model: "small".into(),
+            model_dir: None,
             device: "cpu".into(),
             language: None,
             word_timestamps: false,
@@ -39,18 +44,55 @@ pub struct WhisperCandleBackend {
 
 impl WhisperCandleBackend {
     pub fn load(config: AsrConfig) -> Result<Self> {
+        let started = Instant::now();
+        info!(
+            target: "asr",
+            engine = ENGINE_NAME,
+            model = %config.model,
+            model_dir = ?config.model_dir,
+            device = %config.device,
+            "ASR model load started"
+        );
+
         let device = device(&config.device).map_err(|error| {
             asr_error(format!(
                 "failed to initialize ASR device {:?}: {error}",
                 config.device
             ))
         })?;
-        let model = load_model(&config.model, &device).map_err(|error| {
-            asr_error(format!(
-                "failed to load Whisper model {:?}: {error}",
-                config.model
-            ))
-        })?;
+
+        let mut model = if let Some(model_dir) = config.model_dir.as_deref() {
+            load_local_model(model_dir, &device)?
+        } else {
+            load_model(&config.model, &device).map_err(|error| {
+                asr_error(format!(
+                    "failed to load Whisper model {:?}: {error}",
+                    config.model
+                ))
+            })?
+        };
+
+        if let Some(model_dir) = config.model_dir.as_deref() {
+            let generation_config = model_dir.join("generation_config.json");
+            if generation_config.is_file() {
+                model
+                    .set_alignment_heads_from_file(&generation_config)
+                    .map_err(|error| {
+                        asr_error(format!(
+                            "failed to load Whisper generation config {}: {error}",
+                            generation_config.display()
+                        ))
+                    })?;
+            }
+        }
+
+        info!(
+            target: "asr",
+            engine = ENGINE_NAME,
+            model = %config.model,
+            elapsed_seconds = started.elapsed().as_secs_f64(),
+            "ASR model load completed"
+        );
         Ok(Self { config, model })
     }
 
@@ -70,7 +112,18 @@ impl WhisperCandleBackend {
         options.word_timestamps = self.config.word_timestamps;
         options.decode_options.language = self.config.language.clone();
         options.decode_options.without_timestamps = false;
-        options.verbose = None;
+        // whisper-candle-core uses Some(false) for progress-only output.
+        // Never leave a long-running transcription completely silent.
+        options.verbose = Some(false);
+
+        let started = Instant::now();
+        info!(
+            target: "asr",
+            engine = ENGINE_NAME,
+            model = %self.config.model,
+            input = %path.display(),
+            "ASR transcription started"
+        );
 
         let result = transcribe_file(&mut self.model, path, &options).map_err(|error| {
             asr_error(format!(
@@ -78,6 +131,15 @@ impl WhisperCandleBackend {
                 path.display()
             ))
         })?;
+
+        info!(
+            target: "asr",
+            engine = ENGINE_NAME,
+            model = %self.config.model,
+            elapsed_seconds = started.elapsed().as_secs_f64(),
+            segments = result.segments.len(),
+            "ASR transcription completed"
+        );
 
         let segments = result
             .segments
@@ -90,6 +152,37 @@ impl WhisperCandleBackend {
 
         candidate_from_segments(&self.config.model, Some(result.language), segments)
     }
+}
+
+fn load_local_model(model_dir: &Path, device: &candle_core::Device) -> Result<WhisperModel> {
+    if !model_dir.is_dir() {
+        return Err(asr_error(format!(
+            "ASR model directory does not exist: {}",
+            model_dir.display()
+        )));
+    }
+
+    let config_path = model_dir.join("config.json");
+    let weights_path = model_dir.join("model.safetensors");
+    if !config_path.is_file() {
+        return Err(asr_error(format!(
+            "ASR model directory is missing config.json: {}",
+            model_dir.display()
+        )));
+    }
+    if !weights_path.is_file() {
+        return Err(asr_error(format!(
+            "ASR model directory is missing model.safetensors: {}",
+            model_dir.display()
+        )));
+    }
+
+    WhisperModel::load(&config_path, &weights_path, device).map_err(|error| {
+        asr_error(format!(
+            "failed to load local Whisper model from {}: {error}",
+            model_dir.display()
+        ))
+    })
 }
 
 fn candidate_from_segments(
@@ -150,6 +243,7 @@ mod tests {
         let config = AsrConfig::default();
         assert_eq!(config.device, "cpu");
         assert_eq!(config.model, "small");
+        assert_eq!(config.model_dir, None);
         assert_eq!(config.language, None);
         assert!(!config.word_timestamps);
     }
