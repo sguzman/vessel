@@ -109,6 +109,18 @@ struct UpdateArgs {
     asr_device: Option<String>,
     #[arg(long = "asr-language")]
     asr_language: Option<String>,
+    #[arg(long)]
+    diarize: bool,
+    #[arg(long = "diarization-model")]
+    diarization_model: Option<String>,
+    #[arg(long = "min-speakers")]
+    min_speakers: Option<usize>,
+    #[arg(long = "max-speakers")]
+    max_speakers: Option<usize>,
+    #[arg(long = "speaker-embeddings")]
+    speaker_embeddings: bool,
+    #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
+    hf_token_env: String,
     #[arg(long = "upgrade-check-days", default_value_t = 30)]
     upgrade_check_days: u64,
     #[arg(long = "report-items")]
@@ -978,10 +990,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         &video.video_id,
                         "would_require_local_asr",
                         serde_json::json!({
+                            "backend": &asr_config.backend,
                             "model": &asr_config.model,
                             "model_dir": &asr_config.model_dir,
                             "executable": &asr_config.executable,
                             "device": &asr_config.device,
+                            "diarize": asr_config.diarize,
+                            "diarization_model": &asr_config.diarization_model,
                             "caption_probe": caption_probe,
                         }),
                     );
@@ -1153,6 +1168,11 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "executable": asr_config.executable,
             "device": asr_config.device,
             "language": asr_config.language,
+            "diarize": asr_config.diarize,
+            "diarization_model": asr_config.diarization_model,
+            "min_speakers": asr_config.min_speakers,
+            "max_speakers": asr_config.max_speakers,
+            "speaker_embeddings": asr_config.speaker_embeddings,
             "model_loaded": asr_backend.is_some(),
         },
     });
@@ -1233,6 +1253,14 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     if let Some(language) = args.asr_language.as_deref() {
         config.language = Some(language.to_owned());
     }
+    config.diarize = args.diarize;
+    if let Some(model) = args.diarization_model.as_deref() {
+        config.diarization_model = model.to_owned();
+    }
+    config.min_speakers = args.min_speakers;
+    config.max_speakers = args.max_speakers;
+    config.speaker_embeddings = args.speaker_embeddings;
+    config.hf_token_env = args.hf_token_env.clone();
     config
 }
 
@@ -3372,6 +3400,12 @@ mod tests {
             asr_executable: Some(PathBuf::from("/bin/asr")),
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
+            diarize: true,
+            diarization_model: Some("example/diarizer".into()),
+            min_speakers: Some(1),
+            max_speakers: Some(3),
+            speaker_embeddings: true,
+            hf_token_env: "TEST_HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
             preview: false,
@@ -3389,6 +3423,12 @@ mod tests {
         );
         assert_eq!(config.device, "cpu");
         assert_eq!(config.language.as_deref(), Some("es"));
+        assert!(config.diarize);
+        assert_eq!(config.diarization_model, "example/diarizer");
+        assert_eq!(config.min_speakers, Some(1));
+        assert_eq!(config.max_speakers, Some(3));
+        assert!(config.speaker_embeddings);
+        assert_eq!(config.hf_token_env, "TEST_HF_TOKEN");
     }
 
     #[test]
@@ -3403,6 +3443,12 @@ mod tests {
             asr_executable: None,
             asr_device: None,
             asr_language: None,
+            diarize: false,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
             preview: false,
