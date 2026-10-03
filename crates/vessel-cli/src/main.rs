@@ -1991,6 +1991,7 @@ async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
 
     let started = Instant::now();
     let (result, _backend) = acquire_local_diarization(&input, None, &config).await?;
+    candidate.diarization = None;
     result.apply_to_candidate(&mut candidate)?;
     let evidence = result.to_speaker_evidence(&args.video_id, &candidate)?;
     let evidence_dir = sourcearium_root
