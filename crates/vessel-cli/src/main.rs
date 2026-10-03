@@ -1928,7 +1928,7 @@ async fn diarization_seed(args: DiarizationSeedArgs) -> Result<()> {
     Ok(())
 }
 
-async fn diarization_reembed(args: DiarizationReembedArgs) -> Result<()> {
+fn diarization_reembed(args: DiarizationReembedArgs) -> Result<()> {
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
     } else {
@@ -2055,7 +2055,7 @@ async fn diarization_reembed(args: DiarizationReembedArgs) -> Result<()> {
     Ok(())
 }
 
-fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
+async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
     } else {
