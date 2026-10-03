@@ -366,7 +366,7 @@ pub fn speaker_evidence_fingerprint(
     }
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"vessel-speaker-evidence-fingerprint-v1\0");
+    hasher.update(b"vessel-speaker-evidence-fingerprint-v2\0");
     for video_id in video_ids {
         hasher.update(video_id.as_bytes());
         hasher.update(&[0]);
@@ -381,6 +381,50 @@ pub fn speaker_evidence_fingerprint(
                 hasher.update(b"missing\0");
             }
             Err(error) => return Err(error.into()),
+        }
+    }
+
+    // Exact-window anchor caches materially change matching inputs. Include the
+    // compatible cache bytes so generating or replacing a cache invalidates
+    // previously persisted attribution freshness.
+    for speaker in &registry.speakers {
+        for anchor in &speaker.anchors {
+            hasher.update(b"anchor-cache\0");
+            hasher.update(speaker.key.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(anchor.video_id.as_bytes());
+            hasher.update(&anchor.start_seconds.to_le_bytes());
+            hasher.update(&anchor.end_seconds.to_le_bytes());
+
+            let anchor_evidence_path = evidence_path(evidence_dir, &anchor.video_id);
+            let embedding_model = match load_speaker_evidence(&anchor_evidence_path) {
+                Ok(evidence) => model_component(&evidence.diarization.model, "embedding")
+                    .unwrap_or_default()
+                    .to_owned(),
+                Err(_) => {
+                    hasher.update(b"unresolvable\0");
+                    continue;
+                }
+            };
+            let cache_path = speaker_anchor_cache_path(
+                &evidence_dir.join("anchors"),
+                &speaker.key,
+                &anchor.video_id,
+                anchor.start_seconds,
+                anchor.end_seconds,
+                &embedding_model,
+            );
+            match fs::read(cache_path) {
+                Ok(bytes) => {
+                    hasher.update(b"present\0");
+                    hasher.update(&(bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    hasher.update(b"missing\0");
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -1242,6 +1286,68 @@ mod tests {
         let after = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
             .expect("fingerprint");
 
+        assert_ne!(before, after);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_fingerprint_changes_when_exact_anchor_cache_appears() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-speaker-fingerprint-anchor-cache-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let evidence_dir = root.join("speaker-evidence");
+
+        write_evidence(
+            &evidence_dir,
+            "anchor-creator",
+            &[(0.0, 8.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "anchor-guest",
+            &[(0.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_01", &[0.0, 1.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "target",
+            &[(0.0, 4.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+
+        let before = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
+
+        let cache_path = speaker_anchor_cache_path(
+            &evidence_dir.join("anchors"),
+            "creator",
+            "anchor-creator",
+            0,
+            8,
+            "",
+        );
+        write_speaker_anchor_evidence(
+            &cache_path,
+            &SpeakerAnchorEvidenceV1 {
+                schema: SPEAKER_ANCHOR_CACHE_SCHEMA_V1,
+                speaker_key: "creator".into(),
+                video_id: "anchor-creator".into(),
+                start_seconds: 0,
+                end_seconds: 8,
+                diarization_engine: "pyannote-audio".into(),
+                diarization_model: "pyannote/speaker-diarization-community-1".into(),
+                embedding_model: "".into(),
+                aggregation: SPEAKER_ANCHOR_AGGREGATION_V1.into(),
+                embedding: vec![0.9, 0.1],
+            },
+        )
+        .expect("anchor cache");
+
+        let after = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
         assert_ne!(before, after);
         let _ = fs::remove_dir_all(root);
     }
