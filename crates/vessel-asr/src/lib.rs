@@ -53,6 +53,15 @@ pub fn default_model_for_backend(backend: &str) -> Result<&'static str> {
     }
 }
 
+fn phonon_download_args(model: &str) -> [String; 4] {
+    [
+        "transcribe".into(),
+        model.into(),
+        "--download-only".into(),
+        "vessel-download-only-unused.wav".into(),
+    ]
+}
+
 pub fn fetch_asr_model(
     backend: &str,
     model: Option<&str>,
@@ -105,9 +114,7 @@ pub fn fetch_asr_model(
                 executable.display()
             );
             let output = Command::new(executable)
-                .arg("transcribe")
-                .arg(model)
-                .arg("--download-only")
+                .args(phonon_download_args(model))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -1090,6 +1097,19 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn phonon_download_args_include_required_unused_audio_positional() {
+        assert_eq!(
+            phonon_download_args("phonon-2"),
+            [
+                "transcribe".to_owned(),
+                "phonon-2".to_owned(),
+                "--download-only".to_owned(),
+                "vessel-download-only-unused.wav".to_owned(),
+            ]
+        );
     }
 
     #[test]
