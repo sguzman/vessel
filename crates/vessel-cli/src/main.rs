@@ -22,12 +22,13 @@ use vessel_core::{
     apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_evidence, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
-    plan_sourcearium_prune, render_speaker_attributed_transcript, speaker_evidence_fingerprint,
-    resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
+    plan_sourcearium_prune, refresh_youtube_transcript_diarization_provenance,
+    render_speaker_attributed_transcript, speaker_evidence_fingerprint, resolve_runtime_layout,
+    validate_sourcearium_repository, write_speaker_registry,
 };
 use vessel_diarization::{
     DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
-    DiarizationResult, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION,
+    DiarizationResult, DiarizationSegment, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION,
     SherpaOnnxDiarizer, find_sherpa_runtime_library, persist_speaker_evidence,
     probe_sherpa_runtime,
 };
@@ -242,6 +243,7 @@ enum DiarizationSubcommand {
     Seed(DiarizationSeedArgs),
     Run(DiarizationRunArgs),
     Apply(DiarizationApplyArgs),
+    Reembed(DiarizationReembedArgs),
 }
 
 #[derive(Debug, Args)]
@@ -341,6 +343,26 @@ struct DiarizationApplyArgs {
         default_value_t = DEFAULT_WINDOW_SHIFT_RATIO
     )]
     window_shift_ratio: f32,
+}
+
+#[derive(Debug, Args)]
+struct DiarizationReembedArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
+    #[arg(long = "segmentation-model")]
+    segmentation_model: Option<PathBuf>,
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<PathBuf>,
+    #[arg(long = "provider", default_value = "cpu")]
+    provider: String,
+    #[arg(long = "num-threads", default_value_t = 4)]
+    num_threads: i32,
 }
 
 #[derive(Debug, Args)]
@@ -662,6 +684,7 @@ async fn main() -> Result<()> {
             DiarizationSubcommand::Seed(args) => diarization_seed(args).await,
             DiarizationSubcommand::Run(args) => diarization_run(args).await,
             DiarizationSubcommand::Apply(args) => diarization_apply(args).await,
+            DiarizationSubcommand::Reembed(args) => diarization_reembed(args),
         },
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
@@ -1905,7 +1928,134 @@ async fn diarization_seed(args: DiarizationSeedArgs) -> Result<()> {
     Ok(())
 }
 
-async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
+async fn diarization_reembed(args: DiarizationReembedArgs) -> Result<()> {
+    let sourcearium_root = if args.sourcearium.is_absolute() {
+        args.sourcearium
+    } else {
+        std::env::current_dir()?.join(args.sourcearium)
+    };
+    let source = discover_youtube_sources(&sourcearium_root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == args.source_key)
+        .ok_or_else(|| {
+            VesselError::Config(format!(
+                "Sourcearium source key {:?} was not found under {}",
+                args.source_key,
+                sourcearium_root.display()
+            ))
+        })?;
+
+    let input = diarization_fixture_wav(&args.video_id)?;
+    if !input.is_file() {
+        return Err(VesselError::Config(format!(
+            "durable diarization fixture is missing for {}; seed it first with: vessel diarization seed --video-id {}",
+            args.video_id, args.video_id
+        )));
+    }
+    let evidence_dir = sourcearium_root
+        .join(".cache")
+        .join("vessel")
+        .join("speaker-evidence");
+    let evidence_path = evidence_dir.join(format!("{}.json", args.video_id));
+    let mut evidence = load_speaker_evidence(&evidence_path)?;
+    if evidence.video_id != args.video_id {
+        return Err(VesselError::Config(format!(
+            "speaker evidence video_id {:?} does not match requested {:?}",
+            evidence.video_id, args.video_id
+        )));
+    }
+
+    let default_model_root = default_diarization_model_root();
+    let (default_segmentation, default_embedding) = sherpa_model_paths(&default_model_root);
+    let segmentation_model = args.segmentation_model.unwrap_or(default_segmentation);
+    let embedding_model = args.embedding_model.unwrap_or(default_embedding);
+    let runtime_root = args
+        .runtime_dir
+        .unwrap_or_else(default_diarization_runtime_root);
+    let runtime_library = find_sherpa_runtime_library(&runtime_root).map_err(|_| {
+        VesselError::Config(format!(
+            "sherpa-onnx runtime is missing; run vessel diarization fetch or pass --runtime-dir explicitly (expected default under {})",
+            runtime_root.display()
+        ))
+    })?;
+
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library,
+        segmentation_model,
+        embedding_model,
+        provider: args.provider,
+        num_threads: args.num_threads,
+        num_speakers: None,
+        clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+        window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: true,
+    };
+    config.validate()?;
+    let refreshed_model = config.reembedded_model_provenance(&evidence.diarization.model)?;
+    let segments = evidence
+        .segments
+        .iter()
+        .map(|segment| DiarizationSegment {
+            start_seconds: segment.start,
+            end_seconds: segment.end,
+            speaker: segment.speaker.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let started = Instant::now();
+    let backend = SherpaOnnxDiarizer::load(config)?;
+    let embeddings = backend.reembed_segments_path(&input, &segments)?;
+    if embeddings.is_empty() {
+        return Err(VesselError::Config(
+            "re-embedding produced no usable speaker embeddings".into(),
+        ));
+    }
+    evidence.diarization.model = refreshed_model.clone();
+    evidence.speaker_embeddings = Some(embeddings.clone());
+    let persisted = persist_speaker_evidence(&evidence_dir, &evidence)?;
+    let refreshed = refresh_youtube_transcript_diarization_provenance(
+        &source,
+        &args.video_id,
+        &evidence.diarization.engine,
+        &refreshed_model,
+    )?;
+
+    let report = serde_json::json!({
+        "status": "ok",
+        "sourcearium_root": sourcearium_root,
+        "source_key": args.source_key,
+        "video_id": args.video_id,
+        "transcript": refreshed.path,
+        "transcript_metadata_updated": refreshed.updated,
+        "speaker_attribution_cleared": refreshed.speaker_attribution_cleared,
+        "evidence": persisted,
+        "model": refreshed_model,
+        "segment_count": segments.len(),
+        "speaker_count": segments
+            .iter()
+            .map(|segment| segment.speaker.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "speaker_embedding_count": embeddings.len(),
+        "elapsed_seconds": started.elapsed().as_secs_f64(),
+        "network_io": false,
+        "asr_invoked": false,
+        "segmentation_invoked": false,
+        "clustering_invoked": false,
+        "sourcearium_mutation": true,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium
     } else {
