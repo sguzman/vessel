@@ -255,6 +255,8 @@ struct DiarizationFetchArgs {
     dir: Option<PathBuf>,
     #[arg(long = "runtime-dir")]
     runtime_dir: Option<PathBuf>,
+    #[arg(long = "embedding-profile", default_value = "zh-3dspeaker")]
+    embedding_profile: String,
     #[arg(long)]
     plan: bool,
 }
@@ -736,6 +738,13 @@ const SHERPA_EMBEDDING_FILENAME: &str =
 const SHERPA_EMBEDDING_BYTES: u64 = 39_593_761;
 const SHERPA_EMBEDDING_SHA256: &str =
     "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b";
+const SHERPA_EN_EMBEDDING_MODEL_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+const SHERPA_EN_EMBEDDING_FILENAME: &str =
+    "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+const SHERPA_EN_EMBEDDING_BYTES: u64 = 29_596_978;
+const SHERPA_EN_EMBEDDING_SHA256: &str =
+    "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b";
 const SHERPA_RUNTIME_RECEIPT_FILENAME: &str = "vessel-runtime-integrity.json";
 const SHERPA_MODELS_RECEIPT_FILENAME: &str = "vessel-models-integrity.json";
 
@@ -841,6 +850,28 @@ fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
         root.join(SHERPA_SEGMENTATION_DIR).join("model.onnx"),
         root.join(SHERPA_EMBEDDING_FILENAME),
     )
+}
+
+fn sherpa_embedding_spec(
+    profile: &str,
+) -> Result<(&'static str, &'static str, u64, &'static str)> {
+    match profile {
+        "zh-3dspeaker" => Ok((
+            SHERPA_EMBEDDING_FILENAME,
+            SHERPA_EMBEDDING_MODEL_URL,
+            SHERPA_EMBEDDING_BYTES,
+            SHERPA_EMBEDDING_SHA256,
+        )),
+        "en-voxceleb" => Ok((
+            SHERPA_EN_EMBEDDING_FILENAME,
+            SHERPA_EN_EMBEDDING_MODEL_URL,
+            SHERPA_EN_EMBEDDING_BYTES,
+            SHERPA_EN_EMBEDDING_SHA256,
+        )),
+        other => Err(VesselError::Config(format!(
+            "unknown sherpa speaker embedding profile {other:?}; expected zh-3dspeaker or en-voxceleb"
+        ))),
+    }
 }
 
 #[derive(Debug)]
@@ -1147,7 +1178,12 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     let runtime_root = args
         .runtime_dir
         .unwrap_or_else(default_diarization_runtime_root);
-    let (segmentation_model, embedding_model) = sherpa_model_paths(&model_root);
+    let (embedding_filename, embedding_url, embedding_bytes, embedding_sha256) =
+        sherpa_embedding_spec(&args.embedding_profile)?;
+    let segmentation_model = model_root
+        .join(SHERPA_SEGMENTATION_DIR)
+        .join("model.onnx");
+    let embedding_model = model_root.join(embedding_filename);
     let (runtime_archive_name, runtime_archive_bytes, runtime_archive_sha256) =
         sherpa_runtime_archive()?;
     let runtime_url = format!(
@@ -1183,7 +1219,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             );
         let (embedding_resume_bytes, embedding_remaining_bytes) = planned_remaining_bytes(
             &embedding_model,
-            SHERPA_EMBEDDING_BYTES,
+            embedding_bytes,
             embedding_available,
         );
         let plan = serde_json::json!({
@@ -1222,9 +1258,10 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                 },
                 {
                     "kind": "speaker_embedding_model",
-                    "url": SHERPA_EMBEDDING_MODEL_URL,
-                    "expected_bytes": SHERPA_EMBEDDING_BYTES,
-                    "expected_sha256": SHERPA_EMBEDDING_SHA256,
+                    "url": embedding_url,
+                    "expected_bytes": embedding_bytes,
+                    "expected_sha256": embedding_sha256,
+                    "profile": args.embedding_profile,
                     "destination": embedding_model,
                     "already_available": embedding_available,
                     "resume_bytes": embedding_resume_bytes,
@@ -1233,7 +1270,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             ],
             "total_expected_bytes": runtime_archive_bytes
                 + SHERPA_SEGMENTATION_ARCHIVE_BYTES
-                + SHERPA_EMBEDDING_BYTES,
+                + embedding_bytes,
             "total_remaining_bytes": runtime_remaining_bytes
                 + segmentation_remaining_bytes
                 + embedding_remaining_bytes,
@@ -1395,11 +1432,11 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     if !embedding_model.is_file() {
         download_with_progress(
             &client,
-            SHERPA_EMBEDDING_MODEL_URL,
+            embedding_url,
             &embedding_model,
             "sherpa speaker embedding model",
-            Some(SHERPA_EMBEDDING_BYTES),
-            Some(SHERPA_EMBEDDING_SHA256),
+            Some(embedding_bytes),
+            Some(embedding_sha256),
         )
         .await?;
     } else {
@@ -1430,7 +1467,14 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "native_runtime",
         &[("runtime_library", &runtime_library)],
     )?;
-    let models_receipt = model_root.join(SHERPA_MODELS_RECEIPT_FILENAME);
+    let models_receipt = if args.embedding_profile == "zh-3dspeaker" {
+        model_root.join(SHERPA_MODELS_RECEIPT_FILENAME)
+    } else {
+        model_root.join(format!(
+            "vessel-models-integrity.{}.json",
+            args.embedding_profile
+        ))
+    };
     write_integrity_receipt(
         &models_receipt,
         &model_root,
@@ -1454,6 +1498,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         "model_directory": model_root,
         "segmentation_model": segmentation_model,
         "embedding_model": embedding_model,
+        "embedding_profile": args.embedding_profile,
         "runtime_integrity_receipt": runtime_receipt,
         "model_integrity_receipt": models_receipt,
         "python_required": false,
@@ -1673,6 +1718,24 @@ fn diarization_models() -> Result<()> {
                 "embedding_model_bytes": SHERPA_EMBEDDING_BYTES,
                 "segmentation_model": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
                 "embedding_model": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                "embedding_profiles": [
+                    {
+                        "name": "zh-3dspeaker",
+                        "default": true,
+                        "language": "zh-cn",
+                        "training_corpus": "3D-Speaker",
+                        "filename": SHERPA_EMBEDDING_FILENAME,
+                        "bytes": SHERPA_EMBEDDING_BYTES,
+                    },
+                    {
+                        "name": "en-voxceleb",
+                        "default": false,
+                        "language": "en",
+                        "training_corpus": "VoxCeleb",
+                        "filename": SHERPA_EN_EMBEDDING_FILENAME,
+                        "bytes": SHERPA_EN_EMBEDDING_BYTES,
+                    }
+                ],
                 "provider": "cpu",
                 "speaker_embeddings": true,
             },
@@ -6748,6 +6811,22 @@ mod tests {
         assert!(!root.join(".live.previous").exists());
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sherpa_embedding_profiles_are_explicit_and_pinned() {
+        let (default_name, _, default_bytes, default_sha) =
+            sherpa_embedding_spec("zh-3dspeaker").expect("default embedding profile");
+        assert_eq!(default_name, SHERPA_EMBEDDING_FILENAME);
+        assert_eq!(default_bytes, SHERPA_EMBEDDING_BYTES);
+        assert_eq!(default_sha, SHERPA_EMBEDDING_SHA256);
+
+        let (english_name, _, english_bytes, english_sha) =
+            sherpa_embedding_spec("en-voxceleb").expect("English embedding profile");
+        assert_eq!(english_name, SHERPA_EN_EMBEDDING_FILENAME);
+        assert_eq!(english_bytes, SHERPA_EN_EMBEDDING_BYTES);
+        assert_eq!(english_sha, SHERPA_EN_EMBEDDING_SHA256);
+        assert!(sherpa_embedding_spec("unknown").is_err());
     }
 
     #[test]
