@@ -262,7 +262,7 @@ pub fn match_speakers_from_evidence(
     let target_path = evidence_path(evidence_dir, target_video_id);
     if !target_path.is_file() {
         return Err(match_error(format!(
-            "target speaker evidence is missing: {}; run WhisperX with --diarize --speaker-embeddings first",
+            "target speaker evidence is missing: {}; run vessel diarization apply for this video first",
             target_path.display()
         )));
     }
@@ -275,7 +275,7 @@ pub fn match_speakers_from_evidence(
     }
     let target_dimension = target.embedding_dimension().ok_or_else(|| {
         match_error(format!(
-            "target speaker evidence {} has no speaker embeddings; rerun WhisperX with --speaker-embeddings",
+            "target speaker evidence {} has no speaker embeddings; rerun vessel diarization apply for this video",
             target_path.display()
         ))
     })?;

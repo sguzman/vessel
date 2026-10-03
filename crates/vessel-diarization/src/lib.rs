@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_float, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
