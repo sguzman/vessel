@@ -2518,7 +2518,7 @@ fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
                 .copied()
                 .unwrap_or(0.0);
             serde_json::json!({
-                "label": speaker_match.diarization_label,
+                "label": speaker_match.diarization_label.as_str(),
                 "speech_seconds": speech_seconds,
                 "segment_count": segment_count_by_label
                     .get(&speaker_match.diarization_label)
