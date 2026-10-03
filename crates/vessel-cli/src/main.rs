@@ -2293,7 +2293,7 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
         window_shift_ratio: args.window_shift_ratio,
         min_duration_on: 0.3,
         min_duration_off: 0.5,
-        speaker_embeddings: args.speaker_embeddings || args.attribute_speakers,
+        speaker_embeddings: args.speaker_embeddings,
     };
     config.validate()?;
 
@@ -4389,7 +4389,7 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
         window_shift_ratio: args.diarization_window_shift_ratio,
         min_duration_on: 0.3,
         min_duration_off: 0.5,
-        speaker_embeddings: args.speaker_embeddings,
+        speaker_embeddings: args.speaker_embeddings || args.attribute_speakers,
     };
     config.validate()?;
     Ok(Some(config))
