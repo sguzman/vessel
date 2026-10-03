@@ -7343,7 +7343,7 @@ mod tests {
         artifact.extensions.insert(
             "speaker_attribution".into(),
             toml::Table::from_iter([
-                ("method".into(), toml::Value::String("embedding_cosine".into())),
+                ("method".into(), toml::Value::String(vessel_core::SPEAKER_MATCH_ALGORITHM.into())),
                 ("registry_revision".into(), toml::Value::Integer(2)),
                 (
                     "evidence_fingerprint".into(),
