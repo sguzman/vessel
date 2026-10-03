@@ -601,6 +601,80 @@ pub fn apply_youtube_transcript_diarization(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscriptDiarizationProvenanceRefreshResult {
+    pub path: PathBuf,
+    pub updated: bool,
+    pub speaker_attribution_cleared: bool,
+}
+
+pub fn refresh_youtube_transcript_diarization_provenance(
+    source: &SourceariumYoutubeSource,
+    video_id: &str,
+    engine: &str,
+    model: &str,
+) -> Result<TranscriptDiarizationProvenanceRefreshResult> {
+    let artifact_id = format!("youtube:video:{video_id}:transcript");
+    let transcripts_dir = source.source_dir.join("transcripts");
+    let path = find_artifact_path(&transcripts_dir, &artifact_id)?.ok_or_else(|| {
+        corpus_error(format!(
+            "Sourcearium transcript artifact does not exist for video {video_id:?}"
+        ))
+    })?;
+    let raw = fs::read_to_string(&path)?;
+    let (mut artifact, body) = SourceariumArtifactV1::parse_markdown(&raw)
+        .map_err(|error| corpus_error(format!("{}: {error}", path.display())))?;
+
+    if artifact.source.family != "youtube"
+        || artifact.source.kind != "video"
+        || artifact.source.id != video_id
+        || artifact.kind != "transcript"
+    {
+        return Err(corpus_error(format!(
+            "{} is not the expected YouTube transcript artifact for {video_id:?}",
+            path.display()
+        )));
+    }
+
+    let diarization = artifact.extensions.get_mut("diarization").ok_or_else(|| {
+        corpus_error(format!(
+            "{} has no diarization extension to refresh",
+            path.display()
+        ))
+    })?;
+    let existing_engine = diarization
+        .get("engine")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| corpus_error("diarization extension is missing engine"))?;
+    if existing_engine != engine {
+        return Err(corpus_error(format!(
+            "refusing to change diarization engine from {existing_engine:?} to {engine:?}"
+        )));
+    }
+
+    let changed = diarization
+        .get("model")
+        .and_then(toml::Value::as_str)
+        != Some(model);
+    if changed {
+        diarization.insert("model".into(), toml::Value::String(model.to_owned()));
+    }
+    let speaker_attribution_cleared =
+        changed && artifact.extensions.remove("speaker_attribution").is_some();
+
+    let rendered = artifact.to_markdown(&body)?;
+    let updated = rendered != raw;
+    if updated {
+        atomic_write(&path, rendered.as_bytes())?;
+    }
+
+    Ok(TranscriptDiarizationProvenanceRefreshResult {
+        path,
+        updated,
+        speaker_attribution_cleared,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpeakerAttributionApplyResult {
     pub path: PathBuf,
     pub updated: bool,
