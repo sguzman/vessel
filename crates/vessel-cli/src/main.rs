@@ -376,6 +376,7 @@ struct SpeakersCommand {
 enum SpeakersSubcommand {
     Show(SpeakerSourceArgs),
     Init(SpeakerInitArgs),
+    Add(SpeakerAddArgs),
     Anchor(SpeakerAnchorArgs),
     Match(SpeakerMatchArgs),
     Diagnose(SpeakerMatchArgs),
@@ -403,6 +404,20 @@ struct SpeakerInitArgs {
     #[arg(long = "display-name")]
     display_name: Option<String>,
     #[arg(long, default_value = "creator")]
+    relation: String,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerAddArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "speaker-key")]
+    speaker_key: String,
+    #[arg(long = "display-name")]
+    display_name: Option<String>,
+    #[arg(long, default_value = "guest")]
     relation: String,
 }
 
@@ -690,6 +705,7 @@ async fn main() -> Result<()> {
         Commands::Speakers(cmd) => match cmd.command {
             SpeakersSubcommand::Show(args) => speakers_show(args),
             SpeakersSubcommand::Init(args) => speakers_init(args),
+            SpeakersSubcommand::Add(args) => speakers_add(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
             SpeakersSubcommand::Diagnose(args) => speakers_diagnose(args),
@@ -2575,6 +2591,29 @@ fn speakers_init(args: SpeakerInitArgs) -> Result<()> {
     };
     write_speaker_registry(&path, &registry)?;
     println!("{}", path.display());
+    Ok(())
+}
+
+fn speakers_add(args: SpeakerAddArgs) -> Result<()> {
+    let (path, _) = speaker_registry_path(args.sourcearium, &args.source_key)?;
+    let mut registry = load_speaker_registry(&path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}; initialize it first",
+            path.display()
+        ))
+    })?;
+    registry.add_speaker(
+        &args.speaker_key,
+        args.display_name.as_deref(),
+        Some(args.relation.as_str()),
+    )?;
+    write_speaker_registry(&path, &registry)?;
+    println!(
+        "speaker identity added registry={} speaker={} revision={}",
+        path.display(),
+        args.speaker_key,
+        registry.revision
+    );
     Ok(())
 }
 
@@ -7034,6 +7073,34 @@ mod tests {
             .expect("resolve diarization")
             .expect("configured");
         assert!(config.speaker_embeddings);
+    }
+
+    #[test]
+    fn speakers_add_parses_guest_identity() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "speakers",
+            "add",
+            "--sourcearium",
+            "/tmp/sourcearium",
+            "--source-key",
+            "contrapoints",
+            "--speaker-key",
+            "guest:abigail_thorn",
+            "--display-name",
+            "Abigail Thorn",
+        ])
+        .expect("parse speakers add");
+        let Commands::Speakers(command) = cli.command else {
+            panic!("expected speakers command");
+        };
+        let SpeakersSubcommand::Add(args) = command.command else {
+            panic!("expected speakers add");
+        };
+        assert_eq!(args.source_key, "contrapoints");
+        assert_eq!(args.speaker_key, "guest:abigail_thorn");
+        assert_eq!(args.display_name.as_deref(), Some("Abigail Thorn"));
+        assert_eq!(args.relation, "guest");
     }
 
     #[test]
