@@ -575,15 +575,22 @@ pub fn match_speakers_from_evidence(
             if speech_fraction >= CREATOR_PRIOR_MIN_SPEECH_FRACTION {
                 if let Some(item) = matches.iter_mut().find(|item| item.diarization_label == *label) {
                     let margin_ok = item.margin.is_none_or(|margin| margin >= config.min_margin);
-                    if item.status == SpeakerMatchStatus::BelowSimilarity
-                        && item.best_identity.as_deref() == Some(creator_key)
-                        && item
-                            .similarity
-                            .is_some_and(|similarity| similarity >= CREATOR_PRIOR_MIN_SIMILARITY)
+                    let creator_similarity_ok = item
+                        .similarity
+                        .is_some_and(|similarity| similarity >= CREATOR_PRIOR_MIN_SIMILARITY);
+                    if item.best_identity.as_deref() == Some(creator_key)
+                        && creator_similarity_ok
                         && margin_ok
                     {
-                        item.status = SpeakerMatchStatus::MatchedCreatorPrior;
-                        creator_seed_label = Some(item.diarization_label.clone());
+                        if item.status == SpeakerMatchStatus::BelowSimilarity {
+                            item.status = SpeakerMatchStatus::MatchedCreatorPrior;
+                        }
+                        if matches!(
+                            item.status,
+                            SpeakerMatchStatus::Matched | SpeakerMatchStatus::MatchedCreatorPrior
+                        ) {
+                            creator_seed_label = Some(item.diarization_label.clone());
+                        }
                     }
                 }
             }
