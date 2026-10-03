@@ -15,8 +15,9 @@ use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, SpeakerIdentityV1,
-    SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
+    ChannelCategoryConfig, Config, ExistingSourceariumArtifact, MaterializeStatus, Result,
+    RuntimeLayout, SourceariumYoutubeSource, SpeakerIdentityV1, SpeakerMatchConfig,
+    SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
     VideoSelection, apply_sourcearium_prune, apply_speaker_match_report,
     apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_registry,
@@ -2523,6 +2524,101 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 }
 
 
+fn maintain_existing_speaker_attribution(
+    summary: &mut serde_json::Value,
+    report_items: bool,
+    sourcearium_root: &Path,
+    source: &SourceariumYoutubeSource,
+    registry: &SpeakerRegistryV1,
+    existing: &ExistingSourceariumArtifact,
+    video_id: &str,
+    config: SpeakerMatchConfig,
+) {
+    if existing.artifact.representation.derivation != "local_asr" {
+        return;
+    }
+
+    if !existing.artifact.extensions.contains_key("diarization") {
+        increment_summary(summary, "speaker_attribution_skipped", 1);
+        push_update_item(
+            summary,
+            report_items,
+            video_id,
+            "speaker_attribution_skipped",
+            serde_json::json!({
+                "reason": "existing local_asr transcript has no diarization extension",
+            }),
+        );
+        return;
+    }
+
+    let evidence_dir = sourcearium_root
+        .join(".cache")
+        .join("vessel")
+        .join("speaker-evidence");
+    let evidence_path = evidence_dir.join(format!("{video_id}.json"));
+    if !evidence_path.is_file() {
+        increment_summary(summary, "speaker_attribution_skipped", 1);
+        push_update_item(
+            summary,
+            report_items,
+            video_id,
+            "speaker_attribution_skipped",
+            serde_json::json!({
+                "reason": "existing diarized transcript has no persisted speaker evidence",
+                "evidence": evidence_path,
+            }),
+        );
+        return;
+    }
+
+    increment_summary(summary, "speaker_attribution_attempted", 1);
+    let report = match match_speakers_from_evidence(registry, &evidence_dir, video_id, config) {
+        Ok(report) => report,
+        Err(error) => {
+            push_update_error(summary, video_id, error);
+            return;
+        }
+    };
+    let application = match apply_speaker_match_report(source, video_id, &report) {
+        Ok(application) => application,
+        Err(error) => {
+            push_update_error(summary, video_id, error);
+            return;
+        }
+    };
+
+    increment_summary(
+        summary,
+        "speaker_attribution_assignments",
+        application.assignments,
+    );
+    increment_summary(
+        summary,
+        if application.updated {
+            "speaker_attribution_updated"
+        } else {
+            "speaker_attribution_unchanged"
+        },
+        1,
+    );
+    push_update_item(
+        summary,
+        report_items,
+        video_id,
+        "speaker_attribution_existing_evidence",
+        serde_json::json!({
+            "assignments": application.assignments,
+            "updated": application.updated,
+            "registry_revision": application.registry_revision,
+            "evidence": evidence_path,
+            "network_io": false,
+            "asr_invoked": false,
+            "diarization_invoked": false,
+        }),
+    );
+}
+
 async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
     validate_update_speaker_attribution(&args, &asr_config)?;
@@ -2911,6 +3007,22 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                             args.upgrade_check_days,
                             OffsetDateTime::now_utc(),
                         ) {
+                            if args.attribute_speakers
+                                && existing_artifact.artifact.representation.derivation == "local_asr"
+                            {
+                                maintain_existing_speaker_attribution(
+                                    &mut summary,
+                                    report_items,
+                                    &sourcearium_root,
+                                    &source,
+                                    speaker_registry
+                                        .as_ref()
+                                        .expect("speaker registry prevalidated"),
+                                    existing_artifact,
+                                    &video_ref.video_id,
+                                    speaker_match_config,
+                                );
+                            }
                             increment_summary(&mut summary, "upgrade_check_deferred", 1);
                             push_update_item(
                                 &mut summary,
@@ -3063,6 +3175,25 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             let (mut candidate, asr_cache_dir) = if let Some(candidate) = caption_acquisition.candidate {
                 (candidate, None)
             } else if existing.is_some() {
+                if args.attribute_speakers && !args.preview {
+                    let existing_artifact = existing
+                        .as_ref()
+                        .expect("existing artifact checked above");
+                    if existing_artifact.artifact.representation.derivation == "local_asr" {
+                        maintain_existing_speaker_attribution(
+                            &mut summary,
+                            report_items,
+                            &sourcearium_root,
+                            &source,
+                            speaker_registry
+                                .as_ref()
+                                .expect("speaker registry prevalidated"),
+                            existing_artifact,
+                            &video.video_id,
+                            speaker_match_config,
+                        );
+                    }
+                }
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
                 push_update_item(
                     &mut summary,
@@ -6339,6 +6470,56 @@ mod tests {
         assert_eq!(config.min_similarity, 0.91);
         assert_eq!(config.min_margin, 0.12);
         assert_eq!(config.min_anchor_dominance, 0.88);
+    }
+
+    #[test]
+    fn existing_speaker_maintenance_requires_local_asr_diarization() {
+        let mut artifact = vessel_core::SourceariumArtifactV1 {
+            schema: 1,
+            artifact_id: "youtube:video:test:transcript".into(),
+            kind: "transcript".into(),
+            title: None,
+            source: vessel_core::SourceIdentityV1 {
+                family: "youtube".into(),
+                kind: "video".into(),
+                id: "test".into(),
+                url: None,
+                creator: None,
+                creator_id: None,
+                published: None,
+            },
+            representation: vessel_core::TextRepresentationV1 {
+                derivation: "local_asr".into(),
+                language: Some("en".into()),
+                timestamps: Some(true),
+                engine: Some("whisper-candle".into()),
+                model: Some("small".into()),
+            },
+            acquisition: vessel_core::AcquisitionV1 {
+                producer: "vessel".into(),
+                producer_version: None,
+                acquired_at: None,
+                method: Some("local_asr".into()),
+            },
+            extensions: std::collections::BTreeMap::new(),
+        };
+        let existing = ExistingSourceariumArtifact {
+            path: PathBuf::from("test.md"),
+            artifact: artifact.clone(),
+            body: String::new(),
+        };
+        assert_eq!(existing.artifact.representation.derivation, "local_asr");
+        assert!(!existing.artifact.extensions.contains_key("diarization"));
+
+        artifact
+            .extensions
+            .insert("diarization".into(), toml::Table::new());
+        let existing = ExistingSourceariumArtifact {
+            path: PathBuf::from("test.md"),
+            artifact,
+            body: String::new(),
+        };
+        assert!(existing.artifact.extensions.contains_key("diarization"));
     }
 
     #[test]
