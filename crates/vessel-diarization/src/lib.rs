@@ -744,8 +744,7 @@ impl DiarizationProgressState {
         if total_chunks <= 0 || processed_chunks <= 0 {
             return false;
         }
-        let percent = ((processed_chunks as i64 * 100) / total_chunks as i64)
-            .clamp(0, 100) as i32;
+        let percent = ((processed_chunks as i64 * 100) / total_chunks as i64).clamp(0, 100) as i32;
         let should_report = processed_chunks >= total_chunks || percent >= self.next_percent;
         if should_report {
             while self.next_percent <= percent {
