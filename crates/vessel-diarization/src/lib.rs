@@ -16,6 +16,9 @@ pub const SHERPA_ONNX_ENGINE_NAME: &str = "sherpa-onnx";
 pub const SHERPA_ONNX_RUNTIME_VERSION: &str = "1.13.6";
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.5;
 pub const DEFAULT_WINDOW_SHIFT_RATIO: f32 = 0.1;
+pub const SPEAKER_EMBEDDING_AGGREGATION: &str = "chunk_centroid_v1_3s_16max";
+const SPEAKER_EMBEDDING_CHUNK_SECONDS: f64 = 3.0;
+const SPEAKER_EMBEDDING_MAX_CHUNKS: usize = 16;
 const TRANSCRIPT_ALIGNMENT_MIN_OVERLAP_SECONDS: f64 = 0.25;
 const TRANSCRIPT_ALIGNMENT_MIN_DOMINANCE: f64 = 0.60;
 const TRANSCRIPT_ALIGNMENT_MIN_MARGIN: f64 = 0.15;
@@ -86,9 +89,10 @@ impl DiarizationConfig {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "auto".into());
         format!(
-            "segmentation={};embedding={};num_speakers={};clustering_threshold={:.6};window_shift_ratio={:.6};min_duration_on={:.6};min_duration_off={:.6}",
+            "segmentation={};embedding={};embedding_aggregation={};num_speakers={};clustering_threshold={:.6};window_shift_ratio={:.6};min_duration_on={:.6};min_duration_off={:.6}",
             portable_model_id(&self.segmentation_model),
             portable_model_id(&self.embedding_model),
+            SPEAKER_EMBEDDING_AGGREGATION,
             num_speakers,
             self.clustering_threshold,
             self.window_shift_ratio,
@@ -643,39 +647,11 @@ impl SherpaOnnxDiarizer {
                     &raw_segments,
                     speaker,
                 );
-                if speaker_samples.is_empty() {
-                    continue;
+                if let Some(embedding) =
+                    self.embedding_centroid(&speaker_samples, wave_ref.sample_rate, dim)
+                {
+                    speaker_embeddings.insert(label, embedding);
                 }
-
-                let stream =
-                    unsafe { (self.api.create_embedding_stream)(self.embedding_extractor) };
-                if stream.is_null() {
-                    continue;
-                }
-                unsafe {
-                    (self.api.accept_waveform)(
-                        stream,
-                        wave_ref.sample_rate,
-                        speaker_samples.as_ptr(),
-                        speaker_samples.len() as i32,
-                    );
-                    (self.api.input_finished)(stream);
-                }
-
-                let ready = unsafe { (self.api.embedding_ready)(self.embedding_extractor, stream) };
-                if ready != 0 {
-                    let embedding =
-                        unsafe { (self.api.compute_embedding)(self.embedding_extractor, stream) };
-                    if !embedding.is_null() {
-                        let values = unsafe { slice::from_raw_parts(embedding, dim as usize) }
-                            .iter()
-                            .map(|value| f64::from(*value))
-                            .collect::<Vec<_>>();
-                        speaker_embeddings.insert(label, values);
-                        unsafe { (self.api.destroy_embedding)(embedding) };
-                    }
-                }
-                unsafe { (self.api.destroy_online_stream)(stream) };
             }
         }
 
@@ -696,6 +672,78 @@ impl SherpaOnnxDiarizer {
             result.speaker_embeddings.len(),
         );
         Ok(result)
+    }
+
+    fn embedding_centroid(
+        &self,
+        samples: &[f32],
+        sample_rate: i32,
+        dimension: i32,
+    ) -> Option<Vec<f64>> {
+        let windows = representative_embedding_windows(samples.len(), sample_rate);
+        if windows.is_empty() {
+            return None;
+        }
+
+        let mut embeddings = Vec::new();
+        for window in windows {
+            let chunk = &samples[window];
+            let stream = unsafe {
+                (self.api.create_embedding_stream)(self.embedding_extractor)
+            };
+            if stream.is_null() {
+                continue;
+            }
+            unsafe {
+                (self.api.accept_waveform)(
+                    stream,
+                    sample_rate,
+                    chunk.as_ptr(),
+                    chunk.len() as i32,
+                );
+                (self.api.input_finished)(stream);
+            }
+
+            let ready = unsafe {
+                (self.api.embedding_ready)(self.embedding_extractor, stream)
+            };
+            if ready != 0 {
+                let embedding = unsafe {
+                    (self.api.compute_embedding)(self.embedding_extractor, stream)
+                };
+                if !embedding.is_null() {
+                    let mut values = unsafe {
+                        slice::from_raw_parts(embedding, dimension as usize)
+                    }
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect::<Vec<_>>();
+                    if normalize_embedding_in_place(&mut values) {
+                        embeddings.push(values);
+                    }
+                    unsafe { (self.api.destroy_embedding)(embedding) };
+                }
+            }
+            unsafe { (self.api.destroy_online_stream)(stream) };
+        }
+
+        if embeddings.is_empty() {
+            return None;
+        }
+        let dimension = embeddings[0].len();
+        let mut centroid = vec![0.0; dimension];
+        for embedding in &embeddings {
+            if embedding.len() != dimension {
+                return None;
+            }
+            for (index, value) in embedding.iter().enumerate() {
+                centroid[index] += value;
+            }
+        }
+        for value in &mut centroid {
+            *value /= embeddings.len() as f64;
+        }
+        normalize_embedding_in_place(&mut centroid).then_some(centroid)
     }
 
     fn destroy_process_values(
@@ -1090,6 +1138,46 @@ fn align_transcript_interval(
     Some(best_speaker.to_owned())
 }
 
+fn representative_embedding_windows(
+    sample_count: usize,
+    sample_rate: i32,
+) -> Vec<std::ops::Range<usize>> {
+    if sample_count == 0 || sample_rate <= 0 {
+        return Vec::new();
+    }
+    let chunk_len =
+        (SPEAKER_EMBEDDING_CHUNK_SECONDS * f64::from(sample_rate)).round() as usize;
+    if chunk_len == 0 || sample_count <= chunk_len {
+        return vec![0..sample_count];
+    }
+
+    let available_full_chunks = (sample_count / chunk_len).max(1);
+    let count = available_full_chunks.min(SPEAKER_EMBEDDING_MAX_CHUNKS);
+    if count == 1 {
+        let start = (sample_count - chunk_len) / 2;
+        return vec![start..start + chunk_len];
+    }
+
+    let max_start = sample_count - chunk_len;
+    (0..count)
+        .map(|index| {
+            let start = index * max_start / (count - 1);
+            start..start + chunk_len
+        })
+        .collect()
+}
+
+fn normalize_embedding_in_place(values: &mut [f64]) -> bool {
+    let norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !norm.is_finite() || norm <= f64::EPSILON {
+        return false;
+    }
+    for value in values {
+        *value /= norm;
+    }
+    true
+}
+
 fn concatenate_speaker_audio(
     samples: &[f32],
     sample_rate: i32,
@@ -1228,11 +1316,34 @@ mod tests {
         let provenance = config.model_provenance();
         assert!(provenance.contains("segmentation=segmentation/model.onnx"));
         assert!(provenance.contains("embedding=embedding/model.onnx"));
+        assert!(provenance.contains(&format!(
+            "embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"
+        )));
         assert!(provenance.contains("num_speakers=auto"));
         assert!(provenance.contains("clustering_threshold=0.900000"));
         assert!(provenance.contains("window_shift_ratio=0.100000"));
         assert!(provenance.contains("min_duration_on=0.300000"));
         assert!(provenance.contains("min_duration_off=0.500000"));
+    }
+
+    #[test]
+    fn representative_embedding_windows_are_bounded_and_distributed() {
+        let sample_rate = 16_000;
+        let sample_count = sample_rate as usize * 1_000;
+        let windows = representative_embedding_windows(sample_count, sample_rate);
+
+        assert_eq!(windows.len(), SPEAKER_EMBEDDING_MAX_CHUNKS);
+        assert_eq!(windows[0].start, 0);
+        assert_eq!(windows.last().unwrap().end, sample_count);
+        assert!(windows
+            .iter()
+            .all(|window| window.len() == sample_rate as usize * 3));
+    }
+
+    #[test]
+    fn short_speaker_audio_uses_one_embedding_window() {
+        let windows = representative_embedding_windows(16_000 * 2, 16_000);
+        assert_eq!(windows, vec![0..32_000]);
     }
 
     #[test]
