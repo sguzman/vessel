@@ -169,6 +169,8 @@ vessel diarization fetch --embedding-profile en-voxceleb
 
 The English profile is stored alongside the default model with a separate integrity receipt and can be selected explicitly with `--embedding-model` for re-embedding or diarization experiments.
 
+Benchmark result (ContraPoints, October 2026): the English/VoxCeleb CAM++ model raised the known-positive Abigail Thorn cross-video match in `Opulence` (`SPEAKER_50`) from about `0.610` to about `0.914`, but it also compressed many unrelated voices into very high similarities. About 96.6% of `Opulence` speech landed at or above the current `0.80` similarity gate, and multiple short guest clusters were confidently misranked as the creator. Therefore `en-voxceleb` remains an explicit experimental benchmark profile, not the production default. The historical `zh-3dspeaker` model remains the conservative default until a model or scoring scheme improves known-positive recall without destroying negative separation.
+
 `diarization reembed` may replace the speaker-embedding model while reusing existing diarization segments. It requires the segmentation model to remain compatible, preserves the original clustering configuration in provenance, and rewrites only the embedding-model and embedding-aggregation provenance.
 
 Long-running stages must emit progress or heartbeat information. A silent multi-minute model load or inference run is a bug. Diarization progress is intentionally coarse-grained (about every 10%) while the heartbeat remains time-based, so observability does not become per-chunk terminal spam.
