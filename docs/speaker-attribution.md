@@ -317,6 +317,20 @@ vessel speakers benchmark \
 
 The machine-readable JSON includes each anchor/cluster cosine, the strongest competing identity and margin, model provenance, the known-positive marker for Abigail Thorn's `Opulence` `SPEAKER_50`, and aggregate negative-pair false-positive rate at the selected threshold. It consumes persisted evidence and exact-window caches only; it does not perform network I/O, ASR, segmentation, clustering, or transcript mutation. Repeat `speakers anchor-cache` with `--embedding-model` pointing at `en-voxceleb` to perform a reversible model A/B comparison. The production `zh-3dspeaker` default and global acceptance thresholds remain unchanged.
 
+Issue-level calibration uses the explicit manifest at `benchmarks/speaker_identity_calibration.toml`:
+
+```text
+vessel speakers benchmark \
+  --sourcearium <root> --source-key contrapoints \
+  --manifest benchmarks/speaker_identity_calibration.toml \
+  --candidate-raw-floor 0.50 \
+  --candidate-min-margin 0.20 \
+  --candidate-min-rank-gap 0.10 \
+  --candidate-min-robust-score 0.0
+```
+
+Manifest trials declare `positive`, `negative`, or `unlabeled`; wildcard clusters expand only where the manifest explicitly declares a video-level control. The report keeps unlabeled trials out of false-accept/false-reject counts. For each scored trial it emits raw cosine, margin against the next enrolled identity, target rank and gap to the next target cluster for that identity, leave-one-out z and robust median/MAD scores, cohort size, and candidate-rule acceptance. Cohorts contain all persisted target clusters for the identity, exclude the trial cluster for normalization, and never use truth labels. These normalized scores are benchmark diagnostics, not production decisions; no matcher threshold or behavior is changed.
+
 A read-only `matched` result is still evidence, not durable identity. Automatic transcript identity application remains a separate later step.
 
 Attribution freshness can be inspected without running cosine matching:

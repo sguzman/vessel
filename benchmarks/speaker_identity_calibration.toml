@@ -1,0 +1,68 @@
+schema = 1
+source_key = "contrapoints"
+
+# Explicit calibration trials. A '*' cluster expands to the persisted target
+# evidence clusters, but remains labeled only because this manifest declares
+# the video-level control as Abigail-absent.
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_50"
+identity_key = "guest:abigail_thorn"
+truth = "positive"
+note = "Known Abigail Thorn / Oliver Thorn voicing Lord Melbourne"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_50"
+identity_key = "creator"
+truth = "negative"
+note = "Known creator negative for the Abigail-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_03"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_08"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_14"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_16"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_32"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "g5o-OpVUHF0"
+target_cluster = "*"
+identity_key = "guest:abigail_thorn"
+truth = "negative"
+note = "Video-level Abigail-absent control; every persisted cluster is an explicit negative for this identity"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "*"
+identity_key = "creator"
+truth = "unlabeled"
+note = "Unlabeled target distribution; not used as a negative control"

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::{Client, StatusCode};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
@@ -483,6 +484,32 @@ struct SpeakerBenchmarkArgs {
     known_positive_label: String,
     #[arg(long = "threshold", default_value_t = 0.80)]
     threshold: f64,
+    #[arg(long = "manifest")]
+    manifest: Option<PathBuf>,
+    #[arg(long = "candidate-raw-floor", default_value_t = 0.80)]
+    candidate_raw_floor: f64,
+    #[arg(long = "candidate-min-margin", default_value_t = 0.0)]
+    candidate_min_margin: f64,
+    #[arg(long = "candidate-min-rank-gap", default_value_t = 0.0)]
+    candidate_min_rank_gap: f64,
+    #[arg(long = "candidate-min-robust-score", default_value_t = 0.0)]
+    candidate_min_robust_score: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpeakerBenchmarkManifest {
+    schema: u8,
+    source_key: String,
+    trials: Vec<SpeakerBenchmarkTrial>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpeakerBenchmarkTrial {
+    target_video_id: String,
+    target_cluster: String,
+    identity_key: String,
+    truth: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2825,6 +2852,9 @@ fn speakers_anchor_cache(args: SpeakerAnchorCacheArgs) -> Result<()> {
 }
 
 fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
+    if let Some(manifest) = args.manifest.clone() {
+        return speakers_benchmark_manifest(args, &manifest);
+    }
     if !(0.0..=1.0).contains(&args.threshold) {
         return Err(VesselError::Config(
             "benchmark threshold must be between 0 and 1".into(),
@@ -2919,10 +2949,10 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
                     .max_by(|a, b| a.1.total_cmp(&b.1));
 
                 let margin = competing.as_ref().map(|(_, value)| similarity - value);
-                let known_positive =
-                    speaker.key == args.known_positive_identity && label == &args.known_positive_label;
-                let known_negative =
-                    speaker.key != args.known_positive_identity && label == &args.known_positive_label;
+                let known_positive = speaker.key == args.known_positive_identity
+                    && label == &args.known_positive_label;
+                let known_negative = speaker.key != args.known_positive_identity
+                    && label == &args.known_positive_label;
                 let truth_class = if known_positive {
                     "known_positive"
                 } else if known_negative {
@@ -3027,6 +3057,383 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
         }))
         .map_err(|e| VesselError::Config(e.to_string()))?
     );
+    Ok(())
+}
+
+fn benchmark_normalize(values: &[f64]) -> Option<(f64, f64, f64, f64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let median = sorted[sorted.len() / 2];
+    let mut deviations = sorted
+        .iter()
+        .map(|value| (value - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(|left, right| left.total_cmp(right));
+    let mad = deviations[deviations.len() / 2];
+    Some((mean, variance.sqrt(), median, mad))
+}
+
+fn benchmark_centroid(samples: &[Vec<f64>]) -> Option<Vec<f64>> {
+    let first = samples.first()?;
+    let mut centroid = vec![0.0; first.len()];
+    for sample in samples {
+        if sample.len() != centroid.len() {
+            return None;
+        }
+        let norm = sample.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if norm <= f64::EPSILON || !norm.is_finite() {
+            return None;
+        }
+        for (index, value) in sample.iter().enumerate() {
+            centroid[index] += value / norm;
+        }
+    }
+    let norm = centroid
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    (norm > f64::EPSILON && norm.is_finite()).then(|| {
+        centroid
+            .into_iter()
+            .map(|value| value / norm)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn benchmark_score(left: &[f64], right: &[f64]) -> Option<f64> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let left_norm = left.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let right_norm = right.iter().map(|value| value * value).sum::<f64>().sqrt();
+    (left_norm > f64::EPSILON && right_norm > f64::EPSILON).then(|| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left * right)
+            .sum::<f64>()
+            / (left_norm * right_norm)
+    })
+}
+
+fn benchmark_rank_gap(scores: &[(String, f64)], label: &str) -> (Option<usize>, Option<f64>) {
+    let rank = scores
+        .iter()
+        .position(|(cluster, _)| cluster == label)
+        .map(|index| index + 1);
+    let gap = rank.and_then(|index| {
+        scores
+            .get(index)
+            .map(|(_, next_score)| scores[index - 1].1 - *next_score)
+    });
+    (rank, gap)
+}
+
+fn speakers_benchmark_manifest(args: SpeakerBenchmarkArgs, manifest_path: &Path) -> Result<()> {
+    let manifest: SpeakerBenchmarkManifest =
+        toml::from_str(&std::fs::read_to_string(manifest_path)?).map_err(|error| {
+            VesselError::Config(format!(
+                "{}: invalid benchmark manifest: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    if manifest.schema != 1 {
+        return Err(VesselError::Config(format!(
+            "unsupported speaker benchmark manifest schema {}; expected 1",
+            manifest.schema
+        )));
+    }
+    if manifest.source_key != args.source_key {
+        return Err(VesselError::Config(format!(
+            "benchmark manifest source_key {:?} does not match --source-key {:?}",
+            manifest.source_key, args.source_key
+        )));
+    }
+    if !(0.0..=1.0).contains(&args.candidate_raw_floor) {
+        return Err(VesselError::Config(
+            "candidate raw floor must be between 0 and 1".into(),
+        ));
+    }
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
+    let registry = load_speaker_registry(&registry_path)?
+        .ok_or_else(|| VesselError::Corpus("speaker registry does not exist".into()))?;
+    let evidence_dir = root.join(".cache/vessel/speaker-evidence");
+    let mut evidence_by_video = BTreeMap::new();
+    for trial in &manifest.trials {
+        if !matches!(trial.truth.as_str(), "positive" | "negative" | "unlabeled") {
+            return Err(VesselError::Config(format!(
+                "invalid truth {:?} for {}:{}",
+                trial.truth, trial.target_video_id, trial.target_cluster
+            )));
+        }
+        if !evidence_by_video.contains_key(&trial.target_video_id) {
+            let path = evidence_dir.join(format!("{}.json", trial.target_video_id));
+            evidence_by_video.insert(trial.target_video_id.clone(), load_speaker_evidence(&path)?);
+        }
+    }
+
+    let mut report_trials = Vec::new();
+    let mut distributions = Vec::new();
+    for (video_id, evidence) in &evidence_by_video {
+        let model_id = evidence
+            .diarization
+            .model
+            .split(';')
+            .find_map(|part| part.strip_prefix("embedding="))
+            .unwrap_or_default();
+        let labels = evidence
+            .speaker_embeddings
+            .as_ref()
+            .map(|embeddings| embeddings.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut identity_centroids = BTreeMap::new();
+        for identity in &registry.speakers {
+            let mut samples = Vec::new();
+            for anchor in &identity.anchors {
+                let path = speaker_anchor_cache_path(
+                    &evidence_dir.join("anchors"),
+                    &identity.key,
+                    &anchor.video_id,
+                    anchor.start_seconds,
+                    anchor.end_seconds,
+                    model_id,
+                );
+                if let Ok(cache) = load_speaker_anchor_evidence(&path) {
+                    if cache.embedding_model == model_id
+                        && cache.embedding.len() == evidence.embedding_dimension().unwrap_or(0)
+                    {
+                        samples.push(cache.embedding);
+                    }
+                }
+            }
+            if let Some(centroid) = benchmark_centroid(&samples) {
+                identity_centroids.insert(identity.key.clone(), centroid);
+            }
+        }
+        for (identity, centroid) in &identity_centroids {
+            let mut scores = labels
+                .iter()
+                .filter_map(|label| {
+                    let embedding = evidence.speaker_embeddings.as_ref()?.get(label)?;
+                    Some((label.clone(), benchmark_score(centroid, embedding)?))
+                })
+                .collect::<Vec<_>>();
+            scores.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            if let Some((mean, standard_deviation, median, mad)) =
+                benchmark_normalize(&scores.iter().map(|(_, score)| *score).collect::<Vec<_>>())
+            {
+                distributions.push(serde_json::json!({
+                    "target_video_id": video_id,
+                    "identity": identity,
+                    "cluster_count": scores.len(),
+                    "min": scores.first().map(|(_, score)| *score),
+                    "max": scores.last().map(|(_, score)| *score),
+                    "mean": mean,
+                    "standard_deviation": standard_deviation,
+                    "median": median,
+                    "mad": mad,
+                    "cohort": "all target clusters for identity; trial cluster excluded for leave-one-out normalization"
+                }));
+            }
+        }
+    }
+
+    for trial in &manifest.trials {
+        let evidence = evidence_by_video
+            .get(&trial.target_video_id)
+            .expect("loaded trial evidence");
+        let labels = if trial.target_cluster == "*" {
+            evidence
+                .speaker_embeddings
+                .as_ref()
+                .map(|embeddings| embeddings.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            vec![trial.target_cluster.clone()]
+        };
+        for label in labels {
+            let mut identity_scores = BTreeMap::new();
+            for identity in &registry.speakers {
+                let model_id = evidence
+                    .diarization
+                    .model
+                    .split(';')
+                    .find_map(|part| part.strip_prefix("embedding="))
+                    .unwrap_or_default();
+                let mut samples = Vec::new();
+                for anchor in &identity.anchors {
+                    let path = speaker_anchor_cache_path(
+                        &evidence_dir.join("anchors"),
+                        &identity.key,
+                        &anchor.video_id,
+                        anchor.start_seconds,
+                        anchor.end_seconds,
+                        model_id,
+                    );
+                    if let Ok(cache) = load_speaker_anchor_evidence(&path) {
+                        if cache.embedding_model == model_id {
+                            samples.push(cache.embedding);
+                        }
+                    }
+                }
+                let Some(centroid) = benchmark_centroid(&samples) else {
+                    continue;
+                };
+                let Some(embedding) = evidence
+                    .speaker_embeddings
+                    .as_ref()
+                    .and_then(|m| m.get(&label))
+                else {
+                    continue;
+                };
+                if let Some(score) = benchmark_score(&centroid, embedding) {
+                    identity_scores.insert(identity.key.clone(), score);
+                }
+            }
+            let Some(identity_score) = identity_scores.get(&trial.identity_key).copied() else {
+                report_trials.push(serde_json::json!({"target_video_id":trial.target_video_id,"target_cluster":label,"identity":trial.identity_key,"truth":trial.truth,"note":trial.note,"status":"unavailable"}));
+                continue;
+            };
+            let competing = identity_scores
+                .iter()
+                .filter(|(identity, _)| *identity != &trial.identity_key)
+                .max_by(|left, right| left.1.total_cmp(right.1));
+            let margin = competing.map(|(_, score)| identity_score - *score);
+            let mut target_scores = Vec::new();
+            if let Some(centroid) = identity_scores.get(&trial.identity_key).map(|_| ()) {
+                let _ = centroid;
+                // Reuse the distribution's target-video score population through the
+                // enrolled identity and current target evidence.
+                if let Some(identity) = registry
+                    .speakers
+                    .iter()
+                    .find(|identity| identity.key == trial.identity_key)
+                {
+                    let model_id = evidence
+                        .diarization
+                        .model
+                        .split(';')
+                        .find_map(|part| part.strip_prefix("embedding="))
+                        .unwrap_or_default();
+                    let mut samples = Vec::new();
+                    for anchor in &identity.anchors {
+                        let path = speaker_anchor_cache_path(
+                            &evidence_dir.join("anchors"),
+                            &identity.key,
+                            &anchor.video_id,
+                            anchor.start_seconds,
+                            anchor.end_seconds,
+                            model_id,
+                        );
+                        if let Ok(cache) = load_speaker_anchor_evidence(&path) {
+                            samples.push(cache.embedding);
+                        }
+                    }
+                    if let Some(centroid) = benchmark_centroid(&samples) {
+                        if let Some(embeddings) = evidence.speaker_embeddings.as_ref() {
+                            target_scores = embeddings
+                                .iter()
+                                .filter_map(|(cluster, embedding)| {
+                                    Some((cluster.clone(), benchmark_score(&centroid, embedding)?))
+                                })
+                                .collect();
+                        }
+                    }
+                }
+            }
+            target_scores.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            let (rank, target_rank_gap) = benchmark_rank_gap(&target_scores, &label);
+            let cohort = target_scores
+                .iter()
+                .filter(|(cluster, _)| cluster != &label)
+                .map(|(_, score)| *score)
+                .collect::<Vec<_>>();
+            let normalization = benchmark_normalize(&cohort);
+            let z_score = normalization.and_then(|(mean, standard_deviation, _, _)| {
+                (standard_deviation > f64::EPSILON)
+                    .then(|| (identity_score - mean) / standard_deviation)
+            });
+            let robust_score = normalization.and_then(|(_, _, median, mad)| {
+                (mad > f64::EPSILON).then(|| (identity_score - median) / (1.4826 * mad))
+            });
+            let accepted = identity_score >= args.candidate_raw_floor
+                && margin.is_some_and(|value| value >= args.candidate_min_margin)
+                && target_rank_gap.is_some_and(|value| value >= args.candidate_min_rank_gap)
+                && robust_score.is_some_and(|value| value >= args.candidate_min_robust_score);
+            report_trials.push(serde_json::json!({
+                "target_video_id": trial.target_video_id,
+                "target_cluster": label,
+                "identity": trial.identity_key,
+                "truth": trial.truth,
+                "note": trial.note,
+                "status": "scored",
+                "raw_cosine": identity_score,
+                "identity_margin": margin,
+                "competing_identity": competing.map(|(identity, _)| identity),
+                "target_rank": rank,
+                "target_rank_gap": target_rank_gap,
+                "z_score": z_score,
+                "robust_score": robust_score,
+                "cohort_size": cohort.len(),
+                "candidate_accept": accepted,
+                "normalization": "leave-one-out target-video cohort; no truth filtering; z=(score-mean)/sd; robust=(score-median)/(1.4826*MAD)"
+            }));
+        }
+    }
+    let labeled = report_trials
+        .iter()
+        .filter(|trial| {
+            matches!(trial["truth"].as_str(), Some("positive") | Some("negative"))
+                && trial["status"] == "scored"
+        })
+        .collect::<Vec<_>>();
+    let positives = labeled
+        .iter()
+        .filter(|trial| trial["truth"] == "positive")
+        .count();
+    let negatives = labeled
+        .iter()
+        .filter(|trial| trial["truth"] == "negative")
+        .count();
+    let false_rejects = labeled
+        .iter()
+        .filter(|trial| trial["truth"] == "positive" && trial["candidate_accept"] == false)
+        .count();
+    let false_accepts = labeled
+        .iter()
+        .filter(|trial| trial["truth"] == "negative" && trial["candidate_accept"] == true)
+        .count();
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "schema": 2,
+        "status": "ok",
+        "manifest": manifest_path,
+        "source_key": args.source_key,
+        "candidate_rule": {"raw_floor":args.candidate_raw_floor,"min_identity_margin":args.candidate_min_margin,"min_target_rank_gap":args.candidate_min_rank_gap,"min_robust_score":args.candidate_min_robust_score},
+        "cohort_construction": "all enrolled target clusters for an identity, with the trial cluster excluded for leave-one-out normalization; no truth labels are used to form cohorts",
+        "distributions": distributions,
+        "trials": report_trials,
+        "evaluation": {"positive_count":positives,"negative_count":negatives,"false_reject_count":false_rejects,"false_accept_count":false_accepts,"unlabeled_count":report_trials.iter().filter(|trial| trial["truth"] == "unlabeled").count()}
+    })).map_err(|error| VesselError::Config(error.to_string()))?);
     Ok(())
 }
 
@@ -7106,18 +7513,17 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        Cli, Commands, DiarizationSubcommand, SpeakersSubcommand, UpdateArgs,
-        diagnostic_cosine_similarity, diarization_fixture_dir,
-        existing_speaker_attribution_is_fresh, install_staged_directory,
+        Cli, Commands, DiarizationSubcommand, SHERPA_EMBEDDING_BYTES, SHERPA_EMBEDDING_FILENAME,
+        SHERPA_EMBEDDING_SHA256, SHERPA_EN_EMBEDDING_BYTES, SHERPA_EN_EMBEDDING_FILENAME,
+        SHERPA_EN_EMBEDDING_SHA256, SpeakerBenchmarkManifest, SpeakersSubcommand, UpdateArgs,
+        benchmark_normalize, benchmark_rank_gap, diagnostic_cosine_similarity,
+        diarization_fixture_dir, existing_speaker_attribution_is_fresh, install_staged_directory,
         maintain_existing_speaker_attribution, normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
         resolve_diarization_config, reuse_normalized_audio_fixture, sha256_file,
-        transcript_upgrade_probe_due, validate_fixture_video_id,
+        sherpa_embedding_spec, transcript_upgrade_probe_due, validate_fixture_video_id,
         validate_update_speaker_attribution, verify_integrity_receipt, write_integrity_receipt,
-        sherpa_embedding_spec, SHERPA_EMBEDDING_FILENAME, SHERPA_EMBEDDING_BYTES,
-        SHERPA_EMBEDDING_SHA256, SHERPA_EN_EMBEDDING_FILENAME, SHERPA_EN_EMBEDDING_BYTES,
-        SHERPA_EN_EMBEDDING_SHA256,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{
@@ -7135,6 +7541,47 @@ mod tests {
         assert!(validate_fixture_video_id("bad/id").is_err());
         let path = diarization_fixture_dir("g5o-OpVUHF0").expect("fixture path");
         assert!(path.ends_with("fixtures/diarization/youtube/g5o-OpVUHF0"));
+    }
+
+    #[test]
+    fn benchmark_manifest_parses_explicit_truth_and_unlabeled_trials() {
+        let manifest: SpeakerBenchmarkManifest = toml::from_str(
+            r#"schema = 1
+source_key = "contrapoints"
+[[trials]]
+target_video_id = "video"
+target_cluster = "SPEAKER_01"
+identity_key = "guest:one"
+truth = "unlabeled"
+note = "cohort only"
+"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.schema, 1);
+        assert_eq!(manifest.trials[0].truth, "unlabeled");
+        assert_eq!(manifest.trials[0].note.as_deref(), Some("cohort only"));
+    }
+
+    #[test]
+    fn benchmark_rank_and_gap_are_one_based_and_deterministic() {
+        let scores = vec![
+            ("SPEAKER_02".into(), 0.90),
+            ("SPEAKER_01".into(), 0.70),
+            ("SPEAKER_03".into(), 0.20),
+        ];
+        let (rank, gap) = benchmark_rank_gap(&scores, "SPEAKER_01");
+        assert_eq!(rank, Some(2));
+        assert!((gap.expect("gap") - 0.50).abs() < f64::EPSILON * 4.0);
+        assert_eq!(benchmark_rank_gap(&scores, "missing"), (None, None));
+    }
+
+    #[test]
+    fn benchmark_robust_normalization_handles_degenerate_cohorts() {
+        assert_eq!(benchmark_normalize(&[]), None);
+        assert_eq!(benchmark_normalize(&[0.5]), Some((0.5, 0.0, 0.5, 0.0)));
+        let result = benchmark_normalize(&[1.0, 2.0, 100.0]).expect("normalization");
+        assert_eq!(result.2, 2.0);
+        assert_eq!(result.3, 1.0);
     }
 
     #[test]
