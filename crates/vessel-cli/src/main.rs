@@ -20,7 +20,7 @@ use vessel_core::{
     SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
     VideoSelection, apply_sourcearium_prune, apply_speaker_match_report,
     apply_youtube_transcript_diarization, discover_youtube_sources,
-    inventory_sourcearium_repository, load_config, load_speaker_registry,
+    inventory_sourcearium_repository, load_config, load_speaker_evidence, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
     plan_sourcearium_prune, render_speaker_attributed_transcript, speaker_evidence_fingerprint,
     resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
@@ -355,6 +355,7 @@ enum SpeakersSubcommand {
     Init(SpeakerInitArgs),
     Anchor(SpeakerAnchorArgs),
     Match(SpeakerMatchArgs),
+    Diagnose(SpeakerMatchArgs),
     Status(SpeakerMatchArgs),
     Apply(SpeakerMatchArgs),
     Render(SpeakerRenderArgs),
@@ -667,6 +668,7 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Init(args) => speakers_init(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
+            SpeakersSubcommand::Diagnose(args) => speakers_diagnose(args),
             SpeakersSubcommand::Status(args) => speakers_status(args),
             SpeakersSubcommand::Apply(args) => speakers_apply(args),
             SpeakersSubcommand::Render(args) => speakers_render(args),
@@ -2470,6 +2472,141 @@ fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
+    let registry = load_speaker_registry(&registry_path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}; initialize it first",
+            registry_path.display()
+        ))
+    })?;
+    let evidence_dir = root.join(".cache").join("vessel").join("speaker-evidence");
+    let evidence_path = evidence_dir.join(format!("{}.json", args.video_id));
+    let evidence = load_speaker_evidence(&evidence_path)?;
+    let config = SpeakerMatchConfig {
+        min_similarity: args.min_similarity,
+        min_margin: args.min_margin,
+        min_anchor_dominance: args.min_anchor_dominance,
+    }
+    .validate()?;
+    let report = match_speakers_from_evidence(&registry, &evidence_dir, &args.video_id, config)?;
+
+    let mut duration_by_label = HashMap::<String, f64>::new();
+    let mut segment_count_by_label = HashMap::<String, usize>::new();
+    for segment in &evidence.segments {
+        *duration_by_label.entry(segment.speaker.clone()).or_default() += segment.end - segment.start;
+        *segment_count_by_label.entry(segment.speaker.clone()).or_default() += 1;
+    }
+    let embedding_labels = evidence
+        .speaker_embeddings
+        .as_ref()
+        .map(|embeddings| embeddings.keys().cloned().collect::<HashSet<_>>())
+        .unwrap_or_default();
+
+    let mut clusters = report
+        .matches
+        .iter()
+        .map(|speaker_match| {
+            let speech_seconds = duration_by_label
+                .get(&speaker_match.diarization_label)
+                .copied()
+                .unwrap_or(0.0);
+            serde_json::json!({
+                "label": speaker_match.diarization_label,
+                "speech_seconds": speech_seconds,
+                "segment_count": segment_count_by_label
+                    .get(&speaker_match.diarization_label)
+                    .copied()
+                    .unwrap_or(0),
+                "embedding_present": embedding_labels.contains(&speaker_match.diarization_label),
+                "status": &speaker_match.status,
+                "best_identity": speaker_match.best_identity.as_deref(),
+                "similarity": speaker_match.similarity,
+                "margin": speaker_match.margin,
+                "anchor_samples": speaker_match.anchor_samples,
+            })
+        })
+        .collect::<Vec<_>>();
+    clusters.sort_by(|left, right| {
+        let left_duration = left["speech_seconds"].as_f64().unwrap_or(0.0);
+        let right_duration = right["speech_seconds"].as_f64().unwrap_or(0.0);
+        right_duration.total_cmp(&left_duration).then_with(|| {
+            left["label"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["label"].as_str().unwrap_or_default())
+        })
+    });
+
+    let total_cluster_speech_seconds = duration_by_label.values().sum::<f64>();
+    let embedded_cluster_speech_seconds = duration_by_label
+        .iter()
+        .filter(|(label, _)| embedding_labels.contains(label.as_str()))
+        .map(|(_, seconds)| *seconds)
+        .sum::<f64>();
+    let threshold_speech_seconds = report
+        .matches
+        .iter()
+        .filter(|speaker_match| {
+            speaker_match
+                .similarity
+                .is_some_and(|similarity| similarity >= config.min_similarity)
+        })
+        .map(|speaker_match| {
+            duration_by_label
+                .get(&speaker_match.diarization_label)
+                .copied()
+                .unwrap_or(0.0)
+        })
+        .sum::<f64>();
+    let top_similarity = report
+        .matches
+        .iter()
+        .filter_map(|speaker_match| {
+            speaker_match
+                .similarity
+                .map(|similarity| (speaker_match.diarization_label.as_str(), similarity))
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1));
+
+    let output = serde_json::json!({
+        "status": "ok",
+        "sourcearium_root": root,
+        "source_key": args.source_key,
+        "video_id": args.video_id,
+        "evidence": evidence_path,
+        "registry": registry_path,
+        "registry_revision": registry.revision,
+        "cluster_count": duration_by_label.len(),
+        "embedding_count": embedding_labels.len(),
+        "cluster_speech_seconds": total_cluster_speech_seconds,
+        "embedded_cluster_speech_seconds": embedded_cluster_speech_seconds,
+        "speech_seconds_at_or_above_similarity_threshold": threshold_speech_seconds,
+        "speech_fraction_at_or_above_similarity_threshold": if total_cluster_speech_seconds > 0.0 {
+            threshold_speech_seconds / total_cluster_speech_seconds
+        } else {
+            0.0
+        },
+        "top_similarity": top_similarity.map(|(label, similarity)| serde_json::json!({
+            "label": label,
+            "similarity": similarity,
+        })),
+        "config": config,
+        "anchor_diagnostics": report.anchor_diagnostics,
+        "clusters_by_speech_duration": clusters,
+        "network_io": false,
+        "matching_mutation": false,
+        "sourcearium_mutation": false,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
             .map_err(|error| VesselError::Config(error.to_string()))?
     );
     Ok(())
@@ -6823,6 +6960,31 @@ mod tests {
         assert!(fixture.is_file());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn speakers_diagnose_parses_as_read_only_analysis() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "speakers",
+            "diagnose",
+            "--sourcearium",
+            "/tmp/sourcearium",
+            "--source-key",
+            "example",
+            "--video-id",
+            "video-1",
+        ])
+        .expect("parse speakers diagnose");
+        let Commands::Speakers(command) = cli.command else {
+            panic!("expected speakers command");
+        };
+        let SpeakersSubcommand::Diagnose(args) = command.command else {
+            panic!("expected speakers diagnose");
+        };
+        assert_eq!(args.source_key, "example");
+        assert_eq!(args.video_id, "video-1");
+        assert_eq!(args.min_similarity, 0.80);
     }
 
     #[test]
