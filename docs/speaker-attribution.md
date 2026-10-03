@@ -78,6 +78,32 @@ Diarization provenance preserves not only the segmentation and embedding model i
 
 Speaker embeddings/centroids may be cached operationally for fast matching. They must record the exact embedding model and registry revision. If durable embeddings are ever added, that is an explicit format decision rather than an accidental SQLite detail.
 
+## Speaker Embedding Aggregation
+
+Speaker identity embeddings are not computed from arbitrarily long concatenated speaker audio.
+
+For each diarized file-local speaker, Vessel:
+
+- concatenates only that speaker's diarized speech
+- samples at most 16 representative 3-second windows across that speech
+- computes one embedding per usable window
+- L2-normalizes each window embedding
+- averages the normalized window embeddings
+- L2-normalizes the resulting centroid
+
+The aggregation strategy is persisted in diarization model provenance as `embedding_aggregation=chunk_centroid_v1_3s_16max`. Legacy whole-speaker embeddings and chunk-centroid embeddings are intentionally treated as incompatible identity evidence until the legacy evidence is refreshed.
+
+Existing diarization can be re-embedded without rerunning ASR, segmentation, clustering, or network acquisition:
+
+```text
+vessel diarization reembed \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <video-id>
+```
+
+`reembed` reuses the durable WAV plus persisted diarization segments, updates the speaker-evidence vectors and embedding provenance, and clears stale durable identity attribution while preserving the transcript text and anonymous `SPEAKER_XX` partition.
+
 ## Attribution Confidence
 
 A diarized speaker can be mapped to a stable identity only with an explicit attribution state:
