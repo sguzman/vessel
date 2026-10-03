@@ -161,6 +161,14 @@ Every backend must support an explicit local/offline model path where technicall
 
 Automatic first-use download/cache remains allowed, but must never be the only supported model-acquisition path.
 
+Sherpa speaker-embedding models can be fetched explicitly by profile. The historical default remains `zh-3dspeaker`; English/VoxCeleb benchmarking uses `en-voxceleb` without replacing the default model:
+
+```text
+vessel diarization fetch --embedding-profile en-voxceleb
+```
+
+The English profile is stored alongside the default model with a separate integrity receipt and can be selected explicitly with `--embedding-model` for re-embedding or diarization experiments.
+
 Long-running stages must emit progress or heartbeat information. A silent multi-minute model load or inference run is a bug. Diarization progress is intentionally coarse-grained (about every 10%) while the heartbeat remains time-based, so observability does not become per-chunk terminal spam.
 
 ## Implementation Order
