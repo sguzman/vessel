@@ -4230,7 +4230,10 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "build_time_fetch": false,
             "provider": args.diarization_provider,
             "num_threads": args.diarization_num_threads,
-            "speaker_embeddings": args.speaker_embeddings,
+            "speaker_embeddings": diarization_config
+                .as_ref()
+                .map(|config| config.speaker_embeddings)
+                .unwrap_or(asr_config.speaker_embeddings),
             "backend_loaded": diarization_backend.is_some(),
         },
         "speaker_attribution": {
@@ -6989,6 +6992,48 @@ mod tests {
         let error = validate_update_speaker_attribution(&args, &config)
             .expect_err("WhisperX compatibility diarization requires WhisperX ASR");
         assert!(error.to_string().contains("WhisperX diarization requires"));
+    }
+
+    #[test]
+    fn rust_diarization_attribution_reports_effective_embeddings() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            force_local_asr: false,
+            asr_backend: Some("phonon-2".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: Some("en".into()),
+            diarize: true,
+            diarization_backend: "sherpa-onnx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_runtime_dir: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            attribute_speakers: true,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
+
+        let config = resolve_diarization_config(&args)
+            .expect("resolve diarization")
+            .expect("configured");
+        assert!(config.speaker_embeddings);
     }
 
     #[test]
