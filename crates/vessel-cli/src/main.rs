@@ -2628,6 +2628,28 @@ fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
     Ok(())
 }
 
+fn diagnostic_cosine_similarity(left: &[f64], right: &[f64]) -> Option<f64> {
+    if left.is_empty() || left.len() != right.len() {
+        return None;
+    }
+    let left_norm = left.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let right_norm = right.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !left_norm.is_finite()
+        || !right_norm.is_finite()
+        || left_norm <= f64::EPSILON
+        || right_norm <= f64::EPSILON
+    {
+        return None;
+    }
+    Some(
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left * right)
+            .sum::<f64>()
+            / (left_norm * right_norm),
+    )
+}
+
 fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
     let root = absolute_sourcearium_root(args.sourcearium)?;
     let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
@@ -2726,6 +2748,85 @@ fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
         })
         .max_by(|left, right| left.1.total_cmp(&right.1));
 
+    let mut target_pairwise_similarities = Vec::new();
+    if let Some(embeddings) = evidence.speaker_embeddings.as_ref() {
+        let entries = embeddings.iter().collect::<Vec<_>>();
+        for left_index in 0..entries.len() {
+            for right_index in (left_index + 1)..entries.len() {
+                let (left_label, left_embedding) = entries[left_index];
+                let (right_label, right_embedding) = entries[right_index];
+                if let Some(similarity) =
+                    diagnostic_cosine_similarity(left_embedding, right_embedding)
+                {
+                    target_pairwise_similarities.push(serde_json::json!({
+                        "left": left_label,
+                        "right": right_label,
+                        "similarity": similarity,
+                        "left_speech_seconds": duration_by_label
+                            .get(left_label)
+                            .copied()
+                            .unwrap_or(0.0),
+                        "right_speech_seconds": duration_by_label
+                            .get(right_label)
+                            .copied()
+                            .unwrap_or(0.0),
+                    }));
+                }
+            }
+        }
+    }
+    target_pairwise_similarities.sort_by(|left, right| {
+        right["similarity"]
+            .as_f64()
+            .unwrap_or(f64::NEG_INFINITY)
+            .total_cmp(&left["similarity"].as_f64().unwrap_or(f64::NEG_INFINITY))
+    });
+    target_pairwise_similarities.truncate(20);
+
+    let mut anchor_local_comparisons = Vec::new();
+    for diagnostic in &report.anchor_diagnostics {
+        if !matches!(diagnostic.status, vessel_core::AnchorEvidenceStatus::Used) {
+            continue;
+        }
+        let Some(anchor_label) = diagnostic.diarization_label.as_deref() else {
+            continue;
+        };
+        let anchor_path = evidence_dir.join(format!("{}.json", diagnostic.video_id));
+        let Ok(anchor_evidence) = load_speaker_evidence(&anchor_path) else {
+            continue;
+        };
+        let Some(anchor_embeddings) = anchor_evidence.speaker_embeddings.as_ref() else {
+            continue;
+        };
+        let Some(anchor_embedding) = anchor_embeddings.get(anchor_label) else {
+            continue;
+        };
+        let mut comparisons = anchor_embeddings
+            .iter()
+            .filter(|(label, _)| label.as_str() != anchor_label)
+            .filter_map(|(label, embedding)| {
+                diagnostic_cosine_similarity(anchor_embedding, embedding).map(|similarity| {
+                    serde_json::json!({
+                        "other_label": label,
+                        "similarity": similarity,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        comparisons.sort_by(|left, right| {
+            right["similarity"]
+                .as_f64()
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&left["similarity"].as_f64().unwrap_or(f64::NEG_INFINITY))
+        });
+        anchor_local_comparisons.push(serde_json::json!({
+            "speaker_key": diagnostic.speaker_key,
+            "video_id": diagnostic.video_id,
+            "anchor_label": anchor_label,
+            "other_clusters": comparisons,
+        }));
+    }
+
     let output = serde_json::json!({
         "status": "ok",
         "sourcearium_root": root,
@@ -2748,6 +2849,8 @@ fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
             "label": label,
             "similarity": similarity,
         })),
+        "target_pairwise_top_similarities": target_pairwise_similarities,
+        "anchor_local_comparisons": anchor_local_comparisons,
         "config": config,
         "anchor_diagnostics": report.anchor_diagnostics,
         "clusters_by_speech_duration": clusters,
@@ -6508,7 +6611,7 @@ mod tests {
 
     use super::{
         Cli, Commands, DiarizationSubcommand, SpeakersSubcommand, UpdateArgs,
-        diarization_fixture_dir,
+        diagnostic_cosine_similarity, diarization_fixture_dir,
         existing_speaker_attribution_is_fresh, install_staged_directory,
         maintain_existing_speaker_attribution, reuse_normalized_audio_fixture,
         normalize_update_publication_date,
@@ -7137,6 +7240,15 @@ mod tests {
         assert_eq!(args.source_key, "example");
         assert_eq!(args.video_id, "video-1");
         assert_eq!(args.num_threads, 4);
+    }
+
+    #[test]
+    fn diagnostic_cosine_similarity_handles_normalized_geometry() {
+        let same = diagnostic_cosine_similarity(&[1.0, 0.0], &[2.0, 0.0]).unwrap();
+        let orthogonal = diagnostic_cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).unwrap();
+        assert!((same - 1.0).abs() < 1e-12);
+        assert!(orthogonal.abs() < 1e-12);
+        assert!(diagnostic_cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]).is_none());
     }
 
     #[test]
