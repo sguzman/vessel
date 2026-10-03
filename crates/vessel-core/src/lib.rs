@@ -23,9 +23,11 @@ pub use sourcearium_repo::{
     ExistingSourceariumArtifact, MaterializeResult, MaterializeStatus, SourceariumInventoryReport,
     SourceariumPruneCandidate, SourceariumPrunePlan, SourceariumValidationReport,
     SourceariumYoutubeSource, SpeakerAttributionApplyResult, TranscriptDiarizationApplyResult,
-    apply_sourcearium_prune, apply_speaker_match_report, apply_youtube_transcript_diarization,
+    TranscriptDiarizationProvenanceRefreshResult, apply_sourcearium_prune,
+    apply_speaker_match_report, apply_youtube_transcript_diarization,
     discover_youtube_sources, inventory_sourcearium_repository, load_youtube_transcript_artifact,
-    materialize_youtube_transcript, plan_sourcearium_prune, render_speaker_attributed_transcript,
+    materialize_youtube_transcript, plan_sourcearium_prune,
+    refresh_youtube_transcript_diarization_provenance, render_speaker_attributed_transcript,
     validate_sourcearium_repository,
 };
 pub use speaker_match::{
