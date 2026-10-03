@@ -6507,7 +6507,8 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        Cli, Commands, SpeakersSubcommand, UpdateArgs, diarization_fixture_dir,
+        Cli, Commands, DiarizationSubcommand, SpeakersSubcommand, UpdateArgs,
+        diarization_fixture_dir,
         existing_speaker_attribution_is_fresh, install_staged_directory,
         maintain_existing_speaker_attribution, reuse_normalized_audio_fixture,
         normalize_update_publication_date,
