@@ -2836,15 +2836,17 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
         .ok_or_else(|| VesselError::Corpus("speaker registry does not exist".into()))?;
     let evidence_dir = root.join(".cache/vessel/speaker-evidence");
     let target = load_speaker_evidence(&evidence_dir.join(format!("{}.json", args.video_id)))?;
+    let model_id = target
+        .diarization
+        .model
+        .split(';')
+        .find_map(|part| part.strip_prefix("embedding="))
+        .unwrap_or_default();
+    let target_dimension = target.embedding_dimension().unwrap_or(0);
+
     let mut pairs = Vec::new();
     for speaker in &registry.speakers {
         for anchor in &speaker.anchors {
-            let model_id = target
-                .diarization
-                .model
-                .split(';')
-                .find_map(|part| part.strip_prefix("embedding="))
-                .unwrap_or_default();
             let cache_path = speaker_anchor_cache_path(
                 &evidence_dir.join("anchors"),
                 &speaker.key,
@@ -2856,11 +2858,10 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
             let Ok(cache) = load_speaker_anchor_evidence(&cache_path) else {
                 continue;
             };
-            if cache.embedding_model != model_id
-                || cache.embedding.len() != target.embedding_dimension().unwrap_or(0)
-            {
+            if cache.embedding_model != model_id || cache.embedding.len() != target_dimension {
                 continue;
             }
+
             let anchor_norm = cache.embedding.iter().map(|v| v * v).sum::<f64>().sqrt();
             for (label, embedding) in target
                 .speaker_embeddings
@@ -2876,39 +2877,81 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
                     .map(|(a, b)| a * b)
                     .sum::<f64>()
                     / (anchor_norm * target_norm);
+
                 let competing = registry
                     .speakers
                     .iter()
                     .filter(|other| other.key != speaker.key)
-                    .filter_map(|other| {
-                        let other_anchor = other.anchors.first()?;
-                        let path = speaker_anchor_cache_path(
-                            &evidence_dir.join("anchors"),
-                            &other.key,
-                            &other_anchor.video_id,
-                            other_anchor.start_seconds,
-                            other_anchor.end_seconds,
-                            model_id,
-                        );
-                        let cache = load_speaker_anchor_evidence(&path).ok()?;
-                        let norm = cache.embedding.iter().map(|v| v * v).sum::<f64>().sqrt();
-                        Some((
-                            other.key.clone(),
-                            cache
+                    .flat_map(|other| {
+                        other.anchors.iter().filter_map(|other_anchor| {
+                            let path = speaker_anchor_cache_path(
+                                &evidence_dir.join("anchors"),
+                                &other.key,
+                                &other_anchor.video_id,
+                                other_anchor.start_seconds,
+                                other_anchor.end_seconds,
+                                model_id,
+                            );
+                            let other_cache = load_speaker_anchor_evidence(&path).ok()?;
+                            if other_cache.embedding_model != model_id
+                                || other_cache.embedding.len() != target_dimension
+                            {
+                                return None;
+                            }
+                            let norm = other_cache
                                 .embedding
                                 .iter()
-                                .zip(embedding)
-                                .map(|(a, b)| a * b)
+                                .map(|v| v * v)
                                 .sum::<f64>()
-                                / (norm * target_norm),
-                        ))
+                                .sqrt();
+                            Some((
+                                other.key.clone(),
+                                other_cache
+                                    .embedding
+                                    .iter()
+                                    .zip(embedding)
+                                    .map(|(a, b)| a * b)
+                                    .sum::<f64>()
+                                    / (norm * target_norm),
+                            ))
+                        })
                     })
                     .max_by(|a, b| a.1.total_cmp(&b.1));
+
                 let margin = competing.as_ref().map(|(_, value)| similarity - value);
-                pairs.push(serde_json::json!({"identity":speaker.key,"anchor_video_id":anchor.video_id,"anchor_start_seconds":anchor.start_seconds,"anchor_end_seconds":anchor.end_seconds,"target_video_id":args.video_id,"target_label":label,"cosine_similarity":similarity,"competing_identity":competing.as_ref().map(|v| &v.0),"competing_similarity":competing.map(|v| v.1),"margin":margin,"model_provenance":target.diarization.model,"known_positive":speaker.key == args.known_positive_identity && label == &args.known_positive_label,"known_negative":!(speaker.key == args.known_positive_identity && label == &args.known_positive_label),"at_or_above_threshold":similarity >= args.threshold}));
+                let known_positive =
+                    speaker.key == args.known_positive_identity && label == &args.known_positive_label;
+                let known_negative =
+                    speaker.key != args.known_positive_identity && label == &args.known_positive_label;
+                let truth_class = if known_positive {
+                    "known_positive"
+                } else if known_negative {
+                    "known_negative"
+                } else {
+                    "unlabeled"
+                };
+
+                pairs.push(serde_json::json!({
+                    "identity": speaker.key,
+                    "anchor_video_id": anchor.video_id,
+                    "anchor_start_seconds": anchor.start_seconds,
+                    "anchor_end_seconds": anchor.end_seconds,
+                    "target_video_id": args.video_id,
+                    "target_label": label,
+                    "cosine_similarity": similarity,
+                    "competing_identity": competing.as_ref().map(|v| &v.0),
+                    "competing_similarity": competing.map(|v| v.1),
+                    "margin": margin,
+                    "model_provenance": target.diarization.model,
+                    "truth_class": truth_class,
+                    "known_positive": known_positive,
+                    "known_negative": known_negative,
+                    "at_or_above_threshold": similarity >= args.threshold
+                }));
             }
         }
     }
+
     let positives = pairs
         .iter()
         .filter(|p| p["known_positive"].as_bool() == Some(true))
@@ -2917,6 +2960,13 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
         .iter()
         .filter(|p| p["known_negative"].as_bool() == Some(true))
         .count();
+    let positive_hits = pairs
+        .iter()
+        .filter(|p| {
+            p["known_positive"].as_bool() == Some(true)
+                && p["at_or_above_threshold"].as_bool() == Some(true)
+        })
+        .count();
     let negative_hits = pairs
         .iter()
         .filter(|p| {
@@ -2924,7 +2974,59 @@ fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
                 && p["at_or_above_threshold"].as_bool() == Some(true)
         })
         .count();
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({"schema":1,"status":"ok","source_key":args.source_key,"target_video_id":args.video_id,"threshold":args.threshold,"pairs":pairs,"aggregate":{"known_positive_pairs":positives,"known_negative_pairs":negatives,"known_positive_hits_at_or_above_threshold":pairs.iter().filter(|p| p["known_positive"].as_bool() == Some(true) && p["at_or_above_threshold"].as_bool() == Some(true)).count(),"known_negative_hits_at_or_above_threshold":negative_hits,"known_negative_false_positive_rate":if negatives == 0 {0.0} else {negative_hits as f64 / negatives as f64}}})).map_err(|e| VesselError::Config(e.to_string()))?);
+    let all_hits = pairs
+        .iter()
+        .filter(|p| p["at_or_above_threshold"].as_bool() == Some(true))
+        .count();
+    let unlabeled = pairs
+        .iter()
+        .filter(|p| p["truth_class"].as_str() == Some("unlabeled"))
+        .count();
+    let unlabeled_hits = pairs
+        .iter()
+        .filter(|p| {
+            p["truth_class"].as_str() == Some("unlabeled")
+                && p["at_or_above_threshold"].as_bool() == Some(true)
+        })
+        .count();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": 1,
+            "status": "ok",
+            "source_key": args.source_key,
+            "target_video_id": args.video_id,
+            "threshold": args.threshold,
+            "pairs": pairs,
+            "aggregate": {
+                "known_positive_pairs": positives,
+                "known_negative_pairs": negatives,
+                "known_positive_hits_at_or_above_threshold": positive_hits,
+                "known_negative_hits_at_or_above_threshold": negative_hits,
+                "known_negative_false_positive_rate": if negatives == 0 {
+                    0.0
+                } else {
+                    negative_hits as f64 / negatives as f64
+                },
+                "all_pairs": pairs.len(),
+                "all_hits_at_or_above_threshold": all_hits,
+                "all_pair_threshold_hit_rate": if pairs.is_empty() {
+                    0.0
+                } else {
+                    all_hits as f64 / pairs.len() as f64
+                },
+                "unlabeled_pairs": unlabeled,
+                "unlabeled_hits_at_or_above_threshold": unlabeled_hits,
+                "unlabeled_threshold_hit_rate": if unlabeled == 0 {
+                    0.0
+                } else {
+                    unlabeled_hits as f64 / unlabeled as f64
+                }
+            }
+        }))
+        .map_err(|e| VesselError::Config(e.to_string()))?
+    );
     Ok(())
 }
 
