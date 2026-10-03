@@ -98,6 +98,29 @@ impl SpeakerRegistryV1 {
         Ok(())
     }
 
+    pub fn add_speaker(
+        &mut self,
+        key: &str,
+        display_name: Option<&str>,
+        relation: Option<&str>,
+    ) -> Result<()> {
+        require_key("speaker key", key)?;
+        validate_optional_nonempty("speaker display_name", display_name)?;
+        validate_optional_nonempty("speaker relation", relation)?;
+        if self.speakers.iter().any(|speaker| speaker.key == key) {
+            return Err(registry_error(format!("duplicate speaker key {key:?}")));
+        }
+
+        self.speakers.push(SpeakerIdentityV1 {
+            key: key.to_owned(),
+            display_name: display_name.map(str::to_owned),
+            relation: relation.map(str::to_owned),
+            anchors: Vec::new(),
+        });
+        self.revision = self.revision.saturating_add(1);
+        self.validate()
+    }
+
     pub fn add_human_anchor(
         &mut self,
         speaker_key: &str,
@@ -212,6 +235,27 @@ mod tests {
                 anchors: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn adding_speaker_advances_revision_and_rejects_duplicates() {
+        let mut registry = registry();
+        registry
+            .add_speaker("guest:abigail_thorn", Some("Abigail Thorn"), Some("guest"))
+            .expect("add speaker");
+        assert_eq!(registry.revision, 2);
+        assert_eq!(registry.speakers.len(), 2);
+        assert_eq!(registry.speakers[1].key, "guest:abigail_thorn");
+        assert_eq!(
+            registry.speakers[1].display_name.as_deref(),
+            Some("Abigail Thorn")
+        );
+        assert_eq!(registry.speakers[1].relation.as_deref(), Some("guest"));
+        assert!(
+            registry
+                .add_speaker("guest:abigail_thorn", Some("Abigail Thorn"), Some("guest"))
+                .is_err()
+        );
     }
 
     #[test]
