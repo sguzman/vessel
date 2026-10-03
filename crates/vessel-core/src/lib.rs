@@ -32,7 +32,8 @@ pub use sourcearium_repo::{
 };
 pub use speaker_match::{
     AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1,
-    SpeakerEvidenceDiarization, SpeakerEvidenceProvenance, SpeakerEvidenceSegment,
+    SPEAKER_MATCH_ALGORITHM, SpeakerEvidenceDiarization, SpeakerEvidenceProvenance,
+    SpeakerEvidenceSegment,
     SpeakerEvidenceV1, SpeakerMatch, SpeakerMatchConfig, SpeakerMatchReport, SpeakerMatchStatus,
     load_speaker_evidence, match_speakers_from_evidence, speaker_evidence_fingerprint,
 };
