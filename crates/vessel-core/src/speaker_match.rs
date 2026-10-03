@@ -10,6 +10,7 @@ pub const SPEAKER_EVIDENCE_SCHEMA_V1: u8 = 1;
 pub const SPEAKER_MATCH_ALGORITHM: &str = "embedding_cosine_v2_creator_prior";
 const CREATOR_PRIOR_MIN_SIMILARITY: f64 = 0.60;
 const CREATOR_PRIOR_MIN_SPEECH_FRACTION: f64 = 0.50;
+const CREATOR_PRIOR_MIN_TARGET_SEPARATION: f64 = 0.08;
 const CREATOR_COHORT_MIN_SIMILARITY: f64 = 0.90;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -573,23 +574,60 @@ pub fn match_speakers_from_evidence(
                 0.0
             };
             if speech_fraction >= CREATOR_PRIOR_MIN_SPEECH_FRACTION {
-                if let Some(item) = matches.iter_mut().find(|item| item.diarization_label == *label) {
-                    let margin_ok = item.margin.is_none_or(|margin| margin >= config.min_margin);
-                    let creator_similarity_ok = item
-                        .similarity
-                        .is_some_and(|similarity| similarity >= CREATOR_PRIOR_MIN_SIMILARITY);
-                    if item.best_identity.as_deref() == Some(creator_key)
-                        && creator_similarity_ok
-                        && margin_ok
+                let creator_candidate = matches
+                    .iter()
+                    .find(|item| item.diarization_label == *label)
+                    .and_then(|item| {
+                        (item.best_identity.as_deref() == Some(creator_key))
+                            .then_some(item.similarity?)
+                    });
+                let separation_ok = creator_candidate.is_some_and(|dominant_similarity| {
+                    let Some(dominant_embedding) = target.embedding(label) else {
+                        return false;
+                    };
+                    let Ok(dominant_embedding) = normalize_embedding(dominant_embedding) else {
+                        return false;
+                    };
+                    let strongest_outside_cohort = matches
+                        .iter()
+                        .filter(|item| item.diarization_label != *label)
+                        .filter(|item| item.best_identity.as_deref() == Some(creator_key))
+                        .filter_map(|item| {
+                            let embedding = target.embedding(&item.diarization_label)?;
+                            let normalized = normalize_embedding(embedding).ok()?;
+                            let cohort_similarity = dot(&dominant_embedding, &normalized);
+                            (cohort_similarity < CREATOR_COHORT_MIN_SIMILARITY)
+                                .then_some(item.similarity?)
+                        })
+                        .max_by(|left, right| left.total_cmp(right));
+                    strongest_outside_cohort.is_none_or(|outside_similarity| {
+                        dominant_similarity - outside_similarity
+                            >= CREATOR_PRIOR_MIN_TARGET_SEPARATION
+                    })
+                });
+
+                if separation_ok {
+                    if let Some(item) =
+                        matches.iter_mut().find(|item| item.diarization_label == *label)
                     {
-                        if item.status == SpeakerMatchStatus::BelowSimilarity {
-                            item.status = SpeakerMatchStatus::MatchedCreatorPrior;
-                        }
-                        if matches!(
-                            item.status,
-                            SpeakerMatchStatus::Matched | SpeakerMatchStatus::MatchedCreatorPrior
-                        ) {
-                            creator_seed_label = Some(item.diarization_label.clone());
+                        let margin_ok = item.margin.is_none_or(|margin| margin >= config.min_margin);
+                        let creator_similarity_ok = item
+                            .similarity
+                            .is_some_and(|similarity| similarity >= CREATOR_PRIOR_MIN_SIMILARITY);
+                        if item.best_identity.as_deref() == Some(creator_key)
+                            && creator_similarity_ok
+                            && margin_ok
+                        {
+                            if item.status == SpeakerMatchStatus::BelowSimilarity {
+                                item.status = SpeakerMatchStatus::MatchedCreatorPrior;
+                            }
+                            if matches!(
+                                item.status,
+                                SpeakerMatchStatus::Matched
+                                    | SpeakerMatchStatus::MatchedCreatorPrior
+                            ) {
+                                creator_seed_label = Some(item.diarization_label.clone());
+                            }
                         }
                     }
                 }
@@ -948,6 +986,65 @@ mod tests {
         );
         assert_eq!(
             by_label["SPEAKER_09"],
+            SpeakerMatchStatus::BelowSimilarity
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creator_prior_requires_separation_from_non_cohort_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-creator-prior-separation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let evidence_dir = root.join("speaker-evidence");
+        write_evidence(
+            &evidence_dir,
+            "anchor-creator",
+            &[(0.0, 8.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "target",
+            &[(0.0, 60.0, "SPEAKER_01"), (60.0, 100.0, "SPEAKER_02")],
+            &[
+                ("SPEAKER_01", &[0.67, 0.742]),
+                ("SPEAKER_02", &[0.64, -0.768]),
+            ],
+        );
+        let registry = SpeakerRegistryV1 {
+            schema: 1,
+            source_family: "youtube".into(),
+            source_id: "UCexample".into(),
+            revision: 1,
+            speakers: vec![SpeakerIdentityV1 {
+                key: "creator".into(),
+                display_name: Some("Creator".into()),
+                relation: Some("creator".into()),
+                anchors: vec![SpeakerAnchorV1 {
+                    video_id: "anchor-creator".into(),
+                    start_seconds: 0,
+                    end_seconds: 8,
+                    basis: SpeakerAttribution::HumanConfirmed,
+                }],
+            }],
+        };
+        let report = match_speakers_from_evidence(
+            &registry,
+            &evidence_dir,
+            "target",
+            SpeakerMatchConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            report
+                .matches
+                .iter()
+                .find(|item| item.diarization_label == "SPEAKER_01")
+                .unwrap()
+                .status,
             SpeakerMatchStatus::BelowSimilarity
         );
         let _ = fs::remove_dir_all(root);
