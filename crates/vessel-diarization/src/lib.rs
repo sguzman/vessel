@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, c_char, c_float, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -99,6 +99,34 @@ impl DiarizationConfig {
             self.min_duration_on,
             self.min_duration_off,
         )
+    }
+
+    pub fn reembedded_model_provenance(&self, existing: &str) -> Result<String> {
+        let expected_segmentation = portable_model_id(&self.segmentation_model);
+        let expected_embedding = portable_model_id(&self.embedding_model);
+        if provenance_component(existing, "segmentation") != Some(expected_segmentation.as_str())
+            || provenance_component(existing, "embedding") != Some(expected_embedding.as_str())
+        {
+            return Err(diarization_error(format!(
+                "existing diarization provenance is incompatible with configured models: {existing}"
+            )));
+        }
+
+        let mut components = existing
+            .split(';')
+            .filter(|component| !component.starts_with("embedding_aggregation="))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let insert_at = components
+            .iter()
+            .position(|component| component.starts_with("embedding="))
+            .map(|index| index + 1)
+            .unwrap_or(components.len());
+        components.insert(
+            insert_at,
+            format!("embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"),
+        );
+        Ok(components.join(";"))
     }
 }
 
@@ -674,6 +702,74 @@ impl SherpaOnnxDiarizer {
         Ok(result)
     }
 
+    pub fn reembed_segments_path(
+        &self,
+        path: &Path,
+        segments: &[DiarizationSegment],
+    ) -> Result<BTreeMap<String, Vec<f64>>> {
+        if self.embedding_extractor.is_null() {
+            return Err(diarization_error(
+                "speaker embedding extractor is not enabled in this diarization config",
+            ));
+        }
+        if !path.is_file() {
+            return Err(diarization_error(format!(
+                "diarization input does not exist: {}",
+                path.display()
+            )));
+        }
+        let filename = path_cstring(path)?;
+        let wave = unsafe { (self.api.read_wave)(filename.as_ptr()) };
+        if wave.is_null() {
+            return Err(diarization_error(format!(
+                "failed to read diarization WAV {}",
+                path.display()
+            )));
+        }
+        let wave_ref = unsafe { &*wave };
+        let expected_sample_rate = unsafe { (self.api.diarizer_sample_rate)(self.diarizer) };
+        if wave_ref.sample_rate != expected_sample_rate
+            || wave_ref.num_samples <= 0
+            || wave_ref.samples.is_null()
+        {
+            unsafe { (self.api.free_wave)(wave) };
+            return Err(diarization_error(
+                "re-embedding WAV is empty or has an incompatible sample rate",
+            ));
+        }
+
+        let dimension = unsafe { (self.api.embedding_dim)(self.embedding_extractor) };
+        if dimension <= 0 {
+            unsafe { (self.api.free_wave)(wave) };
+            return Err(diarization_error(
+                "sherpa-onnx speaker embedding dimension is invalid",
+            ));
+        }
+        let samples = unsafe {
+            slice::from_raw_parts(wave_ref.samples, wave_ref.num_samples as usize)
+        };
+        let labels = segments
+            .iter()
+            .map(|segment| segment.speaker.clone())
+            .collect::<BTreeSet<_>>();
+        let mut embeddings = BTreeMap::new();
+        for label in labels {
+            let speaker_samples = concatenate_labeled_speaker_audio(
+                samples,
+                wave_ref.sample_rate,
+                segments,
+                &label,
+            );
+            if let Some(embedding) =
+                self.embedding_centroid(&speaker_samples, wave_ref.sample_rate, dimension)
+            {
+                embeddings.insert(label, embedding);
+            }
+        }
+        unsafe { (self.api.free_wave)(wave) };
+        Ok(embeddings)
+    }
+
     fn embedding_centroid(
         &self,
         samples: &[f32],
@@ -1138,6 +1234,13 @@ fn align_transcript_interval(
     Some(best_speaker.to_owned())
 }
 
+fn provenance_component<'a>(model: &'a str, key: &str) -> Option<&'a str> {
+    model.split(';').find_map(|component| {
+        let (component_key, value) = component.split_once('=')?;
+        (component_key == key).then_some(value)
+    })
+}
+
 fn representative_embedding_windows(
     sample_count: usize,
     sample_rate: i32,
@@ -1192,6 +1295,27 @@ fn concatenate_speaker_audio(
     for segment in segments.iter().filter(|segment| segment.speaker == speaker) {
         let start = ((segment.start as f64 * sample_rate).floor() as usize).min(samples.len());
         let end = ((segment.end as f64 * sample_rate).ceil() as usize).min(samples.len());
+        if start < end {
+            output.extend_from_slice(&samples[start..end]);
+        }
+    }
+    output
+}
+
+fn concatenate_labeled_speaker_audio(
+    samples: &[f32],
+    sample_rate: i32,
+    segments: &[DiarizationSegment],
+    speaker: &str,
+) -> Vec<f32> {
+    if sample_rate <= 0 {
+        return Vec::new();
+    }
+    let sample_rate = f64::from(sample_rate);
+    let mut output = Vec::new();
+    for segment in segments.iter().filter(|segment| segment.speaker == speaker) {
+        let start = ((segment.start_seconds * sample_rate).floor() as usize).min(samples.len());
+        let end = ((segment.end_seconds * sample_rate).ceil() as usize).min(samples.len());
         if start < end {
             output.extend_from_slice(&samples[start..end]);
         }
@@ -1324,6 +1448,30 @@ mod tests {
         assert!(provenance.contains("window_shift_ratio=0.100000"));
         assert!(provenance.contains("min_duration_on=0.300000"));
         assert!(provenance.contains("min_duration_off=0.500000"));
+    }
+
+    #[test]
+    fn reembedded_provenance_preserves_clustering_and_marks_aggregation() {
+        let config = DiarizationConfig {
+            backend: SHERPA_ONNX_BACKEND_NAME.into(),
+            runtime_library: PathBuf::from("/runtime/libsherpa-onnx-c-api.so"),
+            segmentation_model: PathBuf::from("/models/segmentation/model.onnx"),
+            embedding_model: PathBuf::from("/models/embedding/model.onnx"),
+            provider: "cpu".into(),
+            num_threads: 4,
+            num_speakers: None,
+            clustering_threshold: 0.5,
+            window_shift_ratio: 0.1,
+            min_duration_on: 0.3,
+            min_duration_off: 0.5,
+            speaker_embeddings: true,
+        };
+        let existing = "segmentation=segmentation/model.onnx;embedding=embedding/model.onnx;num_speakers=auto;clustering_threshold=0.900000";
+        let updated = config.reembedded_model_provenance(existing).unwrap();
+        assert!(updated.contains("clustering_threshold=0.900000"));
+        assert!(updated.contains(&format!(
+            "embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"
+        )));
     }
 
     #[test]
