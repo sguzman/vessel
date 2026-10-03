@@ -2293,7 +2293,7 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
         window_shift_ratio: args.window_shift_ratio,
         min_duration_on: 0.3,
         min_duration_off: 0.5,
-        speaker_embeddings: args.speaker_embeddings,
+        speaker_embeddings: args.speaker_embeddings || args.attribute_speakers,
     };
     config.validate()?;
 
@@ -4313,12 +4313,8 @@ fn validate_update_speaker_attribution(args: &UpdateArgs, config: &AsrConfig) ->
     if !args.attribute_speakers {
         return Ok(());
     }
-    if !args.diarize || !args.speaker_embeddings {
-        return Err(VesselError::Config(
-            "--attribute-speakers requires --diarize and --speaker-embeddings".into(),
-        ));
-    }
-    if args.diarization_backend == "whisperx"
+    if args.diarize
+        && args.diarization_backend == "whisperx"
         && config.backend != vessel_asr::WHISPERX_BACKEND_NAME
     {
         return Err(VesselError::Config(
@@ -4432,7 +4428,8 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     }
     config.min_speakers = config.diarize.then_some(args.min_speakers).flatten();
     config.max_speakers = config.diarize.then_some(args.max_speakers).flatten();
-    config.speaker_embeddings = config.diarize && args.speaker_embeddings;
+    config.speaker_embeddings =
+        config.diarize && (args.speaker_embeddings || args.attribute_speakers);
     config.hf_token_env = args.hf_token_env.clone();
     config
 }
@@ -6995,18 +6992,18 @@ mod tests {
     }
 
     #[test]
-    fn speaker_attribution_update_requires_diarization_and_embeddings() {
-        let mut args = UpdateArgs {
+    fn speaker_attribution_can_reuse_existing_evidence_without_diarization() {
+        let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
             force_local_asr: false,
-            asr_backend: Some("whisperx".into()),
+            asr_backend: Some("phonon-2".into()),
             asr_model: None,
             asr_model_dir: None,
             asr_executable: None,
             asr_device: None,
-            asr_language: None,
+            asr_language: Some("en".into()),
             diarize: false,
             diarization_backend: "sherpa-onnx".into(),
             diarization_segmentation_model: None,
@@ -7031,22 +7028,58 @@ mod tests {
         };
 
         let config = resolve_asr_config(&args);
-        let error = validate_update_speaker_attribution(&args, &config)
-            .expect_err("missing diarization must fail");
+        validate_update_speaker_attribution(&args, &config)
+            .expect("persisted-evidence attribution must not require diarization");
+        assert!(!config.diarize);
+        assert!(!config.speaker_embeddings);
         assert!(
-            error
-                .to_string()
-                .contains("requires --diarize and --speaker-embeddings")
+            resolve_diarization_config(&args)
+                .expect("standalone attribution config")
+                .is_none()
         );
+    }
 
-        args.diarize = true;
-        let config = resolve_asr_config(&args);
-        assert!(validate_update_speaker_attribution(&args, &config).is_err());
+    #[test]
+    fn fresh_diarization_attribution_enables_embeddings_implicitly() {
+        let args = UpdateArgs {
+            sourcearium: PathBuf::from("."),
+            max_videos: None,
+            video_ids: Vec::new(),
+            force_local_asr: false,
+            asr_backend: Some("whisperx".into()),
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: true,
+            diarization_backend: "whisperx".into(),
+            diarization_segmentation_model: None,
+            diarization_embedding_model: None,
+            diarization_runtime_dir: None,
+            diarization_provider: "cpu".into(),
+            diarization_num_threads: 4,
+            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            speaker_embeddings: false,
+            attribute_speakers: true,
+            speaker_min_similarity: 0.80,
+            speaker_min_margin: 0.05,
+            speaker_min_anchor_dominance: 0.80,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 30,
+            report_items: false,
+            preview: false,
+        };
 
-        args.speaker_embeddings = true;
         let config = resolve_asr_config(&args);
         validate_update_speaker_attribution(&args, &config)
-            .expect("complete attribution configuration");
+            .expect("fresh WhisperX attribution configuration");
+        assert!(config.diarize);
+        assert!(config.speaker_embeddings);
     }
 
     #[test]
