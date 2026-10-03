@@ -1555,7 +1555,10 @@ input = "https://www.youtube.com/@{key}"
         assert_eq!(annotated_body, original_body);
         assert!(annotated_body.contains("<speaker:SPEAKER_00>"));
         let attribution = &artifact.extensions["speaker_attribution"];
-        assert_eq!(attribution["method"].as_str(), Some("embedding_cosine"));
+        assert_eq!(
+            attribution["method"].as_str(),
+            Some(crate::SPEAKER_MATCH_ALGORITHM)
+        );
         assert_eq!(attribution["registry_revision"].as_integer(), Some(4));
         let assignments = attribution["assignments"].as_array().unwrap();
         assert_eq!(assignments.len(), 1);
