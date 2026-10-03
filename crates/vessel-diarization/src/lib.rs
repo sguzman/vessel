@@ -667,7 +667,11 @@ impl SherpaOnnxDiarizer {
                 ));
             }
 
-            for speaker in 0..num_speakers {
+            let speaker_ids = raw_segments
+                .iter()
+                .filter_map(|segment| (segment.speaker >= 0).then_some(segment.speaker))
+                .collect::<BTreeSet<_>>();
+            for speaker in speaker_ids {
                 let label = speaker_label(speaker);
                 let speaker_samples = concatenate_speaker_audio(
                     samples,
@@ -1455,6 +1459,32 @@ mod tests {
         assert!(updated.contains(&format!(
             "embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"
         )));
+    }
+
+    #[test]
+    fn sparse_speaker_ids_are_not_assumed_contiguous() {
+        let segments = vec![
+            RawDiarizationSegment {
+                start: 0.0,
+                end: 1.0,
+                speaker: 0,
+            },
+            RawDiarizationSegment {
+                start: 1.0,
+                end: 2.0,
+                speaker: 34,
+            },
+            RawDiarizationSegment {
+                start: 2.0,
+                end: 3.0,
+                speaker: 71,
+            },
+        ];
+        let ids = segments
+            .iter()
+            .filter_map(|segment| (segment.speaker >= 0).then_some(segment.speaker))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids, BTreeSet::from([0, 34, 71]));
     }
 
     #[test]
