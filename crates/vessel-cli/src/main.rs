@@ -353,6 +353,7 @@ enum SpeakersSubcommand {
     Init(SpeakerInitArgs),
     Anchor(SpeakerAnchorArgs),
     Match(SpeakerMatchArgs),
+    Status(SpeakerMatchArgs),
     Apply(SpeakerMatchArgs),
     Render(SpeakerRenderArgs),
 }
@@ -664,6 +665,7 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Init(args) => speakers_init(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
+            SpeakersSubcommand::Status(args) => speakers_status(args),
             SpeakersSubcommand::Apply(args) => speakers_apply(args),
             SpeakersSubcommand::Render(args) => speakers_render(args),
         },
@@ -2463,6 +2465,153 @@ fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
             min_anchor_dominance: args.min_anchor_dominance,
         },
     )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn speakers_status(args: SpeakerMatchArgs) -> Result<()> {
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let source = discover_youtube_sources(&root)?
+        .into_iter()
+        .find(|source| source.policy.source_key == args.source_key)
+        .ok_or_else(|| {
+            VesselError::Corpus(format!("unknown YouTube source key {:?}", args.source_key))
+        })?;
+    let registry_path = source.source_dir.join("speakers.toml");
+    let registry = load_speaker_registry(&registry_path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}",
+            registry_path.display()
+        ))
+    })?;
+    let existing = load_youtube_transcript_artifact(&source, &args.video_id)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "Sourcearium transcript artifact does not exist for video {:?}",
+            args.video_id
+        ))
+    })?;
+    let config = SpeakerMatchConfig {
+        min_similarity: args.min_similarity,
+        min_margin: args.min_margin,
+        min_anchor_dominance: args.min_anchor_dominance,
+    }
+    .validate()?;
+    let evidence_dir = root.join(".cache").join("vessel").join("speaker-evidence");
+    let evidence_path = evidence_dir.join(format!("{}.json", args.video_id));
+    let evidence_fingerprint =
+        speaker_evidence_fingerprint(&registry, &evidence_dir, &args.video_id)?;
+
+    let attribution = existing.artifact.extensions.get("speaker_attribution");
+    let diarization = existing.artifact.extensions.get("diarization");
+    let stored_registry_revision = attribution
+        .and_then(|table| table.get("registry_revision"))
+        .and_then(toml::Value::as_integer);
+    let stored_fingerprint = attribution
+        .and_then(|table| table.get("evidence_fingerprint"))
+        .and_then(toml::Value::as_str);
+    let stored_min_similarity = attribution
+        .and_then(|table| table.get("min_similarity"))
+        .and_then(toml::Value::as_float);
+    let stored_min_margin = attribution
+        .and_then(|table| table.get("min_margin"))
+        .and_then(toml::Value::as_float);
+    let stored_min_anchor_dominance = attribution
+        .and_then(|table| table.get("min_anchor_dominance"))
+        .and_then(toml::Value::as_float);
+    let stored_engine = attribution
+        .and_then(|table| table.get("diarization_engine"))
+        .and_then(toml::Value::as_str);
+    let stored_model = attribution
+        .and_then(|table| table.get("diarization_model"))
+        .and_then(toml::Value::as_str);
+    let current_engine = diarization
+        .and_then(|table| table.get("engine"))
+        .and_then(toml::Value::as_str);
+    let current_model = diarization
+        .and_then(|table| table.get("model"))
+        .and_then(toml::Value::as_str);
+
+    let checks = [
+        (
+            "registry_revision",
+            stored_registry_revision == Some(registry.revision as i64),
+        ),
+        (
+            "evidence_fingerprint",
+            stored_fingerprint == Some(evidence_fingerprint.as_str()),
+        ),
+        (
+            "min_similarity",
+            stored_min_similarity == Some(config.min_similarity),
+        ),
+        ("min_margin", stored_min_margin == Some(config.min_margin)),
+        (
+            "min_anchor_dominance",
+            stored_min_anchor_dominance == Some(config.min_anchor_dominance),
+        ),
+        ("diarization_engine", stored_engine == current_engine),
+        ("diarization_model", stored_model == current_model),
+    ];
+    let stale_reasons = checks
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let fresh = attribution.is_some()
+        && diarization.is_some()
+        && existing_speaker_attribution_is_fresh(
+            &existing,
+            &registry,
+            config,
+            &evidence_fingerprint,
+        );
+
+    let report = serde_json::json!({
+        "status": if fresh {
+            "fresh"
+        } else if attribution.is_some() {
+            "stale"
+        } else {
+            "missing_attribution"
+        },
+        "sourcearium_root": root,
+        "source_key": args.source_key,
+        "video_id": args.video_id,
+        "transcript": existing.path,
+        "registry": registry_path,
+        "registry_revision": {
+            "current": registry.revision,
+            "stored": stored_registry_revision,
+        },
+        "evidence": {
+            "path": evidence_path,
+            "exists": evidence_path.is_file(),
+            "current_fingerprint": evidence_fingerprint,
+            "stored_fingerprint": stored_fingerprint,
+        },
+        "calibration": {
+            "current": config,
+            "stored": {
+                "min_similarity": stored_min_similarity,
+                "min_margin": stored_min_margin,
+                "min_anchor_dominance": stored_min_anchor_dominance,
+            },
+        },
+        "diarization": {
+            "current_engine": current_engine,
+            "stored_engine": stored_engine,
+            "current_model": current_model,
+            "stored_model": stored_model,
+        },
+        "stale_reasons": stale_reasons,
+        "network_io": false,
+        "matching_invoked": false,
+        "sourcearium_mutation": false,
+    });
     println!(
         "{}",
         serde_json::to_string_pretty(&report)
@@ -5997,11 +6146,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use clap::Parser;
     use time::OffsetDateTime;
 
     use super::{
-        UpdateArgs, diarization_fixture_dir, existing_speaker_attribution_is_fresh,
-        install_staged_directory, maintain_existing_speaker_attribution,
+        Cli, Commands, SpeakersSubcommand, UpdateArgs, diarization_fixture_dir,
+        existing_speaker_attribution_is_fresh, install_staged_directory,
+        maintain_existing_speaker_attribution,
         normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
@@ -6550,6 +6701,31 @@ mod tests {
         assert_eq!(config.min_similarity, 0.91);
         assert_eq!(config.min_margin, 0.12);
         assert_eq!(config.min_anchor_dominance, 0.88);
+    }
+
+    #[test]
+    fn speakers_status_parses_without_mutation_flags() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "speakers",
+            "status",
+            "--sourcearium",
+            "/tmp/sourcearium",
+            "--source-key",
+            "example",
+            "--video-id",
+            "video-1",
+        ])
+        .expect("parse speakers status");
+        let Commands::Speakers(command) = cli.command else {
+            panic!("expected speakers command");
+        };
+        let SpeakersSubcommand::Status(args) = command.command else {
+            panic!("expected speakers status");
+        };
+        assert_eq!(args.source_key, "example");
+        assert_eq!(args.video_id, "video-1");
+        assert_eq!(args.min_similarity, 0.80);
     }
 
     #[test]

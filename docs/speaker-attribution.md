@@ -237,6 +237,17 @@ The report also preserves per-anchor diagnostics such as missing evidence, incom
 
 A read-only `matched` result is still evidence, not durable identity. Automatic transcript identity application remains a separate later step.
 
+Attribution freshness can be inspected without running cosine matching:
+
+```text
+vessel speakers status \
+  --sourcearium <root> \
+  --source-key <key> \
+  --video-id <target-video-id>
+```
+
+`status` performs no network I/O and no Sourcearium mutation. It compares the persisted attribution against the current registry revision, evidence fingerprint, calibration thresholds, and diarization provenance, returning `fresh`, `stale`, or `missing_attribution` plus explicit stale reasons.
+
 
 ## Applying Model-Matched Identity
 
