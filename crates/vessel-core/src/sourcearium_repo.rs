@@ -651,10 +651,7 @@ pub fn refresh_youtube_transcript_diarization_provenance(
         )));
     }
 
-    let changed = diarization
-        .get("model")
-        .and_then(toml::Value::as_str)
-        != Some(model);
+    let changed = diarization.get("model").and_then(toml::Value::as_str) != Some(model);
     if changed {
         diarization.insert("model".into(), toml::Value::String(model.to_owned()));
     }
