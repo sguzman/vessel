@@ -103,27 +103,33 @@ impl DiarizationConfig {
 
     pub fn reembedded_model_provenance(&self, existing: &str) -> Result<String> {
         let expected_segmentation = portable_model_id(&self.segmentation_model);
-        let expected_embedding = portable_model_id(&self.embedding_model);
-        if provenance_component(existing, "segmentation") != Some(expected_segmentation.as_str())
-            || provenance_component(existing, "embedding") != Some(expected_embedding.as_str())
-        {
+        if provenance_component(existing, "segmentation") != Some(expected_segmentation.as_str()) {
             return Err(diarization_error(format!(
-                "existing diarization provenance is incompatible with configured models: {existing}"
+                "existing diarization provenance is incompatible with configured segmentation model: {existing}"
             )));
         }
 
+        let replacement_embedding = portable_model_id(&self.embedding_model);
         let mut components = existing
             .split(';')
-            .filter(|component| !component.starts_with("embedding_aggregation="))
+            .filter(|component| {
+                !component.starts_with("embedding=")
+                    && !component.starts_with("embedding_aggregation=")
+            })
             .map(str::to_owned)
             .collect::<Vec<_>>();
+
         let insert_at = components
             .iter()
-            .position(|component| component.starts_with("embedding="))
+            .position(|component| component.starts_with("segmentation="))
             .map(|index| index + 1)
-            .unwrap_or(components.len());
+            .unwrap_or(0);
         components.insert(
             insert_at,
+            format!("embedding={replacement_embedding}"),
+        );
+        components.insert(
+            insert_at + 1,
             format!("embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"),
         );
         Ok(components.join(";"))
@@ -1438,12 +1444,12 @@ mod tests {
     }
 
     #[test]
-    fn reembedded_provenance_preserves_clustering_and_marks_aggregation() {
+    fn reembedded_provenance_can_replace_embedding_model_without_reclustering() {
         let config = DiarizationConfig {
             backend: SHERPA_ONNX_BACKEND_NAME.into(),
             runtime_library: PathBuf::from("/runtime/libsherpa-onnx-c-api.so"),
             segmentation_model: PathBuf::from("/models/segmentation/model.onnx"),
-            embedding_model: PathBuf::from("/models/embedding/model.onnx"),
+            embedding_model: PathBuf::from("/models/embedding/english.onnx"),
             provider: "cpu".into(),
             num_threads: 4,
             num_speakers: None,
@@ -1453,12 +1459,34 @@ mod tests {
             min_duration_off: 0.5,
             speaker_embeddings: true,
         };
-        let existing = "segmentation=segmentation/model.onnx;embedding=embedding/model.onnx;num_speakers=auto;clustering_threshold=0.900000";
+        let existing = "segmentation=segmentation/model.onnx;embedding=embedding/chinese.onnx;embedding_aggregation=legacy;num_speakers=auto;clustering_threshold=0.900000";
         let updated = config.reembedded_model_provenance(existing).unwrap();
         assert!(updated.contains("clustering_threshold=0.900000"));
+        assert!(updated.contains("embedding=embedding/english.onnx"));
+        assert!(!updated.contains("embedding=embedding/chinese.onnx"));
         assert!(updated.contains(&format!(
             "embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"
         )));
+    }
+
+    #[test]
+    fn reembedded_provenance_rejects_different_segmentation_model() {
+        let config = DiarizationConfig {
+            backend: SHERPA_ONNX_BACKEND_NAME.into(),
+            runtime_library: PathBuf::from("/runtime/libsherpa-onnx-c-api.so"),
+            segmentation_model: PathBuf::from("/models/segmentation/new.onnx"),
+            embedding_model: PathBuf::from("/models/embedding/english.onnx"),
+            provider: "cpu".into(),
+            num_threads: 4,
+            num_speakers: None,
+            clustering_threshold: 0.5,
+            window_shift_ratio: 0.1,
+            min_duration_on: 0.3,
+            min_duration_off: 0.5,
+            speaker_embeddings: true,
+        };
+        let existing = "segmentation=segmentation/model.onnx;embedding=embedding/chinese.onnx;num_speakers=auto;clustering_threshold=0.900000";
+        assert!(config.reembedded_model_provenance(existing).is_err());
     }
 
     #[test]
