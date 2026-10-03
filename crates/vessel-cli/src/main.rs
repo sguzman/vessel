@@ -113,6 +113,8 @@ struct UpdateArgs {
     max_videos: Option<usize>,
     #[arg(long = "video-id")]
     video_ids: Vec<String>,
+    #[arg(long = "force-local-asr")]
+    force_local_asr: bool,
     #[arg(long = "asr-backend")]
     asr_backend: Option<String>,
     #[arg(long = "asr-model")]
@@ -2927,6 +2929,18 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             source_reports.push(summary);
             continue;
         }
+        if args.force_local_asr && !policy.transcripts.allow_local_asr {
+            summary["status"] =
+                serde_json::Value::String("force_local_asr_disallowed".into());
+            summary["errors"]
+                .as_array_mut()
+                .expect("errors array")
+                .push(serde_json::json!({
+                    "message": "--force-local-asr was requested but this Sourcearium policy has allow_local_asr = false",
+                }));
+            source_reports.push(summary);
+            continue;
+        }
 
         let speaker_registry = if args.attribute_speakers {
             let registry_path = source.source_dir.join("speakers.toml");
@@ -3229,11 +3243,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                                 None
                             }
                         };
-                        if !transcript_upgrade_probe_due(
-                            last_probe.as_deref(),
-                            args.upgrade_check_days,
-                            OffsetDateTime::now_utc(),
-                        ) {
+                        if !args.force_local_asr
+                            && !transcript_upgrade_probe_due(
+                                last_probe.as_deref(),
+                                args.upgrade_check_days,
+                                OffsetDateTime::now_utc(),
+                            )
+                        {
                             if args.attribute_speakers
                                 && existing_artifact.artifact.representation.derivation == "local_asr"
                             {
@@ -3373,19 +3389,26 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 VideoSelection::Included | VideoSelection::ExplicitlyIncluded => {}
             }
 
-            let caption_acquisition =
-                match acquire_best_caption_candidate(&video, &policy.transcripts).await {
-                    Ok(acquisition) => acquisition,
-                    Err(error) => {
-                        push_update_error(&mut summary, &video.video_id, error);
-                        continue;
-                    }
-                };
-            let empty_response_derivations = caption_acquisition
-                .empty_response_derivations
-                .iter()
-                .map(|derivation| derivation.as_str())
-                .collect::<Vec<_>>();
+            let (caption_candidate, empty_response_derivations) = if args.force_local_asr {
+                (None, Vec::new())
+            } else {
+                let caption_acquisition =
+                    match acquire_best_caption_candidate(&video, &policy.transcripts).await {
+                        Ok(acquisition) => acquisition,
+                        Err(error) => {
+                            push_update_error(&mut summary, &video.video_id, error);
+                            continue;
+                        }
+                    };
+                (
+                    caption_acquisition.candidate,
+                    caption_acquisition
+                        .empty_response_derivations
+                        .iter()
+                        .map(|derivation| derivation.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            };
             if !empty_response_derivations.is_empty() {
                 increment_summary(&mut summary, "caption_access_degraded", 1);
                 increment_summary(
@@ -3397,11 +3420,13 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             let caption_probe = serde_json::json!({
                 "advertised_tracks": video.subtitles.len(),
                 "empty_response_derivations": empty_response_derivations,
+                "force_local_asr": args.force_local_asr,
+                "caption_fetch_skipped": args.force_local_asr,
             });
 
-            let (mut candidate, asr_cache_dir) = if let Some(candidate) = caption_acquisition.candidate {
+            let (mut candidate, asr_cache_dir) = if let Some(candidate) = caption_candidate {
                 (candidate, None)
-            } else if existing.is_some() {
+            } else if existing.is_some() && !args.force_local_asr {
                 if args.attribute_speakers && !args.preview {
                     let existing_artifact = existing
                         .as_ref()
@@ -3455,6 +3480,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                         "would_require_local_asr",
                         serde_json::json!({
                             "backend": &asr_config.backend,
+                            "force_local_asr": args.force_local_asr,
                             "model": &asr_config.model,
                             "model_dir": &asr_config.model_dir,
                             "executable": &asr_config.executable,
@@ -3823,6 +3849,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         },
         "asr": {
             "engine": asr_config.backend,
+            "force_local_asr": args.force_local_asr,
             "model": asr_config.model,
             "model_dir": asr_config.model_dir,
             "executable": asr_config.executable,
@@ -6362,6 +6389,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: Some("base".into()),
             asr_model_dir: Some(PathBuf::from("/models/whisper-base")),
@@ -6417,6 +6445,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6456,6 +6485,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6496,6 +6526,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6535,6 +6566,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6575,6 +6607,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6624,6 +6657,28 @@ mod tests {
     }
 
     #[test]
+    fn force_local_asr_flag_is_explicit() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "update",
+            "--sourcearium",
+            "/tmp/sourcearium",
+            "--video-id",
+            "video-1",
+            "--force-local-asr",
+            "--max-videos",
+            "1",
+        ])
+        .expect("parse forced local ASR");
+        let Commands::Update(args) = cli.command else {
+            panic!("expected update command");
+        };
+        assert!(args.force_local_asr);
+        assert_eq!(args.video_ids, vec!["video-1"]);
+        assert_eq!(args.max_videos, Some(1));
+    }
+
+    #[test]
     fn rust_diarization_config_is_independent_from_asr_backend() {
         let root = std::env::temp_dir().join(format!(
             "vessel-diarization-config-{}",
@@ -6648,6 +6703,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
             asr_model_dir: None,
@@ -6704,6 +6760,7 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
             asr_model_dir: None,

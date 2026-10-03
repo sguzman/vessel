@@ -189,6 +189,7 @@ Implemented additionally:
 - temporary ASR media retained on failure and deleted after successful materialization
 - durable 16 kHz diarization fixtures are reused as ASR input when present, avoiding duplicate media downloads and normalization
 - CLI overrides for ASR model, device, and language
+- explicit `--force-local-asr` update override for bounded diagnostics/acceptance; it skips caption acquisition but still requires Sourcearium policy to allow local ASR
 
 Implemented additionally:
 
