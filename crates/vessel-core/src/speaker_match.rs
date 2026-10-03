@@ -566,7 +566,19 @@ fn compatible_embedding_provenance(left: &str, right: &str) -> bool {
         model_component(right, "embedding"),
     ) {
         (Some(left_seg), Some(left_emb), Some(right_seg), Some(right_emb)) => {
-            left_seg == right_seg && left_emb == right_emb
+            if left_seg != right_seg || left_emb != right_emb {
+                return false;
+            }
+            match (
+                model_component(left, "embedding_aggregation"),
+                model_component(right, "embedding_aggregation"),
+            ) {
+                (Some(left_aggregation), Some(right_aggregation)) => {
+                    left_aggregation == right_aggregation
+                }
+                (None, None) => true,
+                _ => false,
+            }
         }
         _ => left == right,
     }
@@ -770,6 +782,10 @@ mod tests {
 
         assert!(compatible_embedding_provenance(old, tuned));
         assert!(!compatible_embedding_provenance(tuned, other_embedding));
+        let chunked =
+            "segmentation=seg/model.onnx;embedding=emb/model.onnx;embedding_aggregation=chunk_centroid_v1_3s_16max;clustering_threshold=0.900000";
+        assert!(!compatible_embedding_provenance(old, chunked));
+        assert!(compatible_embedding_provenance(chunked, chunked));
         assert!(compatible_embedding_provenance("legacy-model", "legacy-model"));
         assert!(!compatible_embedding_provenance("legacy-a", "legacy-b"));
     }
