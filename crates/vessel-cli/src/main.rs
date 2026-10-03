@@ -18,7 +18,8 @@ use vessel_core::{
     ChannelCategoryConfig, Config, ExistingSourceariumArtifact, MaterializeStatus, Result,
     RuntimeLayout, SourceariumYoutubeSource, SpeakerIdentityV1, SpeakerMatchConfig,
     SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
-    VideoSelection, apply_sourcearium_prune, apply_speaker_match_report,
+    VideoSelection, SPEAKER_MATCH_ALGORITHM, apply_sourcearium_prune,
+    apply_speaker_match_report,
     apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_evidence, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
@@ -3079,7 +3080,7 @@ fn existing_speaker_attribution_is_fresh(
         return false;
     };
 
-    attribution.get("method").and_then(toml::Value::as_str) == Some("embedding_cosine")
+    attribution.get("method").and_then(toml::Value::as_str) == Some(SPEAKER_MATCH_ALGORITHM)
         && attribution
             .get("registry_revision")
             .and_then(toml::Value::as_integer)
