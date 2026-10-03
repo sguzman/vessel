@@ -745,21 +745,16 @@ impl SherpaOnnxDiarizer {
                 "sherpa-onnx speaker embedding dimension is invalid",
             ));
         }
-        let samples = unsafe {
-            slice::from_raw_parts(wave_ref.samples, wave_ref.num_samples as usize)
-        };
+        let samples =
+            unsafe { slice::from_raw_parts(wave_ref.samples, wave_ref.num_samples as usize) };
         let labels = segments
             .iter()
             .map(|segment| segment.speaker.clone())
             .collect::<BTreeSet<_>>();
         let mut embeddings = BTreeMap::new();
         for label in labels {
-            let speaker_samples = concatenate_labeled_speaker_audio(
-                samples,
-                wave_ref.sample_rate,
-                segments,
-                &label,
-            );
+            let speaker_samples =
+                concatenate_labeled_speaker_audio(samples, wave_ref.sample_rate, segments, &label);
             if let Some(embedding) =
                 self.embedding_centroid(&speaker_samples, wave_ref.sample_rate, dimension)
             {
@@ -784,36 +779,25 @@ impl SherpaOnnxDiarizer {
         let mut embeddings = Vec::new();
         for window in windows {
             let chunk = &samples[window];
-            let stream = unsafe {
-                (self.api.create_embedding_stream)(self.embedding_extractor)
-            };
+            let stream = unsafe { (self.api.create_embedding_stream)(self.embedding_extractor) };
             if stream.is_null() {
                 continue;
             }
             unsafe {
-                (self.api.accept_waveform)(
-                    stream,
-                    sample_rate,
-                    chunk.as_ptr(),
-                    chunk.len() as i32,
-                );
+                (self.api.accept_waveform)(stream, sample_rate, chunk.as_ptr(), chunk.len() as i32);
                 (self.api.input_finished)(stream);
             }
 
-            let ready = unsafe {
-                (self.api.embedding_ready)(self.embedding_extractor, stream)
-            };
+            let ready = unsafe { (self.api.embedding_ready)(self.embedding_extractor, stream) };
             if ready != 0 {
-                let embedding = unsafe {
-                    (self.api.compute_embedding)(self.embedding_extractor, stream)
-                };
+                let embedding =
+                    unsafe { (self.api.compute_embedding)(self.embedding_extractor, stream) };
                 if !embedding.is_null() {
-                    let mut values = unsafe {
-                        slice::from_raw_parts(embedding, dimension as usize)
-                    }
-                    .iter()
-                    .map(|value| f64::from(*value))
-                    .collect::<Vec<_>>();
+                    let mut values =
+                        unsafe { slice::from_raw_parts(embedding, dimension as usize) }
+                            .iter()
+                            .map(|value| f64::from(*value))
+                            .collect::<Vec<_>>();
                     if normalize_embedding_in_place(&mut values) {
                         embeddings.push(values);
                     }
@@ -1248,8 +1232,7 @@ fn representative_embedding_windows(
     if sample_count == 0 || sample_rate <= 0 {
         return Vec::new();
     }
-    let chunk_len =
-        (SPEAKER_EMBEDDING_CHUNK_SECONDS * f64::from(sample_rate)).round() as usize;
+    let chunk_len = (SPEAKER_EMBEDDING_CHUNK_SECONDS * f64::from(sample_rate)).round() as usize;
     if chunk_len == 0 || sample_count <= chunk_len {
         return vec![0..sample_count];
     }
@@ -1483,9 +1466,11 @@ mod tests {
         assert_eq!(windows.len(), SPEAKER_EMBEDDING_MAX_CHUNKS);
         assert_eq!(windows[0].start, 0);
         assert_eq!(windows.last().unwrap().end, sample_count);
-        assert!(windows
-            .iter()
-            .all(|window| window.len() == sample_rate as usize * 3));
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.len() == sample_rate as usize * 3)
+        );
     }
 
     #[test]
