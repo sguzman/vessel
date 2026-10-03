@@ -269,6 +269,8 @@ A narrower source-aware fallback exists only for the one registry identity whose
 
 - the target's dominant diarization cluster must account for at least 50% of diarized speech
 - that dominant cluster must still point to the `creator` identity and have cosine similarity at least `0.60`
+- clusters at least `0.90` similar to that dominant cluster are treated as its same-target creator cohort for separation analysis
+- the dominant creator candidate must beat the strongest plausible creator candidate outside that cohort by at least `0.08`
 - normal runner-up identity margin protection still applies
 - only then can the dominant cluster become `matched_creator_prior`
 - another target cluster can become `matched_creator_cohort` only if it also points to `creator`, clears `0.60`, and has cosine similarity at least `0.90` to the dominant creator cluster
