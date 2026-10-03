@@ -169,6 +169,8 @@ vessel diarization fetch --embedding-profile en-voxceleb
 
 The English profile is stored alongside the default model with a separate integrity receipt and can be selected explicitly with `--embedding-model` for re-embedding or diarization experiments.
 
+`diarization reembed` may replace the speaker-embedding model while reusing existing diarization segments. It requires the segmentation model to remain compatible, preserves the original clustering configuration in provenance, and rewrites only the embedding-model and embedding-aggregation provenance.
+
 Long-running stages must emit progress or heartbeat information. A silent multi-minute model load or inference run is a bug. Diarization progress is intentionally coarse-grained (about every 10%) while the heartbeat remains time-based, so observability does not become per-chunk terminal spam.
 
 ## Implementation Order
