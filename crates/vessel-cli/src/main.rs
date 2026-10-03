@@ -5923,13 +5923,13 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        UpdateArgs, normalize_update_publication_date, parse_sourcearium_channel_input,
-        preview_materialization_action, push_update_error, push_update_item,
-        diarization_fixture_dir, install_staged_directory, planned_remaining_bytes,
-        resolve_asr_config, resolve_configured_channels, resolve_diarization_config,
-        sha256_file, transcript_upgrade_probe_due, validate_fixture_video_id,
-        validate_update_speaker_attribution,
-        verify_integrity_receipt, write_integrity_receipt,
+        UpdateArgs, diarization_fixture_dir, install_staged_directory,
+        maintain_existing_speaker_attribution, normalize_update_publication_date,
+        parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
+        push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
+        resolve_diarization_config, sha256_file, transcript_upgrade_probe_due,
+        validate_fixture_video_id, validate_update_speaker_attribution, verify_integrity_receipt,
+        write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{
@@ -6475,20 +6475,39 @@ mod tests {
     }
 
     #[test]
-    fn existing_speaker_maintenance_requires_local_asr_diarization() {
-        let mut artifact = vessel_core::SourceariumArtifactV1 {
+    fn existing_speaker_maintenance_reuses_persisted_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-existing-speaker-maintenance-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source_dir = root.join("sources").join("youtube").join("example");
+        let transcripts_dir = source_dir.join("transcripts");
+        let evidence_dir = root.join(".cache").join("vessel").join("speaker-evidence");
+        fs::create_dir_all(&transcripts_dir).expect("transcripts dir");
+        fs::create_dir_all(&evidence_dir).expect("evidence dir");
+
+        let mut diarization = toml::Table::new();
+        diarization.insert("engine".into(), toml::Value::String("sherpa-onnx".into()));
+        diarization.insert("model".into(), toml::Value::String("test-model".into()));
+        diarization.insert(
+            "label_scope".into(),
+            toml::Value::String("file_local".into()),
+        );
+
+        let artifact = vessel_core::SourceariumArtifactV1 {
             schema: 1,
-            artifact_id: "youtube:video:test:transcript".into(),
+            artifact_id: "youtube:video:test-video:transcript".into(),
             kind: "transcript".into(),
-            title: None,
+            title: Some("Test".into()),
             source: vessel_core::SourceIdentityV1 {
                 family: "youtube".into(),
                 kind: "video".into(),
-                id: "test".into(),
+                id: "test-video".into(),
                 url: None,
-                creator: None,
-                creator_id: None,
-                published: None,
+                creator: Some("Example".into()),
+                creator_id: Some("UCexample".into()),
+                published: Some("2026-01-01".into()),
             },
             representation: vessel_core::TextRepresentationV1 {
                 derivation: "local_asr".into(),
@@ -6503,25 +6522,122 @@ mod tests {
                 acquired_at: None,
                 method: Some("local_asr".into()),
             },
-            extensions: std::collections::BTreeMap::new(),
+            extensions: std::collections::BTreeMap::from([(
+                "diarization".into(),
+                diarization,
+            )]),
         };
+        let body = "[00:00:00] <speaker:SPEAKER_00> Hello.\n";
+        let path = transcripts_dir.join("test.md");
+        fs::write(&path, artifact.to_markdown(body).expect("render artifact"))
+            .expect("write artifact");
         let existing = ExistingSourceariumArtifact {
-            path: PathBuf::from("test.md"),
+            path: path.clone(),
             artifact: artifact.clone(),
-            body: String::new(),
+            body: body.into(),
         };
-        assert_eq!(existing.artifact.representation.derivation, "local_asr");
-        assert!(!existing.artifact.extensions.contains_key("diarization"));
 
-        artifact
-            .extensions
-            .insert("diarization".into(), toml::Table::new());
-        let existing = ExistingSourceariumArtifact {
-            path: PathBuf::from("test.md"),
-            artifact,
-            body: String::new(),
+        let evidence = vessel_core::SpeakerEvidenceV1 {
+            schema: 1,
+            video_id: "test-video".into(),
+            asr: vessel_core::SpeakerEvidenceProvenance {
+                engine: "whisper-candle".into(),
+                model: "small".into(),
+            },
+            diarization: vessel_core::SpeakerEvidenceDiarization {
+                engine: "sherpa-onnx".into(),
+                model: "test-model".into(),
+                label_scope: "file_local".into(),
+            },
+            segments: vec![vessel_core::SpeakerEvidenceSegment {
+                start: 0.0,
+                end: 5.0,
+                speaker: "SPEAKER_00".into(),
+            }],
+            speaker_embeddings: Some(std::collections::BTreeMap::from([(
+                "SPEAKER_00".into(),
+                vec![1.0, 0.0],
+            )])),
         };
-        assert!(existing.artifact.extensions.contains_key("diarization"));
+        fs::write(
+            evidence_dir.join("test-video.json"),
+            serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+
+        let registry = vessel_core::SpeakerRegistryV1 {
+            schema: 1,
+            source_family: "youtube".into(),
+            source_id: "UCexample".into(),
+            revision: 2,
+            speakers: vec![vessel_core::SpeakerIdentityV1 {
+                key: "creator".into(),
+                display_name: Some("Example".into()),
+                relation: Some("creator".into()),
+                anchors: vec![vessel_core::SpeakerAnchorV1 {
+                    video_id: "test-video".into(),
+                    start_seconds: 0,
+                    end_seconds: 5,
+                    basis: vessel_core::SpeakerAttribution::HumanConfirmed,
+                }],
+            }],
+        };
+        let source = vessel_core::SourceariumYoutubeSource {
+            source_dir: source_dir.clone(),
+            policy_path: source_dir.join("source.toml"),
+            policy: vessel_core::YoutubeSourcePolicyV1 {
+                schema: 1,
+                family: "youtube".into(),
+                source_key: "example".into(),
+                channel: vessel_core::YoutubeChannelPolicyV1 {
+                    input: "https://www.youtube.com/@example".into(),
+                    id: Some("UCexample".into()),
+                    handle: Some("@example".into()),
+                },
+                selection: vessel_core::YoutubeSelectionPolicyV1::default(),
+                transcripts: vessel_core::YoutubeTranscriptPolicyV1::default(),
+            },
+        };
+        let mut summary = serde_json::json!({
+            "speaker_attribution_attempted": 0,
+            "speaker_attribution_assignments": 0,
+            "speaker_attribution_updated": 0,
+            "speaker_attribution_unchanged": 0,
+            "speaker_attribution_skipped": 0,
+            "errors": [],
+        });
+
+        maintain_existing_speaker_attribution(
+            &mut summary,
+            false,
+            &root,
+            &source,
+            &registry,
+            &existing,
+            "test-video",
+            SpeakerMatchConfig::default(),
+        );
+
+        assert_eq!(summary["speaker_attribution_attempted"], 1);
+        assert_eq!(summary["speaker_attribution_assignments"], 1);
+        assert_eq!(summary["speaker_attribution_updated"], 1);
+        assert!(summary["errors"].as_array().unwrap().is_empty());
+
+        let raw = fs::read_to_string(path).expect("read attributed transcript");
+        let (updated, _) =
+            vessel_core::SourceariumArtifactV1::parse_markdown(&raw).expect("parse artifact");
+        let attribution = updated
+            .extensions
+            .get("speaker_attribution")
+            .expect("speaker attribution extension");
+        assert_eq!(
+            attribution
+                .get("registry_revision")
+                .and_then(toml::Value::as_integer),
+            Some(2)
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
