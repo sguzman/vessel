@@ -1577,6 +1577,38 @@ input = "https://www.youtube.com/@{key}"
         assert!(!second.updated);
         assert_eq!(fs::read_to_string(&materialized.path).unwrap(), annotated);
 
+        let mut creator_prior_report = report.clone();
+        creator_prior_report.matches[0].status = crate::SpeakerMatchStatus::MatchedCreatorPrior;
+        let creator_prior =
+            apply_speaker_match_report(&source, &video.video_id, &creator_prior_report)
+                .expect("apply creator prior");
+        assert!(creator_prior.updated);
+        let creator_prior_raw = fs::read_to_string(&materialized.path).unwrap();
+        let (creator_prior_artifact, _) =
+            SourceariumArtifactV1::parse_markdown(&creator_prior_raw).unwrap();
+        assert_eq!(
+            creator_prior_artifact.extensions["speaker_attribution"]["assignments"][0]
+                ["attribution"]
+                .as_str(),
+            Some("creator_prior")
+        );
+
+        let mut creator_cohort_report = report.clone();
+        creator_cohort_report.matches[0].status = crate::SpeakerMatchStatus::MatchedCreatorCohort;
+        let creator_cohort =
+            apply_speaker_match_report(&source, &video.video_id, &creator_cohort_report)
+                .expect("apply creator cohort");
+        assert!(creator_cohort.updated);
+        let creator_cohort_raw = fs::read_to_string(&materialized.path).unwrap();
+        let (creator_cohort_artifact, _) =
+            SourceariumArtifactV1::parse_markdown(&creator_cohort_raw).unwrap();
+        assert_eq!(
+            creator_cohort_artifact.extensions["speaker_attribution"]["assignments"][0]
+                ["attribution"]
+                .as_str(),
+            Some("creator_cohort")
+        );
+
         fs::remove_dir_all(root).expect("cleanup");
     }
 
