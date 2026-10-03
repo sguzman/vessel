@@ -7,10 +7,9 @@ use serde::Serialize;
 
 use crate::models::{ChannelMetadata, VideoMetadata};
 use crate::{
-    AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, SpeakerMatchReport,
-    SpeakerMatchStatus, TranscriptCandidate, TranscriptDerivation, VesselError, VideoSelection,
-    SPEAKER_MATCH_ALGORITHM,
-    YoutubeSourcePolicyV1,
+    AcquisitionV1, Result, SPEAKER_MATCH_ALGORITHM, SourceIdentityV1, SourceariumArtifactV1,
+    SpeakerMatchReport, SpeakerMatchStatus, TranscriptCandidate, TranscriptDerivation, VesselError,
+    VideoSelection, YoutubeSourcePolicyV1,
 };
 
 #[derive(Debug, Clone, Serialize)]
