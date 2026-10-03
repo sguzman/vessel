@@ -133,7 +133,7 @@ Every backend must support an explicit local/offline model path where technicall
 
 Automatic first-use download/cache remains allowed, but must never be the only supported model-acquisition path.
 
-Long-running stages must emit progress or heartbeat information. A silent multi-minute model load or inference run is a bug.
+Long-running stages must emit progress or heartbeat information. A silent multi-minute model load or inference run is a bug. Diarization progress is intentionally coarse-grained (about every 10%) while the heartbeat remains time-based, so observability does not become per-chunk terminal spam.
 
 ## Implementation Order
 

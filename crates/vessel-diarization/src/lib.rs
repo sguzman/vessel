@@ -569,13 +569,14 @@ impl SherpaOnnxDiarizer {
             path.display(),
             wave_ref.num_samples,
         );
+        let mut progress = DiarizationProgressState::default();
         let raw = unsafe {
             (self.api.process_diarization)(
                 self.diarizer,
                 wave_ref.samples,
                 wave_ref.num_samples,
                 diarization_progress,
-                ptr::null_mut(),
+                (&mut progress as *mut DiarizationProgressState).cast::<c_void>(),
             )
         };
         if raw.is_null() {
@@ -723,12 +724,48 @@ impl Drop for SherpaOnnxDiarizer {
     }
 }
 
+const DIARIZATION_PROGRESS_STEP_PERCENT: i32 = 10;
+
+#[derive(Debug)]
+struct DiarizationProgressState {
+    next_percent: i32,
+}
+
+impl Default for DiarizationProgressState {
+    fn default() -> Self {
+        Self {
+            next_percent: DIARIZATION_PROGRESS_STEP_PERCENT,
+        }
+    }
+}
+
+impl DiarizationProgressState {
+    fn observe(&mut self, processed_chunks: i32, total_chunks: i32) -> bool {
+        if total_chunks <= 0 || processed_chunks <= 0 {
+            return false;
+        }
+        let percent = ((processed_chunks as i64 * 100) / total_chunks as i64)
+            .clamp(0, 100) as i32;
+        let should_report = processed_chunks >= total_chunks || percent >= self.next_percent;
+        if should_report {
+            while self.next_percent <= percent {
+                self.next_percent += DIARIZATION_PROGRESS_STEP_PERCENT;
+            }
+        }
+        should_report
+    }
+}
+
 unsafe extern "C" fn diarization_progress(
     processed_chunks: i32,
     total_chunks: i32,
-    _arg: *mut c_void,
+    arg: *mut c_void,
 ) -> i32 {
-    if total_chunks > 0 {
+    if arg.is_null() {
+        return 0;
+    }
+    let state = unsafe { &mut *arg.cast::<DiarizationProgressState>() };
+    if state.observe(processed_chunks, total_chunks) {
         let percent = 100.0 * processed_chunks as f64 / total_chunks as f64;
         eprintln!(
             "[diarization] progress {:.1}% ({}/{})",
@@ -1161,6 +1198,29 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn diarization_progress_reports_only_coarse_milestones() {
+        let mut state = DiarizationProgressState::default();
+        let mut reported = Vec::new();
+        for processed in 1..=1_546 {
+            if state.observe(processed, 1_546) {
+                reported.push(processed);
+            }
+        }
+        assert_eq!(reported.len(), 10);
+        assert!(reported[0] >= 154 && reported[0] <= 155);
+        assert_eq!(reported.last().copied(), Some(1_546));
+    }
+
+    #[test]
+    fn diarization_progress_handles_small_chunk_counts_without_spam() {
+        let mut state = DiarizationProgressState::default();
+        let reported = (1..=3)
+            .filter(|processed| state.observe(*processed, 3))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, vec![1, 2, 3]);
     }
 
     #[test]
