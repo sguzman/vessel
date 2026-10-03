@@ -355,7 +355,10 @@ pub fn match_speakers_from_evidence(
             };
 
             if evidence.diarization.engine != target.diarization.engine
-                || evidence.diarization.model != target.diarization.model
+                || !compatible_embedding_provenance(
+                    &evidence.diarization.model,
+                    &target.diarization.model,
+                )
             {
                 anchor_diagnostics.push(anchor_diagnostic(
                     &speaker.key,
@@ -548,6 +551,27 @@ pub fn match_speakers_from_evidence(
     })
 }
 
+fn model_component<'a>(model: &'a str, key: &str) -> Option<&'a str> {
+    model.split(';').find_map(|component| {
+        let (component_key, value) = component.split_once('=')?;
+        (component_key == key).then_some(value)
+    })
+}
+
+fn compatible_embedding_provenance(left: &str, right: &str) -> bool {
+    match (
+        model_component(left, "segmentation"),
+        model_component(left, "embedding"),
+        model_component(right, "segmentation"),
+        model_component(right, "embedding"),
+    ) {
+        (Some(left_seg), Some(left_emb), Some(right_seg), Some(right_emb)) => {
+            left_seg == right_seg && left_emb == right_emb
+        }
+        _ => left == right,
+    }
+}
+
 fn evidence_path(evidence_dir: &Path, video_id: &str) -> PathBuf {
     evidence_dir.join(format!("{video_id}.json"))
 }
@@ -734,6 +758,20 @@ mod tests {
             serde_json::to_vec_pretty(&evidence).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn embedding_provenance_ignores_clustering_configuration() {
+        let old = "segmentation=seg/model.onnx;embedding=emb/model.onnx";
+        let tuned =
+            "segmentation=seg/model.onnx;embedding=emb/model.onnx;num_speakers=auto;clustering_threshold=0.900000;window_shift_ratio=0.100000;min_duration_on=0.300000;min_duration_off=0.500000";
+        let other_embedding =
+            "segmentation=seg/model.onnx;embedding=other/model.onnx;num_speakers=auto;clustering_threshold=0.900000";
+
+        assert!(compatible_embedding_provenance(old, tuned));
+        assert!(!compatible_embedding_provenance(tuned, other_embedding));
+        assert!(compatible_embedding_provenance("legacy-model", "legacy-model"));
+        assert!(!compatible_embedding_provenance("legacy-a", "legacy-b"));
     }
 
     #[test]

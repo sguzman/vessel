@@ -74,6 +74,8 @@ The registry records:
 
 The registry should preserve human-auditable anchors rather than pretending an opaque embedding alone is truth.
 
+Diarization provenance preserves not only the segmentation and embedding model identities but also the anonymous-clustering configuration: exact/automatic speaker count, clustering threshold, window shift, and minimum on/off durations. Those settings define the file-local `SPEAKER_XX` partition. Cross-video identity matching is intentionally narrower: embeddings remain comparable when the segmentation and embedding models match even if clustering parameters differ.
+
 Speaker embeddings/centroids may be cached operationally for fast matching. They must record the exact embedding model and registry revision. If durable embeddings are ever added, that is an explicit format decision rather than an accidental SQLite detail.
 
 ## Attribution Confidence

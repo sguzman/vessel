@@ -81,10 +81,19 @@ impl DiarizationConfig {
     }
 
     pub fn model_provenance(&self) -> String {
+        let num_speakers = self
+            .num_speakers
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "auto".into());
         format!(
-            "segmentation={};embedding={}",
+            "segmentation={};embedding={};num_speakers={};clustering_threshold={:.6};window_shift_ratio={:.6};min_duration_on={:.6};min_duration_off={:.6}",
             portable_model_id(&self.segmentation_model),
-            portable_model_id(&self.embedding_model)
+            portable_model_id(&self.embedding_model),
+            num_speakers,
+            self.clustering_threshold,
+            self.window_shift_ratio,
+            self.min_duration_on,
+            self.min_duration_off,
         )
     }
 }
@@ -1197,6 +1206,33 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn model_provenance_includes_clustering_configuration() {
+        let config = DiarizationConfig {
+            backend: SHERPA_ONNX_BACKEND_NAME.into(),
+            runtime_library: PathBuf::from("/runtime/libsherpa-onnx-c-api.so"),
+            segmentation_model: PathBuf::from("/models/segmentation/model.onnx"),
+            embedding_model: PathBuf::from("/models/embedding/model.onnx"),
+            provider: "cpu".into(),
+            num_threads: 4,
+            num_speakers: None,
+            clustering_threshold: 0.9,
+            window_shift_ratio: 0.1,
+            min_duration_on: 0.3,
+            min_duration_off: 0.5,
+            speaker_embeddings: true,
+        };
+
+        let provenance = config.model_provenance();
+        assert!(provenance.contains("segmentation=segmentation/model.onnx"));
+        assert!(provenance.contains("embedding=embedding/model.onnx"));
+        assert!(provenance.contains("num_speakers=auto"));
+        assert!(provenance.contains("clustering_threshold=0.900000"));
+        assert!(provenance.contains("window_shift_ratio=0.100000"));
+        assert!(provenance.contains("min_duration_on=0.300000"));
+        assert!(provenance.contains("min_duration_off=0.500000"));
     }
 
     #[test]
