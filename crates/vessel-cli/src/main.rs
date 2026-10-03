@@ -2901,6 +2901,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "unresolved_date": 0,
             "requires_local_asr": 0,
             "local_asr_attempted": 0,
+            "local_asr_fixture_reused": 0,
             "local_asr_materialized": 0,
             "diarization_attempted": 0,
             "diarization_completed": 0,
@@ -3476,8 +3477,21 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 )
                 .await
                 {
-                    Ok((candidate, cache_dir, backend)) => {
+                    Ok((candidate, cache_dir, backend, fixture_reused)) => {
                         asr_backend = Some(backend);
+                        if fixture_reused {
+                            increment_summary(&mut summary, "local_asr_fixture_reused", 1);
+                            push_update_item(
+                                &mut summary,
+                                report_items,
+                                &video.video_id,
+                                "local_asr_fixture_reused",
+                                serde_json::json!({
+                                    "fixture": diarization_fixture_wav(&video.video_id)?,
+                                    "network_media_download": false,
+                                }),
+                            );
+                        }
                         (candidate, Some(cache_dir))
                     }
                     Err(error) => {
@@ -4056,12 +4070,28 @@ async fn acquire_local_diarization(
     worker_result?
 }
 
+fn reuse_normalized_audio_fixture(source: &Path, destination: &Path) -> Result<()> {
+    if std::fs::metadata(source)?.len() <= 44 {
+        return Err(VesselError::Extractor(format!(
+            "durable diarization fixture is too small to be valid audio: {}",
+            source.display()
+        )));
+    }
+    match std::fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(source, destination)?;
+            Ok(())
+        }
+    }
+}
+
 async fn acquire_local_asr_candidate(
     sourcearium_root: &Path,
     video: &VideoMetadata,
     backend: Option<LoadedAsrBackend>,
     config: &AsrConfig,
-) -> Result<(TranscriptCandidate, PathBuf, LoadedAsrBackend)> {
+) -> Result<(TranscriptCandidate, PathBuf, LoadedAsrBackend, bool)> {
     if cfg!(debug_assertions) {
         warn!(
             target: "asr",
@@ -4075,29 +4105,47 @@ async fn acquire_local_asr_candidate(
         .join(&video.video_id);
     tokio::fs::create_dir_all(&cache_dir).await?;
 
-    let output_template = cache_dir
-        .join("source.%(ext)s")
-        .to_string_lossy()
-        .into_owned();
-    let planner = BasicDownloadPlanner;
-    let plan = planner.plan(video, FormatSelector::BestAudio, &output_template)?;
-    let source_audio = plan
-        .downloads
-        .first()
-        .map(|download| download.output_path.clone())
-        .ok_or_else(|| {
-            VesselError::Extractor(format!(
-                "ASR audio planner produced no download for {}",
-                video.video_id
-            ))
-        })?;
-
-    if !source_audio.is_file() {
-        execute_download(&plan).await?;
-    }
-
     let whisper_wav = cache_dir.join("whisper-input.wav");
-    if !whisper_wav.is_file() {
+    let durable_fixture = diarization_fixture_wav(&video.video_id)?;
+    let mut fixture_reused = false;
+
+    if whisper_wav.is_file() {
+        info!(
+            target: "asr",
+            input = %whisper_wav.display(),
+            "reusing cached normalized ASR audio"
+        );
+    } else if durable_fixture.is_file() {
+        reuse_normalized_audio_fixture(&durable_fixture, &whisper_wav)?;
+        info!(
+            target: "asr",
+            fixture = %durable_fixture.display(),
+            input = %whisper_wav.display(),
+            "reusing durable diarization fixture for ASR; no media download required"
+        );
+        fixture_reused = true;
+    } else {
+        let output_template = cache_dir
+            .join("source.%(ext)s")
+            .to_string_lossy()
+            .into_owned();
+        let planner = BasicDownloadPlanner;
+        let plan = planner.plan(video, FormatSelector::BestAudio, &output_template)?;
+        let source_audio = plan
+            .downloads
+            .first()
+            .map(|download| download.output_path.clone())
+            .ok_or_else(|| {
+                VesselError::Extractor(format!(
+                    "ASR audio planner produced no download for {}",
+                    video.video_id
+                ))
+            })?;
+
+        if !source_audio.is_file() {
+            execute_download(&plan).await?;
+        }
+
         info!(
             target: "asr",
             input = %source_audio.display(),
@@ -4109,12 +4157,6 @@ async fn acquire_local_asr_candidate(
             target: "asr",
             output = %whisper_wav.display(),
             "ASR audio normalization completed"
-        );
-    } else {
-        info!(
-            target: "asr",
-            input = %whisper_wav.display(),
-            "reusing cached normalized ASR audio"
         );
     }
 
@@ -4160,7 +4202,7 @@ async fn acquire_local_asr_candidate(
     let _ = heartbeat.join();
 
     let (candidate, backend) = worker_result??;
-    Ok((candidate, cache_dir, backend))
+    Ok((candidate, cache_dir, backend, fixture_reused))
 }
 
 async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
@@ -6152,7 +6194,7 @@ mod tests {
     use super::{
         Cli, Commands, SpeakersSubcommand, UpdateArgs, diarization_fixture_dir,
         existing_speaker_attribution_is_fresh, install_staged_directory,
-        maintain_existing_speaker_attribution,
+        maintain_existing_speaker_attribution, reuse_normalized_audio_fixture,
         normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
@@ -6701,6 +6743,29 @@ mod tests {
         assert_eq!(config.min_similarity, 0.91);
         assert_eq!(config.min_margin, 0.12);
         assert_eq!(config.min_anchor_dominance, 0.88);
+    }
+
+    #[test]
+    fn durable_fixture_reuse_preserves_source_and_creates_asr_input() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-asr-fixture-reuse-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp dir");
+        let fixture = root.join("fixture.wav");
+        let input = root.join("whisper-input.wav");
+        let bytes = vec![7_u8; 128];
+        fs::write(&fixture, &bytes).expect("write fixture");
+
+        reuse_normalized_audio_fixture(&fixture, &input).expect("reuse fixture");
+
+        assert_eq!(fs::read(&fixture).unwrap(), bytes);
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+        fs::remove_file(&input).expect("remove disposable input");
+        assert!(fixture.is_file());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -187,6 +187,7 @@ Implemented additionally:
 - existing `bestaudio` download planning reused for temporary media
 - ASR input normalized to 16 kHz mono PCM WAV
 - temporary ASR media retained on failure and deleted after successful materialization
+- durable 16 kHz diarization fixtures are reused as ASR input when present, avoiding duplicate media downloads and normalization
 - CLI overrides for ASR model, device, and language
 
 Implemented additionally:

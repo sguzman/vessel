@@ -348,6 +348,8 @@ vessel diarization seed --video-id <youtube-video-id>
 
 Seeding is the only networked part of this acceptance path. It downloads the selected audio, normalizes it to mono 16 kHz PCM WAV, writes a provenance sidecar, and installs the fixture under Vessel's user data directory. Successful Sourcearium ASR materialization deletes its disposable per-video ASR cache, so acceptance tests must not point at those temporary cache paths.
 
+The same durable fixture is also reusable by local ASR. If a fixture for the video already exists, Vessel links it into the disposable ASR workspace (copy fallback) and skips the media download and normalization step. Cleanup removes only the disposable workspace entry; the durable fixture remains available for future ASR or diarization work.
+
 A seeded fixture can then be exercised without YouTube, ASR, Sourcearium mutation, or network access:
 
 ```text
