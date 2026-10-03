@@ -7114,6 +7114,31 @@ mod tests {
     }
 
     #[test]
+    fn diarization_reembed_parses_as_offline_embedding_refresh() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "diarization",
+            "reembed",
+            "--sourcearium",
+            "/tmp/sourcearium",
+            "--source-key",
+            "example",
+            "--video-id",
+            "video-1",
+        ])
+        .expect("parse diarization reembed");
+        let Commands::Diarization(command) = cli.command else {
+            panic!("expected diarization command");
+        };
+        let DiarizationSubcommand::Reembed(args) = command.command else {
+            panic!("expected diarization reembed");
+        };
+        assert_eq!(args.source_key, "example");
+        assert_eq!(args.video_id, "video-1");
+        assert_eq!(args.num_threads, 4);
+    }
+
+    #[test]
     fn speakers_diagnose_parses_as_read_only_analysis() {
         let cli = Cli::try_parse_from([
             "vessel",
