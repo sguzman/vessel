@@ -425,24 +425,27 @@ Then any supported ASR backend can feed the primary Rust diarization path:
 ```text
 vessel update \
   --sourcearium <root> \
-  --asr-backend whisper-candle \
+  --asr-backend <backend> \
   --diarize \
-  --speaker-embeddings \
   --attribute-speakers
 ```
 
-`--attribute-speakers` is deliberately opt-in. It requires:
+`--attribute-speakers` is deliberately opt-in, but it no longer implies that a fresh diarization pass is required.
 
-- `--diarize`
-- `--speaker-embeddings`
+For a fresh diarization run, `--diarize --attribute-speakers` automatically enables speaker embeddings; `--speaker-embeddings` does not need to be repeated.
+
+For maintenance of existing diarized `local_asr` artifacts, `--attribute-speakers` can stand alone. Vessel reuses persisted speaker evidence and does not resolve or load a diarization runtime/model unless `--diarize` is also requested.
+
+Speaker attribution requires:
+
 - a valid `speakers.toml` for the source
-- compatible cached speaker evidence for the human-confirmed anchor videos
+- compatible persisted speaker evidence for the target and human-confirmed anchor videos
 
 The default diarization backend is `sherpa-onnx`. WhisperX only becomes a requirement if `--diarization-backend whisperx` is explicitly selected.
 
 The update path reuses the same matching and metadata-application functions as `vessel speakers match` and `vessel speakers apply`; it does not have a second hidden attribution algorithm.
 
-Existing diarized `local_asr` artifacts also get cheap attribution maintenance from persisted evidence. Persisted attribution includes a BLAKE3 fingerprint covering the target evidence plus every evidence file referenced by current registry anchors, including missing-file state. If registry revision, evidence fingerprint, calibration thresholds, and diarization provenance all still match, maintenance reports the attribution as fresh and skips cosine matching entirely. Any relevant evidence, registry, calibration, or diarization change forces recomputation.
+Existing diarized `local_asr` artifacts also get cheap attribution maintenance from persisted evidence. This path performs no ASR and no diarization, and standalone `--attribute-speakers` does not require Sherpa to be installed or configured. Persisted attribution includes a BLAKE3 fingerprint covering the target evidence plus every evidence file referenced by current registry anchors, including missing-file state. If registry revision, evidence fingerprint, calibration thresholds, and diarization provenance all still match, maintenance reports the attribution as fresh and skips cosine matching entirely. Any relevant evidence, registry, calibration, or diarization change forces recomputation.
 
 After a diarized ASR artifact materializes, the integrated update:
 
