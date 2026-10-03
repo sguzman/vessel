@@ -256,10 +256,24 @@ All three can be changed explicitly:
 A result can be:
 
 - `matched`
+- `matched_creator_prior`
+- `matched_creator_cohort`
 - `below_similarity`
 - `ambiguous_margin`
 - `missing_embedding`
 - `no_compatible_anchors`
+
+The ordinary `matched` path still requires the configured minimum similarity (default `0.80`).
+
+A narrower source-aware fallback exists only for the one registry identity whose relation is `creator`. It does **not** lower the global matching threshold:
+
+- the target's dominant diarization cluster must account for at least 50% of diarized speech
+- that dominant cluster must still point to the `creator` identity and have cosine similarity at least `0.60`
+- normal runner-up identity margin protection still applies
+- only then can the dominant cluster become `matched_creator_prior`
+- another target cluster can become `matched_creator_cohort` only if it also points to `creator`, clears `0.60`, and has cosine similarity at least `0.90` to the dominant creator cluster
+
+This fallback is deliberately asymmetric. A guest or arbitrary identity never receives the creator prior, and a source with zero or multiple `relation = "creator"` identities gets no fallback at all.
 
 The report also preserves per-anchor diagnostics such as missing evidence, incompatible provenance, low dominance, missing embeddings, or incompatible dimensions.
 
@@ -303,13 +317,13 @@ Each persisted assignment records:
 
 - diarization label
 - stable identity key
-- `attribution = "model_matched"`
+- attribution basis: `model_matched`, `creator_prior`, or `creator_cohort`
 - cosine similarity
 - runner-up identity/similarity when present
 - similarity margin when present
 - number of compatible human anchor samples
 
-The extension also records the registry revision, diarization engine/model, and all matching thresholds.
+The extension also records the registry revision, diarization engine/model, and all matching thresholds. The artifact-level method is versioned as `embedding_cosine_v2_creator_prior`, so attribution produced by older matching logic is automatically stale rather than silently reused.
 
 A future projection/rendering layer may display stable identity names in a human-facing transcript without mutating the canonical raw diarization body.
 
