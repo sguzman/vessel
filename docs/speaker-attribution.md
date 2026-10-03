@@ -202,9 +202,12 @@ Current commands:
 
 ```text
 vessel speakers init --sourcearium <root> --source-key <key>
+vessel speakers add --sourcearium <root> --source-key <key> --speaker-key guest:<stable-key> --display-name "<name>" --relation guest
 vessel speakers show --sourcearium <root> --source-key <key>
-vessel speakers anchor --sourcearium <root> --source-key <key> --speaker creator --video-id <id> --start-seconds <n> --end-seconds <n>
+vessel speakers anchor --sourcearium <root> --source-key <key> --speaker <speaker-key> --video-id <id> --start-seconds <n> --end-seconds <n>
 ```
+
+`speakers init` creates the registry and its initial identity. `speakers add` adds later durable identities to an existing registry and advances the registry revision; it does not require hand-editing `speakers.toml`.
 
 The next matching layer will compare file-local embeddings against embeddings supported by these human-confirmed anchor ranges. Similarity is evidence; it will not be silently promoted to identity without an explicit calibrated attribution rule.
 
