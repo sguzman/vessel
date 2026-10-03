@@ -1070,7 +1070,7 @@ mod tests {
             &[(0.0, 100.0, "SPEAKER_01")],
             &[("SPEAKER_01", &[0.67, 0.742])],
         );
-        let mut registry = SpeakerRegistryV1 {
+        let registry = SpeakerRegistryV1 {
             schema: 1,
             source_family: "youtube".into(),
             source_id: "UCexample".into(),
