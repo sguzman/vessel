@@ -8,6 +8,8 @@ use crate::{Result, SpeakerRegistryV1, VesselError};
 
 pub const SPEAKER_EVIDENCE_SCHEMA_V1: u8 = 1;
 pub const SPEAKER_MATCH_ALGORITHM: &str = "embedding_cosine_v2_creator_prior";
+pub const SPEAKER_ANCHOR_CACHE_SCHEMA_V1: u8 = 1;
+pub const SPEAKER_ANCHOR_AGGREGATION_V1: &str = "exact_window_chunk_centroid_v1_3s_16max";
 const CREATOR_PRIOR_MIN_SIMILARITY: f64 = 0.60;
 const CREATOR_PRIOR_MIN_SPEECH_FRACTION: f64 = 0.50;
 const CREATOR_PRIOR_MIN_TARGET_SEPARATION: f64 = 0.08;
@@ -49,6 +51,21 @@ pub struct SpeakerEvidenceSegment {
     pub speaker: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeakerAnchorEvidenceV1 {
+    pub schema: u8,
+    pub speaker_key: String,
+    pub video_id: String,
+    pub start_seconds: u64,
+    pub end_seconds: u64,
+    pub diarization_engine: String,
+    pub diarization_model: String,
+    pub embedding_model: String,
+    pub aggregation: String,
+    pub embedding: Vec<f64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SpeakerMatchConfig {
     pub min_similarity: f64,
@@ -75,9 +92,7 @@ impl SpeakerMatchConfig {
             return Err(match_error("min_margin must be between 0 and 2"));
         }
         if !(0.0..=1.0).contains(&self.min_anchor_dominance) {
-            return Err(match_error(
-                "min_anchor_dominance must be between 0 and 1",
-            ));
+            return Err(match_error("min_anchor_dominance must be between 0 and 1"));
         }
         Ok(self)
     }
@@ -208,7 +223,11 @@ impl SpeakerEvidenceV1 {
                         "speaker embedding {label:?} contains non-finite values"
                     )));
                 }
-                let norm = embedding.iter().map(|value| value * value).sum::<f64>().sqrt();
+                let norm = embedding
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt();
                 if norm <= f64::EPSILON {
                     return Err(match_error(format!(
                         "speaker embedding {label:?} has zero norm"
@@ -263,6 +282,71 @@ pub fn load_speaker_evidence(path: &Path) -> Result<SpeakerEvidenceV1> {
     })?;
     evidence.validate()?;
     Ok(evidence)
+}
+
+pub fn speaker_anchor_cache_path(
+    cache_dir: &Path,
+    speaker_key: &str,
+    video_id: &str,
+    start_seconds: u64,
+    end_seconds: u64,
+    embedding_model: &str,
+) -> PathBuf {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vessel-speaker-anchor-cache-v1\0");
+    for value in [
+        speaker_key,
+        video_id,
+        &start_seconds.to_string(),
+        &end_seconds.to_string(),
+        embedding_model,
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update(&[0]);
+    }
+    cache_dir.join(format!("{}.json", hasher.finalize().to_hex()))
+}
+
+pub fn load_speaker_anchor_evidence(path: &Path) -> Result<SpeakerAnchorEvidenceV1> {
+    let raw = fs::read_to_string(path)?;
+    let evidence: SpeakerAnchorEvidenceV1 = serde_json::from_str(&raw).map_err(|error| {
+        match_error(format!(
+            "{}: invalid speaker anchor cache JSON: {error}",
+            path.display()
+        ))
+    })?;
+    if evidence.schema != SPEAKER_ANCHOR_CACHE_SCHEMA_V1
+        || evidence.embedding.is_empty()
+        || evidence.embedding.iter().any(|value| !value.is_finite())
+        || evidence.start_seconds >= evidence.end_seconds
+        || evidence.aggregation != SPEAKER_ANCHOR_AGGREGATION_V1
+    {
+        return Err(match_error(format!(
+            "{}: invalid speaker anchor cache contents",
+            path.display()
+        )));
+    }
+    Ok(evidence)
+}
+
+pub fn write_speaker_anchor_evidence(
+    path: &Path,
+    evidence: &SpeakerAnchorEvidenceV1,
+) -> Result<()> {
+    if evidence.schema != SPEAKER_ANCHOR_CACHE_SCHEMA_V1 || evidence.embedding.is_empty() {
+        return Err(match_error("invalid speaker anchor cache"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| match_error("speaker anchor cache has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temp = path.with_extension("json.tmp");
+    fs::write(
+        &temp,
+        serde_json::to_vec_pretty(evidence).map_err(|e| match_error(e.to_string()))?,
+    )?;
+    fs::rename(temp, path)?;
+    Ok(())
 }
 
 pub fn speaker_evidence_fingerprint(
@@ -392,7 +476,9 @@ pub fn match_speakers_from_evidence(
                 continue;
             }
 
-            let Some((label, dominance)) = dominant_anchor_label(&evidence, anchor.start_seconds, anchor.end_seconds) else {
+            let Some((label, dominance)) =
+                dominant_anchor_label(&evidence, anchor.start_seconds, anchor.end_seconds)
+            else {
                 anchor_diagnostics.push(anchor_diagnostic(
                     &speaker.key,
                     anchor,
@@ -419,7 +505,29 @@ pub fn match_speakers_from_evidence(
                 continue;
             }
 
-            let Some(embedding) = evidence.embedding(&label) else {
+            let embedding = speaker_anchor_cache_path(
+                &evidence_dir.join("anchors"),
+                &speaker.key,
+                &anchor.video_id,
+                anchor.start_seconds,
+                anchor.end_seconds,
+                model_component(&evidence.diarization.model, "embedding").unwrap_or_default(),
+            );
+            let cached = load_speaker_anchor_evidence(&embedding)
+                .ok()
+                .filter(|cached| {
+                    cached.speaker_key == speaker.key
+                        && cached.video_id == anchor.video_id
+                        && cached.start_seconds == anchor.start_seconds
+                        && cached.end_seconds == anchor.end_seconds
+                        && cached.diarization_engine == evidence.diarization.engine
+                        && cached.diarization_model == evidence.diarization.model
+                });
+            let embedding = cached
+                .as_ref()
+                .map(|value| value.embedding.as_slice())
+                .or_else(|| evidence.embedding(&label));
+            let Some(embedding) = embedding else {
                 anchor_diagnostics.push(anchor_diagnostic(
                     &speaker.key,
                     anchor,
@@ -511,11 +619,7 @@ pub fn match_speakers_from_evidence(
         let mut scored = centroids
             .iter()
             .map(|(identity, centroid, sample_count)| {
-                (
-                    identity.clone(),
-                    dot(&normalized, centroid),
-                    *sample_count,
-                )
+                (identity.clone(), dot(&normalized, centroid), *sample_count)
             })
             .collect::<Vec<_>>();
         scored.sort_by(|left, right| {
@@ -607,10 +711,12 @@ pub fn match_speakers_from_evidence(
                 });
 
                 if separation_ok {
-                    if let Some(item) =
-                        matches.iter_mut().find(|item| item.diarization_label == *label)
+                    if let Some(item) = matches
+                        .iter_mut()
+                        .find(|item| item.diarization_label == *label)
                     {
-                        let margin_ok = item.margin.is_none_or(|margin| margin >= config.min_margin);
+                        let margin_ok =
+                            item.margin.is_none_or(|margin| margin >= config.min_margin);
                         let creator_similarity_ok = item
                             .similarity
                             .is_some_and(|similarity| similarity >= CREATOR_PRIOR_MIN_SIMILARITY);
@@ -644,7 +750,8 @@ pub fn match_speakers_from_evidence(
                     {
                         continue;
                     }
-                    let Some(candidate_embedding) = target.embedding(&item.diarization_label) else {
+                    let Some(candidate_embedding) = target.embedding(&item.diarization_label)
+                    else {
                         continue;
                     };
                     let candidate = normalize_embedding(candidate_embedding)?;
@@ -767,7 +874,11 @@ fn dominant_anchor_label(
 }
 
 fn normalize_embedding(embedding: &[f64]) -> Result<Vec<f64>> {
-    let norm = embedding.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
     if !norm.is_finite() || norm <= f64::EPSILON {
         return Err(match_error("speaker embedding has invalid or zero norm"));
     }
@@ -818,9 +929,7 @@ fn match_error(message: impl Into<String>) -> VesselError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        SpeakerAnchorV1, SpeakerAttribution, SpeakerIdentityV1, SpeakerRegistryV1,
-    };
+    use crate::{SpeakerAnchorV1, SpeakerAttribution, SpeakerIdentityV1, SpeakerRegistryV1};
 
     fn registry() -> SpeakerRegistryV1 {
         SpeakerRegistryV1 {
@@ -885,9 +994,7 @@ mod tests {
             speaker_embeddings: Some(
                 embeddings
                     .iter()
-                    .map(|(label, embedding)| {
-                        ((*label).to_owned(), embedding.to_vec())
-                    })
+                    .map(|(label, embedding)| ((*label).to_owned(), embedding.to_vec()))
                     .collect(),
             ),
         };
@@ -901,27 +1008,25 @@ mod tests {
     #[test]
     fn embedding_provenance_ignores_clustering_configuration() {
         let old = "segmentation=seg/model.onnx;embedding=emb/model.onnx";
-        let tuned =
-            "segmentation=seg/model.onnx;embedding=emb/model.onnx;num_speakers=auto;clustering_threshold=0.900000;window_shift_ratio=0.100000;min_duration_on=0.300000;min_duration_off=0.500000";
-        let other_embedding =
-            "segmentation=seg/model.onnx;embedding=other/model.onnx;num_speakers=auto;clustering_threshold=0.900000";
+        let tuned = "segmentation=seg/model.onnx;embedding=emb/model.onnx;num_speakers=auto;clustering_threshold=0.900000;window_shift_ratio=0.100000;min_duration_on=0.300000;min_duration_off=0.500000";
+        let other_embedding = "segmentation=seg/model.onnx;embedding=other/model.onnx;num_speakers=auto;clustering_threshold=0.900000";
 
         assert!(compatible_embedding_provenance(old, tuned));
         assert!(!compatible_embedding_provenance(tuned, other_embedding));
-        let chunked =
-            "segmentation=seg/model.onnx;embedding=emb/model.onnx;embedding_aggregation=chunk_centroid_v1_3s_16max;clustering_threshold=0.900000";
+        let chunked = "segmentation=seg/model.onnx;embedding=emb/model.onnx;embedding_aggregation=chunk_centroid_v1_3s_16max;clustering_threshold=0.900000";
         assert!(!compatible_embedding_provenance(old, chunked));
         assert!(compatible_embedding_provenance(chunked, chunked));
-        assert!(compatible_embedding_provenance("legacy-model", "legacy-model"));
+        assert!(compatible_embedding_provenance(
+            "legacy-model",
+            "legacy-model"
+        ));
         assert!(!compatible_embedding_provenance("legacy-a", "legacy-b"));
     }
 
     #[test]
     fn creator_prior_matches_dominant_cross_video_cluster_and_close_cohort() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-creator-prior-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-creator-prior-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let evidence_dir = root.join("speaker-evidence");
 
@@ -984,10 +1089,7 @@ mod tests {
             by_label["SPEAKER_03"],
             SpeakerMatchStatus::MatchedCreatorCohort
         );
-        assert_eq!(
-            by_label["SPEAKER_09"],
-            SpeakerMatchStatus::BelowSimilarity
-        );
+        assert_eq!(by_label["SPEAKER_09"], SpeakerMatchStatus::BelowSimilarity);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1095,16 +1197,17 @@ mod tests {
             SpeakerMatchConfig::default(),
         )
         .unwrap();
-        assert_eq!(report.matches[0].status, SpeakerMatchStatus::BelowSimilarity);
+        assert_eq!(
+            report.matches[0].status,
+            SpeakerMatchStatus::BelowSimilarity
+        );
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn evidence_fingerprint_changes_when_anchor_evidence_changes() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-speaker-fingerprint-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-speaker-fingerprint-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let evidence_dir = root.join("speaker-evidence");
 
@@ -1127,8 +1230,8 @@ mod tests {
             &[("SPEAKER_00", &[1.0, 0.0])],
         );
 
-        let before =
-            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+        let before = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
 
         write_evidence(
             &evidence_dir,
@@ -1136,8 +1239,8 @@ mod tests {
             &[(0.0, 8.0, "SPEAKER_01")],
             &[("SPEAKER_01", &[0.1, 0.99])],
         );
-        let after =
-            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+        let after = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
 
         assert_ne!(before, after);
         let _ = fs::remove_dir_all(root);
@@ -1165,27 +1268,103 @@ mod tests {
             &[("SPEAKER_00", &[1.0, 0.0])],
         );
 
-        let missing =
-            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+        let missing = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
         write_evidence(
             &evidence_dir,
             "anchor-guest",
             &[(0.0, 8.0, "SPEAKER_01")],
             &[("SPEAKER_01", &[0.0, 1.0])],
         );
-        let present =
-            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+        let present = speaker_evidence_fingerprint(&registry(), &evidence_dir, "target")
+            .expect("fingerprint");
 
         assert_ne!(missing, present);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn matches_target_clusters_against_human_confirmed_anchor_embeddings() {
+    fn exact_anchor_cache_overrides_cluster_centroid_and_model_key_invalidates() {
         let root = std::env::temp_dir().join(format!(
-            "vessel-speaker-match-{}",
+            "vessel-speaker-anchor-cache-{}",
             std::process::id()
         ));
+        let _ = fs::remove_dir_all(&root);
+        let evidence_dir = root.join("speaker-evidence");
+        write_evidence(
+            &evidence_dir,
+            "anchor-creator",
+            &[(0.0, 8.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "anchor-guest",
+            &[(0.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_01", &[0.0, 1.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "target",
+            &[(0.0, 4.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        let cache_path = speaker_anchor_cache_path(
+            &evidence_dir.join("anchors"),
+            "creator",
+            "anchor-creator",
+            0,
+            8,
+            "",
+        );
+        write_speaker_anchor_evidence(
+            &cache_path,
+            &SpeakerAnchorEvidenceV1 {
+                schema: SPEAKER_ANCHOR_CACHE_SCHEMA_V1,
+                speaker_key: "creator".into(),
+                video_id: "anchor-creator".into(),
+                start_seconds: 0,
+                end_seconds: 8,
+                diarization_engine: "pyannote-audio".into(),
+                diarization_model: "pyannote/speaker-diarization-community-1".into(),
+                embedding_model: "".into(),
+                aggregation: SPEAKER_ANCHOR_AGGREGATION_V1.into(),
+                embedding: vec![0.0, 1.0],
+            },
+        )
+        .unwrap();
+
+        let report = match_speakers_from_evidence(
+            &registry(),
+            &evidence_dir,
+            "target",
+            SpeakerMatchConfig::default(),
+        )
+        .unwrap();
+        let creator = report
+            .matches
+            .iter()
+            .find(|item| item.diarization_label == "SPEAKER_00")
+            .unwrap();
+        assert!(creator.similarity.is_some_and(|value| value < 0.1));
+        assert_ne!(
+            speaker_anchor_cache_path(
+                &evidence_dir.join("anchors"),
+                "creator",
+                "anchor-creator",
+                0,
+                8,
+                "model-a"
+            ),
+            cache_path
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matches_target_clusters_against_human_confirmed_anchor_embeddings() {
+        let root =
+            std::env::temp_dir().join(format!("vessel-speaker-match-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let evidence_dir = root.join("speaker-evidence");
 
@@ -1204,14 +1383,8 @@ mod tests {
         write_evidence(
             &evidence_dir,
             "target",
-            &[
-                (0.0, 4.0, "SPEAKER_00"),
-                (4.0, 8.0, "SPEAKER_01"),
-            ],
-            &[
-                ("SPEAKER_00", &[0.99, 0.08]),
-                ("SPEAKER_01", &[0.05, 0.99]),
-            ],
+            &[(0.0, 4.0, "SPEAKER_00"), (4.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_00", &[0.99, 0.08]), ("SPEAKER_01", &[0.05, 0.99])],
         );
 
         let report = match_speakers_from_evidence(
@@ -1248,10 +1421,8 @@ mod tests {
 
     #[test]
     fn ambiguous_similarity_stays_unresolved() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-speaker-ambiguous-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-speaker-ambiguous-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let evidence_dir = root.join("speaker-evidence");
 
@@ -1286,7 +1457,10 @@ mod tests {
         )
         .expect("speaker matching");
 
-        assert_eq!(report.matches[0].status, SpeakerMatchStatus::AmbiguousMargin);
+        assert_eq!(
+            report.matches[0].status,
+            SpeakerMatchStatus::AmbiguousMargin
+        );
         assert!(report.matches[0].margin.unwrap() < 0.05);
 
         let _ = fs::remove_dir_all(root);
@@ -1294,24 +1468,16 @@ mod tests {
 
     #[test]
     fn anchor_must_be_dominated_by_one_diarized_cluster() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-speaker-dominance-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-speaker-dominance-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let evidence_dir = root.join("speaker-evidence");
 
         write_evidence(
             &evidence_dir,
             "anchor-creator",
-            &[
-                (0.0, 4.0, "SPEAKER_00"),
-                (4.0, 8.0, "SPEAKER_01"),
-            ],
-            &[
-                ("SPEAKER_00", &[1.0, 0.0]),
-                ("SPEAKER_01", &[0.0, 1.0]),
-            ],
+            &[(0.0, 4.0, "SPEAKER_00"), (4.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_00", &[1.0, 0.0]), ("SPEAKER_01", &[0.0, 1.0])],
         );
         write_evidence(
             &evidence_dir,

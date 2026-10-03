@@ -31,11 +31,13 @@ pub use sourcearium_repo::{
     validate_sourcearium_repository,
 };
 pub use speaker_match::{
-    AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_EVIDENCE_SCHEMA_V1,
-    SPEAKER_MATCH_ALGORITHM, SpeakerEvidenceDiarization, SpeakerEvidenceProvenance,
+    AnchorEvidenceDiagnostic, AnchorEvidenceStatus, SPEAKER_ANCHOR_AGGREGATION_V1,
+    SPEAKER_ANCHOR_CACHE_SCHEMA_V1, SPEAKER_EVIDENCE_SCHEMA_V1, SPEAKER_MATCH_ALGORITHM,
+    SpeakerAnchorEvidenceV1, SpeakerEvidenceDiarization, SpeakerEvidenceProvenance,
     SpeakerEvidenceSegment, SpeakerEvidenceV1, SpeakerMatch, SpeakerMatchConfig,
-    SpeakerMatchReport, SpeakerMatchStatus, load_speaker_evidence, match_speakers_from_evidence,
-    speaker_evidence_fingerprint,
+    SpeakerMatchReport, SpeakerMatchStatus, load_speaker_anchor_evidence, load_speaker_evidence,
+    match_speakers_from_evidence, speaker_anchor_cache_path, speaker_evidence_fingerprint,
+    write_speaker_anchor_evidence,
 };
 pub use speaker_registry::{
     SPEAKER_REGISTRY_SCHEMA_V1, SpeakerAnchorV1, SpeakerIdentityV1, SpeakerRegistryV1,

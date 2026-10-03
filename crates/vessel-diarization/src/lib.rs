@@ -124,10 +124,7 @@ impl DiarizationConfig {
             .position(|component| component.starts_with("segmentation="))
             .map(|index| index + 1)
             .unwrap_or(0);
-        components.insert(
-            insert_at,
-            format!("embedding={replacement_embedding}"),
-        );
+        components.insert(insert_at, format!("embedding={replacement_embedding}"));
         components.insert(
             insert_at + 1,
             format!("embedding_aggregation={SPEAKER_EMBEDDING_AGGREGATION}"),
@@ -773,6 +770,69 @@ impl SherpaOnnxDiarizer {
         }
         unsafe { (self.api.free_wave)(wave) };
         Ok(embeddings)
+    }
+
+    /// Embed one human-confirmed audio window without running diarization.
+    ///
+    /// The same bounded 3-second chunk centroid used for speaker clusters is
+    /// used inside the window, but no samples outside `[start, end)` are read.
+    pub fn embed_window_path(
+        &self,
+        path: &Path,
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> Result<Vec<f64>> {
+        if self.embedding_extractor.is_null() {
+            return Err(diarization_error(
+                "speaker embedding extractor is not enabled in this diarization config",
+            ));
+        }
+        if !start_seconds.is_finite() || !end_seconds.is_finite() || end_seconds <= start_seconds {
+            return Err(diarization_error(
+                "speaker anchor window must have finite start before end",
+            ));
+        }
+        if !path.is_file() {
+            return Err(diarization_error(format!(
+                "diarization input does not exist: {}",
+                path.display()
+            )));
+        }
+        let filename = path_cstring(path)?;
+        let wave = unsafe { (self.api.read_wave)(filename.as_ptr()) };
+        if wave.is_null() {
+            return Err(diarization_error(format!(
+                "failed to read diarization WAV {}",
+                path.display()
+            )));
+        }
+        let wave_ref = unsafe { &*wave };
+        let expected_sample_rate = unsafe { (self.api.diarizer_sample_rate)(self.diarizer) };
+        if wave_ref.sample_rate != expected_sample_rate
+            || wave_ref.num_samples <= 0
+            || wave_ref.samples.is_null()
+        {
+            unsafe { (self.api.free_wave)(wave) };
+            return Err(diarization_error(
+                "speaker anchor WAV is empty or has an incompatible sample rate",
+            ));
+        }
+        let samples =
+            unsafe { slice::from_raw_parts(wave_ref.samples, wave_ref.num_samples as usize) };
+        let sample_rate = f64::from(wave_ref.sample_rate);
+        let start = (start_seconds * sample_rate).floor().max(0.0) as usize;
+        let end = (end_seconds * sample_rate).ceil().max(0.0) as usize;
+        let start = start.min(samples.len());
+        let end = end.min(samples.len());
+        let dimension = unsafe { (self.api.embedding_dim)(self.embedding_extractor) };
+        let result = if dimension > 0 && start < end {
+            self.embedding_centroid(&samples[start..end], wave_ref.sample_rate, dimension)
+        } else {
+            None
+        };
+        unsafe { (self.api.free_wave)(wave) };
+        result
+            .ok_or_else(|| diarization_error("speaker anchor window produced no usable embedding"))
     }
 
     fn embedding_centroid(

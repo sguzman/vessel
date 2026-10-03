@@ -16,22 +16,22 @@ use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, ExistingSourceariumArtifact, MaterializeStatus, Result,
-    RuntimeLayout, SourceariumYoutubeSource, SpeakerIdentityV1, SpeakerMatchConfig,
-    SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
-    VideoSelection, SPEAKER_MATCH_ALGORITHM, apply_sourcearium_prune,
-    apply_speaker_match_report,
+    RuntimeLayout, SPEAKER_ANCHOR_AGGREGATION_V1, SPEAKER_ANCHOR_CACHE_SCHEMA_V1,
+    SPEAKER_MATCH_ALGORITHM, SourceariumYoutubeSource, SpeakerAnchorEvidenceV1, SpeakerIdentityV1,
+    SpeakerMatchConfig, SpeakerRegistryV1, TranscriptCandidate, TranscriptDerivation, VesselError,
+    VideoSelection, apply_sourcearium_prune, apply_speaker_match_report,
     apply_youtube_transcript_diarization, discover_youtube_sources,
-    inventory_sourcearium_repository, load_config, load_speaker_evidence, load_speaker_registry,
-    load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
-    plan_sourcearium_prune, refresh_youtube_transcript_diarization_provenance,
-    render_speaker_attributed_transcript, speaker_evidence_fingerprint, resolve_runtime_layout,
-    validate_sourcearium_repository, write_speaker_registry,
+    inventory_sourcearium_repository, load_config, load_speaker_anchor_evidence,
+    load_speaker_evidence, load_speaker_registry, load_youtube_transcript_artifact,
+    match_speakers_from_evidence, materialize_youtube_transcript, plan_sourcearium_prune,
+    refresh_youtube_transcript_diarization_provenance, render_speaker_attributed_transcript,
+    resolve_runtime_layout, speaker_anchor_cache_path, speaker_evidence_fingerprint,
+    validate_sourcearium_repository, write_speaker_anchor_evidence, write_speaker_registry,
 };
 use vessel_diarization::{
-    DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig,
-    DiarizationResult, DiarizationSegment, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION,
-    SherpaOnnxDiarizer, find_sherpa_runtime_library, persist_speaker_evidence,
-    probe_sherpa_runtime,
+    DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig, DiarizationResult,
+    DiarizationSegment, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION, SherpaOnnxDiarizer,
+    find_sherpa_runtime_library, persist_speaker_evidence, probe_sherpa_runtime,
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
@@ -39,8 +39,7 @@ use vessel_extractors::youtube::{
     crawl_channel_videos, extract_channel, extract_comments, extract_video,
 };
 use vessel_extractors::{
-    ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog,
-    load_plugins,
+    ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog, load_plugins,
 };
 use vessel_formats::{FormatSelector, parse_selector};
 use vessel_ledger::{AttemptStatus, FetchAttempt, Ledger};
@@ -380,6 +379,8 @@ enum SpeakersSubcommand {
     Init(SpeakerInitArgs),
     Add(SpeakerAddArgs),
     Anchor(SpeakerAnchorArgs),
+    AnchorCache(SpeakerAnchorCacheArgs),
+    Benchmark(SpeakerBenchmarkArgs),
     Match(SpeakerMatchArgs),
     Diagnose(SpeakerMatchArgs),
     Status(SpeakerMatchArgs),
@@ -437,6 +438,51 @@ struct SpeakerAnchorArgs {
     start_seconds: u64,
     #[arg(long = "end-seconds")]
     end_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerAnchorCacheArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long)]
+    speaker: String,
+    #[arg(long = "video-id")]
+    video_id: String,
+    #[arg(long = "start-seconds")]
+    start_seconds: u64,
+    #[arg(long = "end-seconds")]
+    end_seconds: u64,
+    #[arg(long = "runtime-dir")]
+    runtime_dir: Option<PathBuf>,
+    #[arg(long = "segmentation-model")]
+    segmentation_model: Option<PathBuf>,
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<PathBuf>,
+    #[arg(long = "provider", default_value = "cpu")]
+    provider: String,
+    #[arg(long = "num-threads", default_value_t = 4)]
+    num_threads: i32,
+}
+
+#[derive(Debug, Args)]
+struct SpeakerBenchmarkArgs {
+    #[arg(long = "sourcearium", default_value = ".")]
+    sourcearium: PathBuf,
+    #[arg(long = "source-key")]
+    source_key: String,
+    #[arg(long = "video-id", default_value = "jD-PbF3ywGo")]
+    video_id: String,
+    #[arg(
+        long = "known-positive-identity",
+        default_value = "guest:abigail_thorn"
+    )]
+    known_positive_identity: String,
+    #[arg(long = "known-positive-label", default_value = "SPEAKER_50")]
+    known_positive_label: String,
+    #[arg(long = "threshold", default_value_t = 0.80)]
+    threshold: f64,
 }
 
 #[derive(Debug, Args)]
@@ -709,6 +755,8 @@ async fn main() -> Result<()> {
             SpeakersSubcommand::Init(args) => speakers_init(args),
             SpeakersSubcommand::Add(args) => speakers_add(args),
             SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
+            SpeakersSubcommand::AnchorCache(args) => speakers_anchor_cache(args),
+            SpeakersSubcommand::Benchmark(args) => speakers_benchmark(args),
             SpeakersSubcommand::Match(args) => speakers_match(args),
             SpeakersSubcommand::Diagnose(args) => speakers_diagnose(args),
             SpeakersSubcommand::Status(args) => speakers_status(args),
@@ -725,10 +773,8 @@ async fn main() -> Result<()> {
     }
 }
 
-const SHERPA_SEGMENTATION_ARCHIVE_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
-const SHERPA_EMBEDDING_MODEL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+const SHERPA_SEGMENTATION_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
+const SHERPA_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 const SHERPA_SEGMENTATION_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 const SHERPA_SEGMENTATION_ARCHIVE_BYTES: u64 = 6_958_444;
 const SHERPA_SEGMENTATION_ARCHIVE_SHA256: &str =
@@ -738,10 +784,8 @@ const SHERPA_EMBEDDING_FILENAME: &str =
 const SHERPA_EMBEDDING_BYTES: u64 = 39_593_761;
 const SHERPA_EMBEDDING_SHA256: &str =
     "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b";
-const SHERPA_EN_EMBEDDING_MODEL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
-const SHERPA_EN_EMBEDDING_FILENAME: &str =
-    "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+const SHERPA_EN_EMBEDDING_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+const SHERPA_EN_EMBEDDING_FILENAME: &str = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
 const SHERPA_EN_EMBEDDING_BYTES: u64 = 29_596_978;
 const SHERPA_EN_EMBEDDING_SHA256: &str =
     "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b";
@@ -852,9 +896,7 @@ fn sherpa_model_paths(root: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
-fn sherpa_embedding_spec(
-    profile: &str,
-) -> Result<(&'static str, &'static str, u64, &'static str)> {
+fn sherpa_embedding_spec(profile: &str) -> Result<(&'static str, &'static str, u64, &'static str)> {
     match profile {
         "zh-3dspeaker" => Ok((
             SHERPA_EMBEDDING_FILENAME,
@@ -885,12 +927,9 @@ struct IntegrityStatus {
 fn blake3_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
-    hasher
-        .update_reader(&mut file)
-        .map_err(|error| VesselError::Extractor(format!(
-            "failed to hash {}: {error}",
-            path.display()
-        )))?;
+    hasher.update_reader(&mut file).map_err(|error| {
+        VesselError::Extractor(format!("failed to hash {}: {error}", path.display()))
+    })?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -1128,8 +1167,7 @@ fn planned_remaining_bytes(
     {
         return (expected_bytes, 0);
     }
-    let partial = destination
-        .with_extension("download");
+    let partial = destination.with_extension("download");
     let resume_bytes = std::fs::metadata(partial)
         .map(|metadata| metadata.len().min(expected_bytes))
         .unwrap_or(0);
@@ -1180,9 +1218,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
         .unwrap_or_else(default_diarization_runtime_root);
     let (embedding_filename, embedding_url, embedding_bytes, embedding_sha256) =
         sherpa_embedding_spec(&args.embedding_profile)?;
-    let segmentation_model = model_root
-        .join(SHERPA_SEGMENTATION_DIR)
-        .join("model.onnx");
+    let segmentation_model = model_root.join(SHERPA_SEGMENTATION_DIR).join("model.onnx");
     let embedding_model = model_root.join(embedding_filename);
     let (runtime_archive_name, runtime_archive_bytes, runtime_archive_sha256) =
         sherpa_runtime_archive()?;
@@ -1211,17 +1247,13 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
             runtime_archive_bytes,
             runtime_available,
         );
-        let (segmentation_resume_bytes, segmentation_remaining_bytes) =
-            planned_remaining_bytes(
-                &segmentation_archive_path,
-                SHERPA_SEGMENTATION_ARCHIVE_BYTES,
-                segmentation_available,
-            );
-        let (embedding_resume_bytes, embedding_remaining_bytes) = planned_remaining_bytes(
-            &embedding_model,
-            embedding_bytes,
-            embedding_available,
+        let (segmentation_resume_bytes, segmentation_remaining_bytes) = planned_remaining_bytes(
+            &segmentation_archive_path,
+            SHERPA_SEGMENTATION_ARCHIVE_BYTES,
+            segmentation_available,
         );
+        let (embedding_resume_bytes, embedding_remaining_bytes) =
+            planned_remaining_bytes(&embedding_model, embedding_bytes, embedding_available);
         let plan = serde_json::json!({
             "status": "plan",
             "network_io": false,
@@ -1323,8 +1355,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
                         runtime_root.display()
                     ))
                 })?;
-            let staging_root =
-                runtime_parent.join(format!(".{runtime_name}.installing"));
+            let staging_root = runtime_parent.join(format!(".{runtime_name}.installing"));
             reset_staging_directory(&staging_root)?;
 
             let unpack_root = staging_root.clone();
@@ -1454,11 +1485,7 @@ async fn diarization_fetch(args: DiarizationFetchArgs) -> Result<()> {
     }
 
     probe_sherpa_runtime(&runtime_library)?;
-    validate_sherpa_bundle(
-        &runtime_library,
-        &segmentation_model,
-        &embedding_model,
-    )?;
+    validate_sherpa_bundle(&runtime_library, &segmentation_model, &embedding_model)?;
 
     let runtime_receipt = runtime_root.join(SHERPA_RUNTIME_RECEIPT_FILENAME);
     write_integrity_receipt(
@@ -1590,11 +1617,10 @@ async fn download_with_progress(
         );
         let _ = tokio::fs::remove_file(&temp).await;
         resume_from = 0;
-        response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| VesselError::Extractor(format!("{label} download failed: {error}")))?;
+        response =
+            client.get(url).send().await.map_err(|error| {
+                VesselError::Extractor(format!("{label} download failed: {error}"))
+            })?;
     }
 
     let append = resume_from > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
@@ -1699,7 +1725,6 @@ async fn download_with_progress(
     Ok(())
 }
 
-
 fn diarization_models() -> Result<()> {
     let report = serde_json::json!({
         "backends": [
@@ -1762,8 +1787,7 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
     match args.backend.as_str() {
         SHERPA_ONNX_BACKEND_NAME => {
             let default_model_root = default_diarization_model_root();
-            let (default_segmentation, default_embedding) =
-                sherpa_model_paths(&default_model_root);
+            let (default_segmentation, default_embedding) = sherpa_model_paths(&default_model_root);
             let using_default_models =
                 args.segmentation_model.is_none() && args.embedding_model.is_none();
             let segmentation_path = args.segmentation_model.unwrap_or(default_segmentation);
@@ -1793,7 +1817,9 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
                 .as_deref()
                 .map(probe_sherpa_runtime)
                 .transpose();
-            let runtime_loadable = runtime_probe.as_ref().is_ok_and(|_| runtime_library.is_some());
+            let runtime_loadable = runtime_probe
+                .as_ref()
+                .is_ok_and(|_| runtime_library.is_some());
             let runtime_error = runtime_probe.err().map(|error| error.to_string());
             let bundle_probe = if let Some(runtime_library) = runtime_library.as_deref()
                 && segmentation_path.is_file()
@@ -1811,9 +1837,8 @@ fn diarization_doctor(args: DiarizationDoctorArgs) -> Result<()> {
             let bundle_error = bundle_probe
                 .and_then(|result| result.err())
                 .map(|error| error.to_string());
-            let receipt_integrity_ok =
-                (!runtime_integrity.present || runtime_integrity.verified)
-                    && (!model_integrity.present || model_integrity.verified);
+            let receipt_integrity_ok = (!runtime_integrity.present || runtime_integrity.verified)
+                && (!model_integrity.present || model_integrity.verified);
             let ready = runtime_loadable
                 && bundle_loadable
                 && segmentation_path.is_file()
@@ -2152,13 +2177,12 @@ async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
             ))
         })?;
 
-    let existing = load_youtube_transcript_artifact(&source, &args.video_id)?
-        .ok_or_else(|| {
-            VesselError::Config(format!(
-                "Sourcearium transcript does not exist for video {:?}",
-                args.video_id
-            ))
-        })?;
+    let existing = load_youtube_transcript_artifact(&source, &args.video_id)?.ok_or_else(|| {
+        VesselError::Config(format!(
+            "Sourcearium transcript does not exist for video {:?}",
+            args.video_id
+        ))
+    })?;
     let mut candidate =
         TranscriptCandidate::from_sourcearium_artifact(&existing.artifact, &existing.body)?;
     if candidate.derivation != TranscriptDerivation::LocalAsr {
@@ -2229,8 +2253,7 @@ async fn diarization_apply(args: DiarizationApplyArgs) -> Result<()> {
         .join("vessel")
         .join("speaker-evidence");
     let evidence_path = persist_speaker_evidence(&evidence_dir, &evidence)?;
-    let applied =
-        apply_youtube_transcript_diarization(&source, &args.video_id, &candidate)?;
+    let applied = apply_youtube_transcript_diarization(&source, &args.video_id, &candidate)?;
     let transcript_segments = candidate.segments.len();
     let speaker_assigned_segments = candidate
         .segments
@@ -2298,11 +2321,13 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
         )));
     }
     if !input.is_file() {
-        let hint = args.fixture_video_id.as_deref().map(|video_id| {
-            format!(
-                "; seed it first with: vessel diarization seed --video-id {video_id}"
-            )
-        }).unwrap_or_default();
+        let hint = args
+            .fixture_video_id
+            .as_deref()
+            .map(|video_id| {
+                format!("; seed it first with: vessel diarization seed --video-id {video_id}")
+            })
+            .unwrap_or_default();
         return Err(VesselError::Config(format!(
             "diarization input does not exist: {}{}",
             input.display(),
@@ -2312,8 +2337,7 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
 
     let default_model_root = default_diarization_model_root();
     let (default_segmentation, default_embedding) = sherpa_model_paths(&default_model_root);
-    let using_default_models =
-        args.segmentation_model.is_none() && args.embedding_model.is_none();
+    let using_default_models = args.segmentation_model.is_none() && args.embedding_model.is_none();
     let segmentation_model = args.segmentation_model.unwrap_or(default_segmentation);
     let embedding_model = args.embedding_model.unwrap_or(default_embedding);
 
@@ -2377,8 +2401,7 @@ async fn diarization_run(args: DiarizationRunArgs) -> Result<()> {
     config.validate()?;
 
     let started = Instant::now();
-    let (result, _backend) =
-        acquire_local_diarization(&input, None, &config).await?;
+    let (result, _backend) = acquire_local_diarization(&input, None, &config).await?;
 
     let mut speaker_labels = result
         .segments
@@ -2507,9 +2530,7 @@ fn asr_doctor(args: AsrDoctorArgs) -> Result<()> {
             "ready_for_diarization": false,
         }),
         vessel_asr::PHONON2_BACKEND_NAME => {
-            let executable = args
-                .executable
-                .unwrap_or_else(|| PathBuf::from("fermion"));
+            let executable = args.executable.unwrap_or_else(|| PathBuf::from("fermion"));
             let executable_available = Command::new(&executable)
                 .arg("--help")
                 .output()
@@ -2527,15 +2548,13 @@ fn asr_doctor(args: AsrDoctorArgs) -> Result<()> {
             })
         }
         vessel_asr::WHISPERX_BACKEND_NAME => {
-            let executable = args
-                .executable
-                .unwrap_or_else(|| PathBuf::from("whisperx"));
+            let executable = args.executable.unwrap_or_else(|| PathBuf::from("whisperx"));
             let executable_available = Command::new(&executable)
                 .arg("--help")
                 .output()
                 .is_ok_and(|output| output.status.success());
-            let hf_token_present = std::env::var(&args.hf_token_env)
-                .is_ok_and(|value| !value.trim().is_empty());
+            let hf_token_present =
+                std::env::var(&args.hf_token_env).is_ok_and(|value| !value.trim().is_empty());
             serde_json::json!({
                 "backend": args.backend,
                 "implemented": true,
@@ -2624,7 +2643,10 @@ fn speaker_registry_path(sourcearium: PathBuf, source_key: &str) -> Result<(Path
 fn speakers_show(args: SpeakerSourceArgs) -> Result<()> {
     let (path, _) = speaker_registry_path(args.sourcearium, &args.source_key)?;
     let registry = load_speaker_registry(&path)?.ok_or_else(|| {
-        VesselError::Corpus(format!("speaker registry does not exist: {}", path.display()))
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}",
+            path.display()
+        ))
     })?;
     let rendered = toml::to_string_pretty(&registry)
         .map_err(|error| VesselError::Config(error.to_string()))?;
@@ -2703,6 +2725,209 @@ fn speakers_anchor(args: SpeakerAnchorArgs) -> Result<()> {
     Ok(())
 }
 
+fn speakers_anchor_cache(args: SpeakerAnchorCacheArgs) -> Result<()> {
+    if args.end_seconds <= args.start_seconds {
+        return Err(VesselError::Config(
+            "speaker anchor window must have start before end".into(),
+        ));
+    }
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
+    let registry = load_speaker_registry(&registry_path)?.ok_or_else(|| {
+        VesselError::Corpus(format!(
+            "speaker registry does not exist: {}",
+            registry_path.display()
+        ))
+    })?;
+    let anchor = registry
+        .speakers
+        .iter()
+        .find_map(|speaker| {
+            (speaker.key == args.speaker).then(|| {
+                speaker.anchors.iter().find(|anchor| {
+                    anchor.video_id == args.video_id
+                        && anchor.start_seconds == args.start_seconds
+                        && anchor.end_seconds == args.end_seconds
+                })
+            })
+        })
+        .flatten()
+        .ok_or_else(|| {
+            VesselError::Corpus(
+                "exact-window cache requires a matching human-confirmed registry anchor".into(),
+            )
+        })?;
+    let evidence_path = root
+        .join(".cache/vessel/speaker-evidence")
+        .join(format!("{}.json", args.video_id));
+    let evidence = load_speaker_evidence(&evidence_path)?;
+    let runtime_root = args
+        .runtime_dir
+        .unwrap_or_else(default_diarization_runtime_root);
+    let runtime_library = find_sherpa_runtime_library(&runtime_root)?;
+    let model_root = default_diarization_model_root();
+    let (default_segmentation, default_embedding) = sherpa_model_paths(&model_root);
+    let segmentation_model = args.segmentation_model.unwrap_or(default_segmentation);
+    let embedding_model = args.embedding_model.unwrap_or(default_embedding);
+    let config = DiarizationConfig {
+        backend: SHERPA_ONNX_BACKEND_NAME.into(),
+        runtime_library,
+        segmentation_model,
+        embedding_model: embedding_model.clone(),
+        provider: args.provider,
+        num_threads: args.num_threads,
+        num_speakers: None,
+        clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
+        window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+        speaker_embeddings: true,
+    };
+    let diarizer = SherpaOnnxDiarizer::load(config.clone())?;
+    let embedding = diarizer.embed_window_path(
+        &diarization_fixture_wav(&args.video_id)?,
+        args.start_seconds as f64,
+        args.end_seconds as f64,
+    )?;
+    let embedding_model_id = config
+        .model_provenance()
+        .split(';')
+        .find_map(|component| component.strip_prefix("embedding="))
+        .unwrap_or_default()
+        .to_owned();
+    let cache_dir = root.join(".cache/vessel/speaker-evidence/anchors");
+    let cache_path = speaker_anchor_cache_path(
+        &cache_dir,
+        &args.speaker,
+        &args.video_id,
+        args.start_seconds,
+        args.end_seconds,
+        &embedding_model_id,
+    );
+    let cache = SpeakerAnchorEvidenceV1 {
+        schema: SPEAKER_ANCHOR_CACHE_SCHEMA_V1,
+        speaker_key: args.speaker,
+        video_id: anchor.video_id.clone(),
+        start_seconds: anchor.start_seconds,
+        end_seconds: anchor.end_seconds,
+        diarization_engine: evidence.diarization.engine,
+        diarization_model: evidence.diarization.model,
+        embedding_model: embedding_model_id,
+        aggregation: SPEAKER_ANCHOR_AGGREGATION_V1.into(),
+        embedding,
+    };
+    write_speaker_anchor_evidence(&cache_path, &cache)?;
+    println!(
+        "{}",
+        serde_json::json!({"status":"ok", "cache":cache_path, "video_id":cache.video_id, "start_seconds":cache.start_seconds, "end_seconds":cache.end_seconds, "embedding_model":cache.embedding_model, "aggregation":cache.aggregation})
+    );
+    Ok(())
+}
+
+fn speakers_benchmark(args: SpeakerBenchmarkArgs) -> Result<()> {
+    if !(0.0..=1.0).contains(&args.threshold) {
+        return Err(VesselError::Config(
+            "benchmark threshold must be between 0 and 1".into(),
+        ));
+    }
+    let root = absolute_sourcearium_root(args.sourcearium)?;
+    let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
+    let registry = load_speaker_registry(&registry_path)?
+        .ok_or_else(|| VesselError::Corpus("speaker registry does not exist".into()))?;
+    let evidence_dir = root.join(".cache/vessel/speaker-evidence");
+    let target = load_speaker_evidence(&evidence_dir.join(format!("{}.json", args.video_id)))?;
+    let mut pairs = Vec::new();
+    for speaker in &registry.speakers {
+        for anchor in &speaker.anchors {
+            let model_id = target
+                .diarization
+                .model
+                .split(';')
+                .find_map(|part| part.strip_prefix("embedding="))
+                .unwrap_or_default();
+            let cache_path = speaker_anchor_cache_path(
+                &evidence_dir.join("anchors"),
+                &speaker.key,
+                &anchor.video_id,
+                anchor.start_seconds,
+                anchor.end_seconds,
+                model_id,
+            );
+            let Ok(cache) = load_speaker_anchor_evidence(&cache_path) else {
+                continue;
+            };
+            if cache.embedding_model != model_id
+                || cache.embedding.len() != target.embedding_dimension().unwrap_or(0)
+            {
+                continue;
+            }
+            let anchor_norm = cache.embedding.iter().map(|v| v * v).sum::<f64>().sqrt();
+            for (label, embedding) in target
+                .speaker_embeddings
+                .as_ref()
+                .into_iter()
+                .flat_map(|m| m.iter())
+            {
+                let target_norm = embedding.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let similarity = cache
+                    .embedding
+                    .iter()
+                    .zip(embedding)
+                    .map(|(a, b)| a * b)
+                    .sum::<f64>()
+                    / (anchor_norm * target_norm);
+                let competing = registry
+                    .speakers
+                    .iter()
+                    .filter(|other| other.key != speaker.key)
+                    .filter_map(|other| {
+                        let other_anchor = other.anchors.first()?;
+                        let path = speaker_anchor_cache_path(
+                            &evidence_dir.join("anchors"),
+                            &other.key,
+                            &other_anchor.video_id,
+                            other_anchor.start_seconds,
+                            other_anchor.end_seconds,
+                            model_id,
+                        );
+                        let cache = load_speaker_anchor_evidence(&path).ok()?;
+                        let norm = cache.embedding.iter().map(|v| v * v).sum::<f64>().sqrt();
+                        Some((
+                            other.key.clone(),
+                            cache
+                                .embedding
+                                .iter()
+                                .zip(embedding)
+                                .map(|(a, b)| a * b)
+                                .sum::<f64>()
+                                / (norm * target_norm),
+                        ))
+                    })
+                    .max_by(|a, b| a.1.total_cmp(&b.1));
+                let margin = competing.as_ref().map(|(_, value)| similarity - value);
+                pairs.push(serde_json::json!({"identity":speaker.key,"anchor_video_id":anchor.video_id,"anchor_start_seconds":anchor.start_seconds,"anchor_end_seconds":anchor.end_seconds,"target_video_id":args.video_id,"target_label":label,"cosine_similarity":similarity,"competing_identity":competing.as_ref().map(|v| &v.0),"competing_similarity":competing.map(|v| v.1),"margin":margin,"model_provenance":target.diarization.model,"known_positive":speaker.key == args.known_positive_identity && label == &args.known_positive_label,"known_negative":!(speaker.key == args.known_positive_identity && label == &args.known_positive_label),"at_or_above_threshold":similarity >= args.threshold}));
+            }
+        }
+    }
+    let positives = pairs
+        .iter()
+        .filter(|p| p["known_positive"].as_bool() == Some(true))
+        .count();
+    let negatives = pairs
+        .iter()
+        .filter(|p| p["known_negative"].as_bool() == Some(true))
+        .count();
+    let negative_hits = pairs
+        .iter()
+        .filter(|p| {
+            p["known_negative"].as_bool() == Some(true)
+                && p["at_or_above_threshold"].as_bool() == Some(true)
+        })
+        .count();
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({"schema":1,"status":"ok","source_key":args.source_key,"target_video_id":args.video_id,"threshold":args.threshold,"pairs":pairs,"aggregate":{"known_positive_pairs":positives,"known_negative_pairs":negatives,"known_positive_hits_at_or_above_threshold":pairs.iter().filter(|p| p["known_positive"].as_bool() == Some(true) && p["at_or_above_threshold"].as_bool() == Some(true)).count(),"known_negative_hits_at_or_above_threshold":negative_hits,"known_negative_false_positive_rate":if negatives == 0 {0.0} else {negative_hits as f64 / negatives as f64}}})).map_err(|e| VesselError::Config(e.to_string()))?);
+    Ok(())
+}
+
 fn speakers_match(args: SpeakerMatchArgs) -> Result<()> {
     let root = absolute_sourcearium_root(args.sourcearium)?;
     let (registry_path, _) = speaker_registry_path(root.clone(), &args.source_key)?;
@@ -2776,8 +3001,12 @@ fn speakers_diagnose(args: SpeakerMatchArgs) -> Result<()> {
     let mut duration_by_label = HashMap::<String, f64>::new();
     let mut segment_count_by_label = HashMap::<String, usize>::new();
     for segment in &evidence.segments {
-        *duration_by_label.entry(segment.speaker.clone()).or_default() += segment.end - segment.start;
-        *segment_count_by_label.entry(segment.speaker.clone()).or_default() += 1;
+        *duration_by_label
+            .entry(segment.speaker.clone())
+            .or_default() += segment.end - segment.start;
+        *segment_count_by_label
+            .entry(segment.speaker.clone())
+            .or_default() += 1;
     }
     let embedding_labels = evidence
         .speaker_embeddings
@@ -3168,7 +3397,6 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
     Ok(())
 }
 
-
 fn existing_speaker_attribution_is_fresh(
     existing: &ExistingSourceariumArtifact,
     registry: &SpeakerRegistryV1,
@@ -3261,20 +3489,15 @@ fn maintain_existing_speaker_attribution(
         return;
     }
 
-    let evidence_fingerprint =
-        match speaker_evidence_fingerprint(registry, &evidence_dir, video_id) {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                push_update_error(summary, video_id, error);
-                return;
-            }
-        };
-    if existing_speaker_attribution_is_fresh(
-        existing,
-        registry,
-        config,
-        &evidence_fingerprint,
-    ) {
+    let evidence_fingerprint = match speaker_evidence_fingerprint(registry, &evidence_dir, video_id)
+    {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            push_update_error(summary, video_id, error);
+            return;
+        }
+    };
+    if existing_speaker_attribution_is_fresh(existing, registry, config, &evidence_fingerprint) {
         increment_summary(summary, "speaker_attribution_fresh", 1);
         push_update_item(
             summary,
@@ -3424,8 +3647,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             continue;
         }
         if args.force_local_asr && !policy.transcripts.allow_local_asr {
-            summary["status"] =
-                serde_json::Value::String("force_local_asr_disallowed".into());
+            summary["status"] = serde_json::Value::String("force_local_asr_disallowed".into());
             summary["errors"]
                 .as_array_mut()
                 .expect("errors array")
@@ -3538,8 +3760,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 continue;
             }
         };
-        summary["existing_tab_cursors"] =
-            serde_json::Value::from(existing_cursors.len() as u64);
+        summary["existing_tab_cursors"] = serde_json::Value::from(existing_cursors.len() as u64);
 
         let crawl = match crawl_channel_videos(&channel_input, &existing_cursors).await {
             Ok(crawl) => crawl,
@@ -3573,8 +3794,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 push_update_error(&mut summary, &video_ref.video_id, error);
             }
         }
-        summary["operational_membership_persisted"] =
-            serde_json::Value::Bool(membership_persisted);
+        summary["operational_membership_persisted"] = serde_json::Value::Bool(membership_persisted);
 
         let mut cursor_state_advanced = false;
         if membership_persisted {
@@ -3649,8 +3869,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         if !args.video_ids.is_empty() {
             candidates.retain(|video| args.video_ids.contains(&video.video_id));
             summary["video_filter"] = serde_json::json!(&args.video_ids);
-            summary["video_filter_matches"] =
-                serde_json::Value::from(candidates.len() as u64);
+            summary["video_filter_matches"] = serde_json::Value::from(candidates.len() as u64);
         }
 
         for video_ref in candidates {
@@ -3714,7 +3933,12 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             }
 
             if let Some(existing_artifact) = existing.as_ref() {
-                match existing_artifact.artifact.representation.derivation.as_str() {
+                match existing_artifact
+                    .artifact
+                    .representation
+                    .derivation
+                    .as_str()
+                {
                     "creator_subtitles" => {
                         increment_summary(&mut summary, "already_strongest", 1);
                         push_update_item(
@@ -3745,7 +3969,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                             )
                         {
                             if args.attribute_speakers
-                                && existing_artifact.artifact.representation.derivation == "local_asr"
+                                && existing_artifact.artifact.representation.derivation
+                                    == "local_asr"
                             {
                                 maintain_existing_speaker_attribution(
                                     &mut summary,
@@ -3833,7 +4058,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             {
                 push_update_error(&mut summary, &video.video_id, error);
             }
-            let selection = match policy.select_video(&video.video_id, publication_date.as_deref()) {
+            let selection = match policy.select_video(&video.video_id, publication_date.as_deref())
+            {
                 Ok(selection) => selection,
                 Err(error) => {
                     push_update_error(&mut summary, &video.video_id, error);
@@ -3922,9 +4148,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 (candidate, None)
             } else if existing.is_some() && !args.force_local_asr {
                 if args.attribute_speakers && !args.preview {
-                    let existing_artifact = existing
-                        .as_ref()
-                        .expect("existing artifact checked above");
+                    let existing_artifact =
+                        existing.as_ref().expect("existing artifact checked above");
                     if existing_artifact.artifact.representation.derivation == "local_asr" {
                         maintain_existing_speaker_attribution(
                             &mut summary,
@@ -4037,12 +4262,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                 if let Some(cache_dir) = asr_cache_dir.as_ref() {
                     increment_summary(&mut summary, "diarization_attempted", 1);
                     let wav = cache_dir.join("whisper-input.wav");
-                    match acquire_local_diarization(
-                        &wav,
-                        diarization_backend.take(),
-                        config,
-                    )
-                    .await
+                    match acquire_local_diarization(&wav, diarization_backend.take(), config).await
                     {
                         Ok((result, backend)) => {
                             diarization_backend = Some(backend);
@@ -4050,15 +4270,14 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                                 push_update_error(&mut summary, &video.video_id, error);
                                 continue;
                             }
-                            let evidence = match result
-                                .to_speaker_evidence(&video.video_id, &candidate)
-                            {
-                                Ok(evidence) => evidence,
-                                Err(error) => {
-                                    push_update_error(&mut summary, &video.video_id, error);
-                                    continue;
-                                }
-                            };
+                            let evidence =
+                                match result.to_speaker_evidence(&video.video_id, &candidate) {
+                                    Ok(evidence) => evidence,
+                                    Err(error) => {
+                                        push_update_error(&mut summary, &video.video_id, error);
+                                        continue;
+                                    }
+                                };
                             let evidence_dir = sourcearium_root
                                 .join(".cache")
                                 .join("vessel")
@@ -4200,8 +4419,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                                         .matches
                                         .iter()
                                         .filter(|item| {
-                                            item.status
-                                                == vessel_core::SpeakerMatchStatus::Matched
+                                            item.status == vessel_core::SpeakerMatchStatus::Matched
                                         })
                                         .count();
                                     increment_summary(
@@ -4237,11 +4455,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
                                             );
                                         }
                                         Err(error) => {
-                                            push_update_error(
-                                                &mut summary,
-                                                &video.video_id,
-                                                error,
-                                            );
+                                            push_update_error(&mut summary, &video.video_id, error);
                                         }
                                     }
                                 }
@@ -4282,9 +4496,8 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
         let source_has_errors = summary["errors"]
             .as_array()
             .is_some_and(|errors| !errors.is_empty());
-        summary["status"] = serde_json::Value::String(
-            if source_has_errors { "partial" } else { "ok" }.into(),
-        );
+        summary["status"] =
+            serde_json::Value::String(if source_has_errors { "partial" } else { "ok" }.into());
         source_reports.push(summary);
 
         if limit_reached {
@@ -4375,7 +4588,8 @@ fn preview_materialization_action(
     match existing_derivation {
         None => "would_create",
         Some("local_asr")
-            if candidate.quality_rank() > vessel_core::TranscriptDerivation::LocalAsr.quality_rank() =>
+            if candidate.quality_rank()
+                > vessel_core::TranscriptDerivation::LocalAsr.quality_rank() =>
         {
             "would_upgrade"
         }
@@ -4410,8 +4624,7 @@ fn transcript_upgrade_probe_due(
     let elapsed_seconds = now
         .unix_timestamp()
         .saturating_sub(last_probed_at.unix_timestamp());
-    elapsed_seconds >= 0
-        && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
+    elapsed_seconds >= 0 && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
 }
 
 fn validate_update_speaker_attribution(args: &UpdateArgs, config: &AsrConfig) -> Result<()> {
@@ -4581,9 +4794,7 @@ async fn acquire_local_diarization(
         Ok::<_, VesselError>((result, backend))
     })
     .await
-    .map_err(|error| {
-        VesselError::Extractor(format!("diarization worker failed to join: {error}"))
-    });
+    .map_err(|error| VesselError::Extractor(format!("diarization worker failed to join: {error}")));
 
     let _ = heartbeat_stop_tx.send(());
     let _ = heartbeat.join();
@@ -4715,9 +4926,7 @@ async fn acquire_local_asr_candidate(
         Ok::<_, VesselError>((candidate, backend))
     })
     .await
-    .map_err(|error| {
-        VesselError::Extractor(format!("local ASR worker failed to join: {error}"))
-    });
+    .map_err(|error| VesselError::Extractor(format!("local ASR worker failed to join: {error}")));
 
     let _ = heartbeat_stop_tx.send(());
     let _ = heartbeat.join();
@@ -4814,7 +5023,10 @@ fn push_update_item(
     if !enabled {
         return;
     }
-    let Some(items) = summary.get_mut("items").and_then(serde_json::Value::as_array_mut) else {
+    let Some(items) = summary
+        .get_mut("items")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
         return;
     };
     items.push(serde_json::json!({
@@ -5171,14 +5383,20 @@ async fn dataset_init(args: DatasetInitArgs, layout: &RuntimeLayout) -> Result<(
     if args.recreate {
         vessel_logging::progress(
             "dataset",
-            format!("recreating dataset db at {}", sqlite_target_path(&target)?.display()),
+            format!(
+                "recreating dataset db at {}",
+                sqlite_target_path(&target)?.display()
+            ),
         );
         remove_sqlite_files(&target)?;
     }
     let (_store, paths) = init_sqlite_database(&target).await?;
     vessel_logging::progress(
         "dataset",
-        format!("dataset initialized at {}", sqlite_target_path(&target)?.display()),
+        format!(
+            "dataset initialized at {}",
+            sqlite_target_path(&target)?.display()
+        ),
     );
     let report = serde_json::json!({
         "status": "initialized",
@@ -5252,10 +5470,10 @@ async fn channel_config_init(layout: &RuntimeLayout) -> Result<()> {
     if !existed {
         let mut config = Config::default();
         config.dataset.project = Some(layout.project_name.clone());
-        config.channels.categories.insert(
-            "default".to_owned(),
-            ChannelCategoryConfig::default(),
-        );
+        config
+            .channels
+            .categories
+            .insert("default".to_owned(), ChannelCategoryConfig::default());
         save_project_channel_registry(layout, &config)?;
     }
     println!(
@@ -5314,9 +5532,9 @@ async fn extract_preview(
 async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()> {
     info!(target: "info", channel = %args.channel, "channel add started");
     ensure_project_layout(layout).await?;
-    let category = args.category.ok_or_else(|| {
-        VesselError::Config("channel add requires --category <name>".to_owned())
-    })?;
+    let category = args
+        .category
+        .ok_or_else(|| VesselError::Config("channel add requires --category <name>".to_owned()))?;
     let category = category.trim().to_owned();
     if category.is_empty() {
         return Err(VesselError::Config(
@@ -5326,7 +5544,11 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
     let normalized_channel = normalize_channel_entry(&args.channel)?;
     let mut registry = load_project_channel_registry(layout)?;
     for (existing_category, spec) in &registry.channels.categories {
-        if spec.channels.iter().any(|channel| channel.trim() == normalized_channel) {
+        if spec
+            .channels
+            .iter()
+            .any(|channel| channel.trim() == normalized_channel)
+        {
             if existing_category != &category {
                 return Err(VesselError::Config(format!(
                     "channel is already assigned to category '{existing_category}'"
@@ -5342,7 +5564,10 @@ async fn channel_add(args: ChannelAddArgs, layout: &RuntimeLayout) -> Result<()>
         "channel",
         format!(
             "resolved channel {} ({})",
-            channel.title.clone().unwrap_or_else(|| channel.channel_id.clone()),
+            channel
+                .title
+                .clone()
+                .unwrap_or_else(|| channel.channel_id.clone()),
             channel.channel_id
         ),
     );
@@ -5386,7 +5611,12 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
     let configured_targets = resolve_configured_channels(&registry, &args.categories)?;
     let (store, _) = init_sqlite_database(&layout.database_url).await?;
     let selected_categories = if args.categories.is_empty() {
-        registry.channels.categories.keys().cloned().collect::<Vec<_>>()
+        registry
+            .channels
+            .categories
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
     } else {
         args.categories.clone()
     };
@@ -5395,9 +5625,17 @@ async fn channel_sync(args: ChannelSyncArgs, layout: &RuntimeLayout) -> Result<(
         format!(
             "syncing {} configured channel{} across {} categor{}",
             configured_targets.len(),
-            if configured_targets.len() == 1 { "" } else { "s" },
+            if configured_targets.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             selected_categories.len(),
-            if selected_categories.len() == 1 { "y" } else { "ies" }
+            if selected_categories.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         ),
     );
     if configured_targets.is_empty() {
@@ -5883,7 +6121,10 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
         .await?;
     vessel_logging::progress(
         "db",
-        format!("artifact recorded for {} at {}", video.video_id, artifact.path),
+        format!(
+            "artifact recorded for {} at {}",
+            video.video_id, artifact.path
+        ),
     );
     let mut generated_artifacts = Vec::new();
     for generated in postprocess_result.generated_artifacts {
@@ -5909,7 +6150,10 @@ async fn download(args: DownloadArgs, layout: &RuntimeLayout) -> Result<()> {
     store
         .insert_archive_entry("youtube", &video.video_id, &artifact.artifact_id)
         .await?;
-    vessel_logging::progress("download", format!("download complete for {}", video.video_id));
+    vessel_logging::progress(
+        "download",
+        format!("download complete for {}", video.video_id),
+    );
 
     println!(
         "{}",
@@ -5975,14 +6219,12 @@ async fn sync_one_channel(
     let input = parse_channel_input(&tracked.input);
     vessel_logging::progress(
         "channel",
-        format!(
-            "[{}] {}: refresh started",
-            tracked.category,
-            tracked.input
-        ),
+        format!("[{}] {}: refresh started", tracked.category, tracked.input),
     );
     let mut channel = extract_channel(&input).await?;
-    store.add_tracked_channel(&channel, &tracked.category).await?;
+    store
+        .add_tracked_channel(&channel, &tracked.category)
+        .await?;
     debug!(
         target: "channel",
         channel_id = %channel.channel_id,
@@ -6025,7 +6267,11 @@ async fn sync_one_channel(
     let discovered_count = crawl.videos.len();
     for video_ref in &crawl.videos {
         store
-            .record_channel_video_membership(&channel.channel_id, &video_ref.video_id, &video_ref.tab_name)
+            .record_channel_video_membership(
+                &channel.channel_id,
+                &video_ref.video_id,
+                &video_ref.tab_name,
+            )
             .await?;
     }
     let mut videos = crawl.videos;
@@ -6066,26 +6312,40 @@ async fn sync_one_channel(
         channel.video_count = Some(discovered_count as u64);
     }
     if channel.view_count.is_none() {
-        channel.view_count = store.aggregate_channel_video_view_count(&channel.channel_id).await?;
+        channel.view_count = store
+            .aggregate_channel_video_view_count(&channel.channel_id)
+            .await?;
     }
     report.channel_metrics_inserted += 1;
     report.channel_history_inserted = if args.metrics_only {
         store.record_channel_metrics_only(&channel).await?;
         vessel_logging::progress(
             "db",
-            format!("channel_history skipped for {} (metrics-only)", channel.channel_id),
+            format!(
+                "channel_history skipped for {} (metrics-only)",
+                channel.channel_id
+            ),
         );
         false
     } else {
         let inserted = store.upsert_channel_snapshot(&channel).await?;
         if inserted {
-            vessel_logging::progress("db", format!("channel_history inserted for {}", channel.channel_id));
+            vessel_logging::progress(
+                "db",
+                format!("channel_history inserted for {}", channel.channel_id),
+            );
         } else {
-            vessel_logging::progress("db", format!("channel_history unchanged for {}", channel.channel_id));
+            vessel_logging::progress(
+                "db",
+                format!("channel_history unchanged for {}", channel.channel_id),
+            );
         }
         inserted
     };
-    vessel_logging::progress("db", format!("channel_metrics inserted for {}", channel.channel_id));
+    vessel_logging::progress(
+        "db",
+        format!("channel_metrics inserted for {}", channel.channel_id),
+    );
     store
         .record_attempt(FetchAttempt {
             run_id,
@@ -6157,24 +6417,39 @@ async fn sync_channel_video(
         store.record_video_metrics_only(&video).await?;
         vessel_logging::progress(
             "db",
-            format!("video_history skipped for {} (metrics-only)", video.video_id),
+            format!(
+                "video_history skipped for {} (metrics-only)",
+                video.video_id
+            ),
         );
         false
     } else {
         let inserted = store.upsert_video_snapshot(&video).await?;
         if inserted {
-            vessel_logging::progress("db", format!("video_history inserted for {}", video.video_id));
+            vessel_logging::progress(
+                "db",
+                format!("video_history inserted for {}", video.video_id),
+            );
         } else {
-            vessel_logging::progress("db", format!("video_history unchanged for {}", video.video_id));
+            vessel_logging::progress(
+                "db",
+                format!("video_history unchanged for {}", video.video_id),
+            );
         }
         inserted
     };
-    vessel_logging::progress("db", format!("video_metrics inserted for {}", video.video_id));
+    vessel_logging::progress(
+        "db",
+        format!("video_metrics inserted for {}", video.video_id),
+    );
     if sync_subtitles {
         let inserted = store.sync_subtitle_tracks(&video, &video.subtitles).await?;
         vessel_logging::progress(
             "db",
-            format!("subtitle_history inserted {} track(s) for {}", inserted, video.video_id),
+            format!(
+                "subtitle_history inserted {} track(s) for {}",
+                inserted, video.video_id
+            ),
         );
         sync_subtitle_artifacts(store, &video, layout).await?;
     }
@@ -6301,7 +6576,11 @@ async fn project_list(layout: &RuntimeLayout) -> Result<()> {
         let plugins_root = path.join("plugins");
         let tracked = if database_path.exists() {
             match init_sqlite_database(&format!("sqlite://{}", database_path.display())).await {
-                Ok((store, _)) => store.list_tracked_channels().await.unwrap_or_default().len(),
+                Ok((store, _)) => store
+                    .list_tracked_channels()
+                    .await
+                    .unwrap_or_default()
+                    .len(),
                 Err(_) => 0,
             }
         } else {
@@ -6413,7 +6692,10 @@ fn plugin_directories(paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) 
     directories
 }
 
-fn default_project_plugin_dir(_paths: &vessel_core::ConfigPaths, layout: &RuntimeLayout) -> PathBuf {
+fn default_project_plugin_dir(
+    _paths: &vessel_core::ConfigPaths,
+    layout: &RuntimeLayout,
+) -> PathBuf {
     layout.plugins_root.clone()
 }
 
@@ -6494,7 +6776,10 @@ fn extend_summary_array(summary: &mut serde_json::Value, key: &str, values: &[St
         .as_array_mut()
         .expect("summary key should be an array");
     for value in values {
-        if !array.iter().any(|item| item.as_str() == Some(value.as_str())) {
+        if !array
+            .iter()
+            .any(|item| item.as_str() == Some(value.as_str()))
+        {
             array.push(serde_json::Value::String(value.clone()));
         }
     }
@@ -6509,8 +6794,14 @@ fn merge_summary_tab_counts(
         .as_object_mut()
         .expect("summary key should be an object");
     for (tab, count) in values {
-        let current = object.get(tab).and_then(serde_json::Value::as_u64).unwrap_or(0);
-        object.insert(tab.clone(), serde_json::Value::from(current + *count as u64));
+        let current = object
+            .get(tab)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        object.insert(
+            tab.clone(),
+            serde_json::Value::from(current + *count as u64),
+        );
     }
 }
 
@@ -6716,13 +7007,15 @@ mod tests {
         Cli, Commands, DiarizationSubcommand, SpeakersSubcommand, UpdateArgs,
         diagnostic_cosine_similarity, diarization_fixture_dir,
         existing_speaker_attribution_is_fresh, install_staged_directory,
-        maintain_existing_speaker_attribution, reuse_normalized_audio_fixture,
-        normalize_update_publication_date,
+        maintain_existing_speaker_attribution, normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
-        resolve_diarization_config, sha256_file, transcript_upgrade_probe_due,
-        validate_fixture_video_id, validate_update_speaker_attribution, verify_integrity_receipt,
-        write_integrity_receipt,
+        resolve_diarization_config, reuse_normalized_audio_fixture, sha256_file,
+        transcript_upgrade_probe_due, validate_fixture_video_id,
+        validate_update_speaker_attribution, verify_integrity_receipt, write_integrity_receipt,
+        sherpa_embedding_spec, SHERPA_EMBEDDING_FILENAME, SHERPA_EMBEDDING_BYTES,
+        SHERPA_EMBEDDING_SHA256, SHERPA_EN_EMBEDDING_FILENAME, SHERPA_EN_EMBEDDING_BYTES,
+        SHERPA_EN_EMBEDDING_SHA256,
     };
     use vessel_core::models::InputKind;
     use vessel_core::{
@@ -6732,7 +7025,10 @@ mod tests {
 
     #[test]
     fn diarization_fixture_ids_are_path_safe() {
-        assert_eq!(validate_fixture_video_id("g5o-OpVUHF0").unwrap(), "g5o-OpVUHF0");
+        assert_eq!(
+            validate_fixture_video_id("g5o-OpVUHF0").unwrap(),
+            "g5o-OpVUHF0"
+        );
         assert!(validate_fixture_video_id("../escape").is_err());
         assert!(validate_fixture_video_id("bad/id").is_err());
         let path = diarization_fixture_dir("g5o-OpVUHF0").expect("fixture path");
@@ -6741,10 +7037,7 @@ mod tests {
 
     #[test]
     fn sha256_file_matches_known_vector() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-sha256-test-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("vessel-sha256-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("hash temp root");
         let path = root.join("abc.txt");
@@ -6758,10 +7051,8 @@ mod tests {
 
     #[test]
     fn diarization_plan_accounts_for_resumable_partial_bytes() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-diarization-plan-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-diarization-plan-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("plan temp root");
 
@@ -6787,10 +7078,8 @@ mod tests {
 
     #[test]
     fn staged_directory_install_replaces_live_tree_only_after_stage_exists() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-staged-install-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-staged-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("staged install temp root");
 
@@ -6888,8 +7177,7 @@ mod tests {
         let all = resolve_configured_channels(&config, &[]).expect("all categories");
         assert_eq!(all.len(), 2);
 
-        let gaming =
-            resolve_configured_channels(&config, &["gaming".to_owned()]).expect("gaming");
+        let gaming = resolve_configured_channels(&config, &["gaming".to_owned()]).expect("gaming");
         assert_eq!(gaming.len(), 1);
         assert_eq!(gaming[0].category, "gaming");
     }
@@ -7297,10 +7585,8 @@ mod tests {
 
     #[test]
     fn rust_diarization_config_is_independent_from_asr_backend() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-diarization-config-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-diarization-config-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp model dir");
         let segmentation = root.join("segmentation.onnx");
@@ -7423,10 +7709,8 @@ mod tests {
 
     #[test]
     fn durable_fixture_reuse_preserves_source_and_creates_asr_input() {
-        let root = std::env::temp_dir().join(format!(
-            "vessel-asr-fixture-reuse-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("vessel-asr-fixture-reuse-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp dir");
         let fixture = root.join("fixture.wav");
@@ -7569,7 +7853,10 @@ mod tests {
         artifact.extensions.insert(
             "speaker_attribution".into(),
             toml::Table::from_iter([
-                ("method".into(), toml::Value::String(vessel_core::SPEAKER_MATCH_ALGORITHM.into())),
+                (
+                    "method".into(),
+                    toml::Value::String(vessel_core::SPEAKER_MATCH_ALGORITHM.into()),
+                ),
                 ("registry_revision".into(), toml::Value::Integer(2)),
                 (
                     "evidence_fingerprint".into(),
@@ -7672,10 +7959,7 @@ mod tests {
                 acquired_at: None,
                 method: Some("local_asr".into()),
             },
-            extensions: std::collections::BTreeMap::from([(
-                "diarization".into(),
-                diarization,
-            )]),
+            extensions: std::collections::BTreeMap::from([("diarization".into(), diarization)]),
         };
         let body = "[00:00:00] <speaker:SPEAKER_00> Hello.\n";
         let path = transcripts_dir.join("test.md");

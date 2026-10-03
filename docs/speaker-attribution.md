@@ -252,6 +252,17 @@ For each human-confirmed anchor:
 
 Multiple compatible anchor samples for one identity are normalized, averaged, and normalized again to produce an operational identity centroid.
 
+Human-confirmed anchors can be embedded from their exact confirmed audio window without rerunning ASR, segmentation, or clustering:
+
+```text
+vessel speakers anchor-cache \
+  --sourcearium <root> --source-key contrapoints \
+  --speaker guest:abigail_thorn --video-id fD2briZ6fB0 \
+  --start-seconds 1520 --end-seconds 1536
+```
+
+The command requires the durable local fixture and already-installed local Sherpa runtime/models. It writes a content-addressed operational cache under `.cache/vessel/speaker-evidence/anchors/`. The cache records the exact window, embedding model, diarization provenance, and `exact_window_chunk_centroid_v1_3s_16max` aggregation. A model change produces a different cache key; malformed or incompatible cache entries are ignored and the matcher safely falls back to legacy evidence until the exact cache is generated. The anchor-dominance check remains mandatory, so exact audio does not turn a mixed human-confirmed interval into a durable identity claim.
+
 For each anonymous target speaker cluster, Vessel computes cosine similarity against compatible identity centroids.
 
 Default read-only acceptance gates are deliberately conservative and are **not yet calibrated as universal truth**:
@@ -293,6 +304,16 @@ A narrower source-aware fallback exists only for the one registry identity whose
 This fallback is deliberately asymmetric. A guest or arbitrary identity never receives the creator prior, and a source with zero or multiple `relation = "creator"` identities gets no fallback at all.
 
 The report also preserves per-anchor diagnostics such as missing evidence, incompatible provenance, low dominance, missing embeddings, or incompatible dimensions.
+
+For the fixed calibration truth set, compare cached anchor windows against all cached target clusters with:
+
+```text
+vessel speakers benchmark \
+  --sourcearium <root> --source-key contrapoints \
+  --video-id jD-PbF3ywGo
+```
+
+The machine-readable JSON includes each anchor/cluster cosine, the strongest competing identity and margin, model provenance, the known-positive marker for Abigail Thorn's `Opulence` `SPEAKER_50`, and aggregate negative-pair false-positive rate at the selected threshold. It consumes persisted evidence and exact-window caches only; it does not perform network I/O, ASR, segmentation, clustering, or transcript mutation. Repeat `speakers anchor-cache` with `--embedding-model` pointing at `en-voxceleb` to perform a reversible model A/B comparison. The production `zh-3dspeaker` default and global acceptance thresholds remain unchanged.
 
 A read-only `matched` result is still evidence, not durable identity. Automatic transcript identity application remains a separate later step.
 
