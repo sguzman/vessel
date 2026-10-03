@@ -7148,8 +7148,8 @@ mod tests {
             diarization_model: None,
             min_speakers: Some(2),
             max_speakers: Some(2),
-            speaker_embeddings: true,
-            attribute_speakers: false,
+            speaker_embeddings: false,
+            attribute_speakers: true,
             speaker_min_similarity: 0.80,
             speaker_min_margin: 0.05,
             speaker_min_anchor_dominance: 0.80,
@@ -7162,6 +7162,8 @@ mod tests {
         let asr = resolve_asr_config(&args);
         assert_eq!(asr.backend, "phonon-2");
         assert!(!asr.diarize);
+        validate_update_speaker_attribution(&args, &asr)
+            .expect("Rust-native attribution must not require explicit embedding flag");
 
         let diarization = resolve_diarization_config(&args)
             .expect("resolve diarization")
