@@ -90,6 +90,7 @@ For model matches, preserve:
 - model
 - similarity/confidence value when available
 - registry revision used for comparison
+- a BLAKE3 fingerprint of the target and registry-anchor evidence inputs
 
 Never silently convert an uncertain match into a hard speaker identity.
 
@@ -383,6 +384,8 @@ vessel update \
 The default diarization backend is `sherpa-onnx`. WhisperX only becomes a requirement if `--diarization-backend whisperx` is explicitly selected.
 
 The update path reuses the same matching and metadata-application functions as `vessel speakers match` and `vessel speakers apply`; it does not have a second hidden attribution algorithm.
+
+Existing diarized `local_asr` artifacts also get cheap attribution maintenance from persisted evidence. Persisted attribution includes a BLAKE3 fingerprint covering the target evidence plus every evidence file referenced by current registry anchors, including missing-file state. If registry revision, evidence fingerprint, calibration thresholds, and diarization provenance all still match, maintenance reports the attribution as fresh and skips cosine matching entirely. Any relevant evidence, registry, calibration, or diarization change forces recomputation.
 
 After a diarized ASR artifact materializes, the integrated update:
 

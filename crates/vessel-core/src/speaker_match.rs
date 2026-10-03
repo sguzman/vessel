@@ -137,6 +137,7 @@ pub struct SpeakerMatch {
 pub struct SpeakerMatchReport {
     pub target_video_id: String,
     pub registry_revision: u64,
+    pub evidence_fingerprint: String,
     pub diarization_engine: String,
     pub diarization_model: String,
     pub config: SpeakerMatchConfig,
@@ -249,6 +250,44 @@ pub fn load_speaker_evidence(path: &Path) -> Result<SpeakerEvidenceV1> {
     Ok(evidence)
 }
 
+pub fn speaker_evidence_fingerprint(
+    registry: &SpeakerRegistryV1,
+    evidence_dir: &Path,
+    target_video_id: &str,
+) -> Result<String> {
+    registry.validate()?;
+    require_nonempty("target video id", target_video_id)?;
+
+    let mut video_ids = BTreeSet::new();
+    video_ids.insert(target_video_id.to_owned());
+    for speaker in &registry.speakers {
+        for anchor in &speaker.anchors {
+            video_ids.insert(anchor.video_id.clone());
+        }
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vessel-speaker-evidence-fingerprint-v1\0");
+    for video_id in video_ids {
+        hasher.update(video_id.as_bytes());
+        hasher.update(&[0]);
+        let path = evidence_path(evidence_dir, &video_id);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                hasher.update(b"present\0");
+                hasher.update(&(bytes.len() as u64).to_le_bytes());
+                hasher.update(&bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                hasher.update(b"missing\0");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 pub fn match_speakers_from_evidence(
     registry: &SpeakerRegistryV1,
     evidence_dir: &Path,
@@ -258,6 +297,8 @@ pub fn match_speakers_from_evidence(
     registry.validate()?;
     let config = config.validate()?;
     require_nonempty("target video id", target_video_id)?;
+    let evidence_fingerprint =
+        speaker_evidence_fingerprint(registry, evidence_dir, target_video_id)?;
 
     let target_path = evidence_path(evidence_dir, target_video_id);
     if !target_path.is_file() {
@@ -496,6 +537,7 @@ pub fn match_speakers_from_evidence(
     Ok(SpeakerMatchReport {
         target_video_id: target_video_id.to_owned(),
         registry_revision: registry.revision,
+        evidence_fingerprint,
         diarization_engine: target.diarization.engine,
         diarization_model: target.diarization.model,
         config,
@@ -692,6 +734,87 @@ mod tests {
             serde_json::to_vec_pretty(&evidence).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn evidence_fingerprint_changes_when_anchor_evidence_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-speaker-fingerprint-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let evidence_dir = root.join("speaker-evidence");
+
+        write_evidence(
+            &evidence_dir,
+            "anchor-creator",
+            &[(0.0, 8.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "anchor-guest",
+            &[(0.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_01", &[0.0, 1.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "target",
+            &[(0.0, 4.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+
+        let before =
+            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+
+        write_evidence(
+            &evidence_dir,
+            "anchor-guest",
+            &[(0.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_01", &[0.1, 0.99])],
+        );
+        let after =
+            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+
+        assert_ne!(before, after);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_fingerprint_tracks_missing_anchor_state() {
+        let root = std::env::temp_dir().join(format!(
+            "vessel-speaker-fingerprint-missing-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let evidence_dir = root.join("speaker-evidence");
+
+        write_evidence(
+            &evidence_dir,
+            "anchor-creator",
+            &[(0.0, 8.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+        write_evidence(
+            &evidence_dir,
+            "target",
+            &[(0.0, 4.0, "SPEAKER_00")],
+            &[("SPEAKER_00", &[1.0, 0.0])],
+        );
+
+        let missing =
+            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+        write_evidence(
+            &evidence_dir,
+            "anchor-guest",
+            &[(0.0, 8.0, "SPEAKER_01")],
+            &[("SPEAKER_01", &[0.0, 1.0])],
+        );
+        let present =
+            speaker_evidence_fingerprint(&registry(), &evidence_dir, "target").expect("fingerprint");
+
+        assert_ne!(missing, present);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

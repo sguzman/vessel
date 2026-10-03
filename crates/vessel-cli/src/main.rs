@@ -22,7 +22,7 @@ use vessel_core::{
     apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_registry,
     load_youtube_transcript_artifact, match_speakers_from_evidence, materialize_youtube_transcript,
-    plan_sourcearium_prune, render_speaker_attributed_transcript,
+    plan_sourcearium_prune, render_speaker_attributed_transcript, speaker_evidence_fingerprint,
     resolve_runtime_layout, validate_sourcearium_repository, write_speaker_registry,
 };
 use vessel_diarization::{
@@ -2524,6 +2524,50 @@ fn speakers_render(args: SpeakerRenderArgs) -> Result<()> {
 }
 
 
+fn existing_speaker_attribution_is_fresh(
+    existing: &ExistingSourceariumArtifact,
+    registry: &SpeakerRegistryV1,
+    config: SpeakerMatchConfig,
+    evidence_fingerprint: &str,
+) -> bool {
+    let Some(attribution) = existing.artifact.extensions.get("speaker_attribution") else {
+        return false;
+    };
+    let Some(diarization) = existing.artifact.extensions.get("diarization") else {
+        return false;
+    };
+
+    attribution.get("method").and_then(toml::Value::as_str) == Some("embedding_cosine")
+        && attribution
+            .get("registry_revision")
+            .and_then(toml::Value::as_integer)
+            == Some(registry.revision as i64)
+        && attribution
+            .get("evidence_fingerprint")
+            .and_then(toml::Value::as_str)
+            == Some(evidence_fingerprint)
+        && attribution
+            .get("min_similarity")
+            .and_then(toml::Value::as_float)
+            == Some(config.min_similarity)
+        && attribution
+            .get("min_margin")
+            .and_then(toml::Value::as_float)
+            == Some(config.min_margin)
+        && attribution
+            .get("min_anchor_dominance")
+            .and_then(toml::Value::as_float)
+            == Some(config.min_anchor_dominance)
+        && attribution
+            .get("diarization_engine")
+            .and_then(toml::Value::as_str)
+            == diarization.get("engine").and_then(toml::Value::as_str)
+        && attribution
+            .get("diarization_model")
+            .and_then(toml::Value::as_str)
+            == diarization.get("model").and_then(toml::Value::as_str)
+}
+
 fn maintain_existing_speaker_attribution(
     summary: &mut serde_json::Value,
     report_items: bool,
@@ -2567,6 +2611,38 @@ fn maintain_existing_speaker_attribution(
             serde_json::json!({
                 "reason": "existing diarized transcript has no persisted speaker evidence",
                 "evidence": evidence_path,
+            }),
+        );
+        return;
+    }
+
+    let evidence_fingerprint =
+        match speaker_evidence_fingerprint(registry, &evidence_dir, video_id) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                push_update_error(summary, video_id, error);
+                return;
+            }
+        };
+    if existing_speaker_attribution_is_fresh(
+        existing,
+        registry,
+        config,
+        &evidence_fingerprint,
+    ) {
+        increment_summary(summary, "speaker_attribution_fresh", 1);
+        push_update_item(
+            summary,
+            report_items,
+            video_id,
+            "speaker_attribution_fresh",
+            serde_json::json!({
+                "registry_revision": registry.revision,
+                "evidence_fingerprint": evidence_fingerprint,
+                "network_io": false,
+                "asr_invoked": false,
+                "diarization_invoked": false,
+                "matching_invoked": false,
             }),
         );
         return;
@@ -2684,6 +2760,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             "caption_empty_response_tracks": 0,
             "unresolved_no_provider": 0,
             "speaker_attribution_attempted": 0,
+            "speaker_attribution_fresh": 0,
             "speaker_attribution_assignments": 0,
             "speaker_attribution_updated": 0,
             "speaker_attribution_unchanged": 0,
@@ -5923,8 +6000,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        UpdateArgs, diarization_fixture_dir, install_staged_directory,
-        maintain_existing_speaker_attribution, normalize_update_publication_date,
+        UpdateArgs, diarization_fixture_dir, existing_speaker_attribution_is_fresh,
+        install_staged_directory, maintain_existing_speaker_attribution,
+        normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
         resolve_diarization_config, sha256_file, transcript_upgrade_probe_due,
@@ -6475,6 +6553,102 @@ mod tests {
     }
 
     #[test]
+    fn speaker_attribution_freshness_requires_all_inputs_to_match() {
+        let mut artifact = vessel_core::SourceariumArtifactV1 {
+            schema: 1,
+            artifact_id: "youtube:video:test:transcript".into(),
+            kind: "transcript".into(),
+            title: None,
+            source: vessel_core::SourceIdentityV1 {
+                family: "youtube".into(),
+                kind: "video".into(),
+                id: "test".into(),
+                url: None,
+                creator: None,
+                creator_id: None,
+                published: None,
+            },
+            representation: vessel_core::TextRepresentationV1 {
+                derivation: "local_asr".into(),
+                language: Some("en".into()),
+                timestamps: Some(true),
+                engine: Some("whisper-candle".into()),
+                model: Some("small".into()),
+            },
+            acquisition: vessel_core::AcquisitionV1 {
+                producer: "vessel".into(),
+                producer_version: None,
+                acquired_at: None,
+                method: Some("local_asr".into()),
+            },
+            extensions: std::collections::BTreeMap::new(),
+        };
+        artifact.extensions.insert(
+            "diarization".into(),
+            toml::Table::from_iter([
+                ("engine".into(), toml::Value::String("sherpa-onnx".into())),
+                ("model".into(), toml::Value::String("model-a".into())),
+            ]),
+        );
+        artifact.extensions.insert(
+            "speaker_attribution".into(),
+            toml::Table::from_iter([
+                ("method".into(), toml::Value::String("embedding_cosine".into())),
+                ("registry_revision".into(), toml::Value::Integer(2)),
+                (
+                    "evidence_fingerprint".into(),
+                    toml::Value::String("fingerprint-a".into()),
+                ),
+                ("min_similarity".into(), toml::Value::Float(0.8)),
+                ("min_margin".into(), toml::Value::Float(0.05)),
+                ("min_anchor_dominance".into(), toml::Value::Float(0.8)),
+                (
+                    "diarization_engine".into(),
+                    toml::Value::String("sherpa-onnx".into()),
+                ),
+                (
+                    "diarization_model".into(),
+                    toml::Value::String("model-a".into()),
+                ),
+            ]),
+        );
+        let existing = ExistingSourceariumArtifact {
+            path: PathBuf::from("test.md"),
+            artifact,
+            body: String::new(),
+        };
+        let registry = vessel_core::SpeakerRegistryV1 {
+            schema: 1,
+            source_family: "youtube".into(),
+            source_id: "UCexample".into(),
+            revision: 2,
+            speakers: Vec::new(),
+        };
+
+        assert!(existing_speaker_attribution_is_fresh(
+            &existing,
+            &registry,
+            SpeakerMatchConfig::default(),
+            "fingerprint-a",
+        ));
+        assert!(!existing_speaker_attribution_is_fresh(
+            &existing,
+            &registry,
+            SpeakerMatchConfig {
+                min_similarity: 0.81,
+                ..SpeakerMatchConfig::default()
+            },
+            "fingerprint-a",
+        ));
+        assert!(!existing_speaker_attribution_is_fresh(
+            &existing,
+            &registry,
+            SpeakerMatchConfig::default(),
+            "fingerprint-b",
+        ));
+    }
+
+    #[test]
     fn existing_speaker_maintenance_reuses_persisted_evidence() {
         let root = std::env::temp_dir().join(format!(
             "vessel-existing-speaker-maintenance-{}",
@@ -6600,6 +6774,7 @@ mod tests {
         };
         let mut summary = serde_json::json!({
             "speaker_attribution_attempted": 0,
+            "speaker_attribution_fresh": 0,
             "speaker_attribution_assignments": 0,
             "speaker_attribution_updated": 0,
             "speaker_attribution_unchanged": 0,
@@ -6621,7 +6796,31 @@ mod tests {
         assert_eq!(summary["speaker_attribution_attempted"], 1);
         assert_eq!(summary["speaker_attribution_assignments"], 1);
         assert_eq!(summary["speaker_attribution_updated"], 1);
+        assert_eq!(summary["speaker_attribution_fresh"], 0);
         assert!(summary["errors"].as_array().unwrap().is_empty());
+
+        let refreshed_raw =
+            fs::read_to_string(&path).expect("read attributed transcript for refresh");
+        let (refreshed_artifact, refreshed_body) =
+            vessel_core::SourceariumArtifactV1::parse_markdown(&refreshed_raw)
+                .expect("parse attributed artifact");
+        let refreshed = ExistingSourceariumArtifact {
+            path: path.clone(),
+            artifact: refreshed_artifact,
+            body: refreshed_body,
+        };
+        maintain_existing_speaker_attribution(
+            &mut summary,
+            false,
+            &root,
+            &source,
+            &registry,
+            &refreshed,
+            "test-video",
+            SpeakerMatchConfig::default(),
+        );
+        assert_eq!(summary["speaker_attribution_attempted"], 1);
+        assert_eq!(summary["speaker_attribution_fresh"], 1);
 
         let raw = fs::read_to_string(path).expect("read attributed transcript");
         let (updated, _) =

@@ -731,6 +731,10 @@ pub fn apply_speaker_match_report(
         toml::Value::Integer(report.registry_revision as i64),
     );
     attribution.insert(
+        "evidence_fingerprint".into(),
+        toml::Value::String(report.evidence_fingerprint.clone()),
+    );
+    attribution.insert(
         "diarization_engine".into(),
         toml::Value::String(report.diarization_engine.clone()),
     );
