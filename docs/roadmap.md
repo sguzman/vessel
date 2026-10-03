@@ -196,6 +196,13 @@ Implemented additionally:
 - one Whisper model is loaded lazily and reused across ASR fallbacks in the same update run
 - validator is available through `vessel validate` for offline corpus checks
 
+Local QA / acceptance rule:
+
+- when a test merely needs *some* local ASR output to exercise downstream Vessel behavior, use the lightest suitable backend: `phonon-2` for English fixtures
+- do not spend Whisper compute on generic QA
+- use `whisper-candle` or another heavier backend only when the test specifically targets that backend, multilingual behavior, or a quality characteristic that `phonon-2` cannot exercise
+- tests that only exercise diarization, speaker matching, attribution, rendering, or persisted evidence must reuse existing audio/evidence and invoke no ASR at all
+
 Real-source acceptance discovered and documented:
 
 - hosted-runner YouTube anti-bot gate can block player metadata while channel crawl still succeeds
