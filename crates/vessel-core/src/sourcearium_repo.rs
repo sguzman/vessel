@@ -1436,6 +1436,7 @@ input = "https://www.youtube.com/@{key}"
         let report = crate::SpeakerMatchReport {
             target_video_id: video.video_id.clone(),
             registry_revision: 4,
+            evidence_fingerprint: "test-fingerprint".into(),
             diarization_engine: "pyannote-audio".into(),
             diarization_model: "pyannote/speaker-diarization-community-1".into(),
             config: crate::SpeakerMatchConfig {
@@ -1516,6 +1517,7 @@ input = "https://www.youtube.com/@{key}"
         let report = crate::SpeakerMatchReport {
             target_video_id: video.video_id.clone(),
             registry_revision: 4,
+            evidence_fingerprint: "test-fingerprint".into(),
             diarization_engine: "pyannote-audio".into(),
             diarization_model: "pyannote/speaker-diarization-community-1".into(),
             config: crate::SpeakerMatchConfig::default(),
@@ -1575,6 +1577,7 @@ input = "https://www.youtube.com/@{key}"
         let report = crate::SpeakerMatchReport {
             target_video_id: video.video_id.clone(),
             registry_revision: 2,
+            evidence_fingerprint: "test-fingerprint".into(),
             diarization_engine: "pyannote-audio".into(),
             diarization_model: "model-b".into(),
             config: crate::SpeakerMatchConfig::default(),
