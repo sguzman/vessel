@@ -9,6 +9,7 @@ use crate::models::{ChannelMetadata, VideoMetadata};
 use crate::{
     AcquisitionV1, Result, SourceIdentityV1, SourceariumArtifactV1, SpeakerMatchReport,
     SpeakerMatchStatus, TranscriptCandidate, TranscriptDerivation, VesselError, VideoSelection,
+    SPEAKER_MATCH_ALGORITHM,
     YoutubeSourcePolicyV1,
 };
 
@@ -738,7 +739,14 @@ pub fn apply_speaker_match_report(
     let mut assignments = report
         .matches
         .iter()
-        .filter(|item| item.status == SpeakerMatchStatus::Matched)
+        .filter(|item| {
+            matches!(
+                item.status,
+                SpeakerMatchStatus::Matched
+                    | SpeakerMatchStatus::MatchedCreatorPrior
+                    | SpeakerMatchStatus::MatchedCreatorCohort
+            )
+        })
         .map(|item| {
             let identity = item.best_identity.as_deref().ok_or_else(|| {
                 corpus_error(format!(
@@ -759,9 +767,15 @@ pub fn apply_speaker_match_report(
                 toml::Value::String(item.diarization_label.clone()),
             );
             assignment.insert("identity".into(), toml::Value::String(identity.to_owned()));
+            let attribution_method = match item.status {
+                SpeakerMatchStatus::Matched => "model_matched",
+                SpeakerMatchStatus::MatchedCreatorPrior => "creator_prior",
+                SpeakerMatchStatus::MatchedCreatorCohort => "creator_cohort",
+                _ => unreachable!("only matched statuses are persisted"),
+            };
             assignment.insert(
                 "attribution".into(),
-                toml::Value::String("model_matched".into()),
+                toml::Value::String(attribution_method.into()),
             );
             assignment.insert("similarity".into(), toml::Value::Float(similarity));
             assignment.insert(
@@ -795,7 +809,7 @@ pub fn apply_speaker_match_report(
     let mut attribution = toml::Table::new();
     attribution.insert(
         "method".into(),
-        toml::Value::String("embedding_cosine".into()),
+        toml::Value::String(SPEAKER_MATCH_ALGORITHM.into()),
     );
     attribution.insert(
         "registry_revision".into(),
