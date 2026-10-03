@@ -5932,7 +5932,9 @@ mod tests {
         verify_integrity_receipt, write_integrity_receipt,
     };
     use vessel_core::models::InputKind;
-    use vessel_core::{ChannelCategoryConfig, Config, SpeakerMatchConfig, VesselError};
+    use vessel_core::{
+        ChannelCategoryConfig, Config, ExistingSourceariumArtifact, SpeakerMatchConfig, VesselError,
+    };
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
 
     #[test]
