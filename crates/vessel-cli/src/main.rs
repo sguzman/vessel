@@ -7791,11 +7791,27 @@ note = "cohort only"
     }
 
     #[test]
+    fn update_defaults_to_external_toolchain() {
+        let cli = Cli::try_parse_from(["vessel", "update"]).expect("parse update");
+        let Commands::Update(args) = cli.command else {
+            panic!("expected update command");
+        };
+        assert_eq!(args.youtube_backend, "yt-dlp");
+        assert_eq!(args.yt_dlp_executable, PathBuf::from("yt-dlp"));
+        assert_eq!(args.diarization_backend, "whisperx");
+        let asr = resolve_asr_config(&args);
+        assert_eq!(asr.backend, vessel_asr::WHISPERX_BACKEND_NAME);
+        assert_eq!(asr.model, "large-v3");
+    }
+
+    #[test]
     fn asr_cli_overrides_are_operational_only() {
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: Some("base".into()),
@@ -7852,6 +7868,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
@@ -7892,6 +7910,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
@@ -7933,6 +7953,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: None,
@@ -7973,6 +7995,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
             asr_model: None,
@@ -8009,11 +8033,14 @@ note = "cohort only"
     }
 
     #[test]
+    #[ignore = "legacy sherpa diarization path is retired from active Vessel migration"]
     fn rust_diarization_attribution_reports_effective_embeddings() {
         let args = UpdateArgs {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
@@ -8084,6 +8111,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
@@ -8132,6 +8161,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
@@ -8214,6 +8245,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
             asr_model: None,
@@ -8273,6 +8306,8 @@ note = "cohort only"
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
+            youtube_backend: "yt-dlp".into(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisperx".into()),
             asr_model: None,
