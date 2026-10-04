@@ -1,97 +1,124 @@
 # Local ASR
 
-## Backend
+## Current direction
 
-Vessel's initial local-ASR implementation uses `whisper-candle-core`.
+Vessel's default local-ASR backend is now **WhisperX**.
 
-Why:
+The architecture is intentionally process-based:
 
-- pure Rust inference path
-- no Python runtime
-- no PyTorch runtime
-- no C/C++ whisper.cpp binding layer
-- CPU-capable by default
-- Candle-compatible acceleration remains available as a later operational choice
-- full-file transcription and timestamped segments are exposed by the library
+~~~text
+Vessel
+-> normalized local audio
+-> whisperx executable
+-> JSON
+-> TranscriptCandidate
+-> Sourcearium materialization
+~~~
 
-The dependency is isolated behind the `vessel-asr` crate.
-
-Sourcearium does not know or care which ASR library Vessel uses.
+Vessel owns transcript precedence, normalization, provenance, reconciliation, validation, and durable
+materialization. It does not need to own Whisper inference or diarization internals.
 
 ## Defaults
 
-Initial Vessel defaults:
+For `vessel update`:
 
-```text
-engine = whisper-candle
-model = small
+~~~text
+ASR backend = whisperx
+model = large-v3
 device = cpu
-```
+diarization backend = whisperx
+~~~
 
-The default model is multilingual because Sourcearium is not an English-only corpus.
+Diarization is still opt-in. When enabled through the WhisperX path, anonymous labels such as
+`SPEAKER_00` and `SPEAKER_01` may be preserved in the normalized transcript.
 
-The default device is CPU because GPU acceleration is an optimization, not a correctness requirement.
+Cross-video named-speaker identity is not an active product goal.
 
-## Provenance Mapping
+## External tool boundary
 
-A local ASR artifact uses:
+WhisperX is invoked as an executable and its JSON is parsed into Vessel's existing normalized
+`TranscriptCandidate`.
 
-```toml
+The adapter currently supports operational controls for:
+
+- model selection;
+- device selection;
+- language hints;
+- explicit model directories/cache-only use;
+- progress output;
+- optional diarization;
+- diarization model;
+- optional minimum/maximum speaker hints;
+- Hugging Face token environment for diarization model access.
+
+Python is an implementation detail behind this process boundary.
+
+Prefer an isolated installation managed with `uv` rather than making Vessel itself a Python
+application.
+
+## Media acquisition
+
+When `vessel update` uses the default YouTube backend, ASR source audio is acquired through
+**yt-dlp**, not Vessel's native format planner/downloader.
+
+Temporary media lives under:
+
+~~~text
+<sourcearium>/.cache/vessel/asr/<video-id>/
+~~~
+
+Vessel then normalizes the source audio to 16 kHz mono PCM WAV through FFmpeg before transcription.
+
+A durable compatible local fixture may still be reused to avoid a redundant network download.
+
+If acquisition, normalization, transcription, validation, or materialization fails, no durable
+Sourcearium artifact is replaced.
+
+## Provenance
+
+A local ASR artifact records the actual engine/model used.
+
+For the default path this is conceptually:
+
+~~~toml
 [representation]
 derivation = "local_asr"
-engine = "whisper-candle"
-model = "small"
+engine = "whisperx-faster-whisper"
+model = "large-v3"
 timestamps = true
-```
+~~~
 
-The detected/selected language is stored in `representation.language`.
+If diarization is used, diarization engine/model provenance is recorded separately.
 
-## Boundary
+Sourcearium semantics do not depend on WhisperX. The backend remains replaceable.
 
-`vessel-asr` receives a local media/audio path and returns a normalized `TranscriptCandidate`.
+## Legacy backends during migration
 
-It does not:
+The following implementations remain temporarily available while the external-tool migration is being
+proven:
 
-- discover YouTube videos
-- download media
-- understand Sourcearium filesystem layout
-- write corpus files
-- decide whether ASR is preferable to platform captions
+- `whisper-candle`;
+- `phonon-2`;
+- Rust/Sherpa diarization.
 
-Those responsibilities remain in their existing layers.
+They are not equal-priority roadmap branches.
 
-## Media Normalization
+`phonon-2` may survive if its fast English QA niche remains useful. The bespoke Whisper/Sherpa paths
+should be retired once the replacement path has sufficient acceptance evidence.
 
-Vessel acquires the selected best-audio format through its existing download planner and stores it under:
+Do not invest new product work in named-speaker matching, embedding calibration, or speaker identity.
 
-```text
-<sourcearium>/.cache/vessel/asr/<video-id>/
-```
+## Operational validation
 
-Before inference, Vessel normalizes that temporary media to 16 kHz mono PCM WAV using FFmpeg.
+Useful checks:
 
-This makes the ASR input deterministic instead of depending on whichever codec container YouTube selected for best audio.
+~~~bash
+vessel doctor
+vessel asr doctor
+vessel update --preview --max-videos 3
+~~~
 
-If acquisition, transcoding, model loading, or inference fails, no Sourcearium artifact is changed.
+A real local-ASR acceptance run should use a release build and a bounded source/video selection.
 
-After successful Sourcearium materialization, the per-video ASR cache directory is deleted. Failed runs retain operational media for retry.
-
-## Model Acquisition
-
-The selected Whisper model may be downloaded by the ASR backend on first use and cached according to the backend's model-cache behavior.
-
-Model files are operational dependencies, not Sourcearium artifacts.
-
-## Model Lifetime
-
-Whisper is loaded lazily on the first video that actually needs local ASR.
-
-The loaded model is then reused for later ASR fallbacks in the same `vessel update` run. Channels fully covered by creator/platform captions never pay model-load cost.
-
-Inference remains on Tokio's blocking pool rather than the async runtime.
-
-## Future Acceleration
-
-GPU support may be added as an operational flag/configuration without changing Sourcearium artifact schema or transcript-provider semantics.
-
-CPU remains the portable baseline.
+The acceptance question is whether the external toolchain produces a valid Sourcearium candidate with
+correct provenance, not whether Vessel can reproduce the ML stack internally.

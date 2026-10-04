@@ -112,7 +112,7 @@ Prune never deletes because an upstream source disappeared, became private, or s
 
 ## Current Capabilities
 
-The pre-scope-reset implementation already includes reusable machinery for:
+Legacy/native machinery still exists during the replacement-first migration, including:
 
 - native YouTube video extraction
 - native channel extraction and backlog crawling
@@ -126,7 +126,8 @@ The pre-scope-reset implementation already includes reusable machinery for:
 - plugin infrastructure
 - native YouTube signature/cipher handling
 
-These capabilities are substrate, not the future product definition.
+These capabilities are migration substrate, not the target product definition. Superseded native
+implementations should be removed after their external replacements are proven.
 
 ## Development Philosophy
 
@@ -151,12 +152,19 @@ These capabilities are substrate, not the future product definition.
 Requirements:
 
 - Rust toolchain
-- `ffmpeg` for current media/postprocessing paths
+- `yt-dlp` for the default YouTube acquisition path
+- `ffmpeg` / `ffprobe` for media normalization and probing
+- `whisperx` when local ASR or diarization is required
+- `uv` is recommended for installing/isolating the Python toolchain
 
 ```bash
 cargo build --release --locked
+target/release/vessel doctor
 target/release/vessel --help
 ```
+
+The migration keeps `--youtube-backend native` and explicit legacy ASR backends temporarily for
+comparison/recovery. They are not the target architecture.
 
 ## Documentation
 
@@ -182,6 +190,7 @@ That work remains useful infrastructure, but the project north star is now:
 
 YouTube may allow channel discovery while bot-gating player requests, especially from hosted/cloud IP ranges.
 
-Vessel distinguishes this from parser failure and does not silently inject cookies, browser automation, PO-token providers, or yt-dlp fallback.
+Vessel distinguishes this from parser failure. yt-dlp is now the first-class acquisition backend for
+per-video metadata/captions/audio, and browser-cookie use remains explicit through Vessel configuration.
 
 See [YouTube Access Boundaries](docs/youtube-access.md).

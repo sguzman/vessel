@@ -52,7 +52,7 @@ use vessel_store::{init_sqlite_database, init_sqlite_database_path};
 #[command(
     name = "vessel",
     version,
-    about = "Rust-native media acquisition and Sourcearium text materialization"
+    about = "Media acquisition orchestration and Sourcearium text materialization"
 )]
 struct Cli {
     #[arg(long = "project", global = true)]
@@ -5747,7 +5747,10 @@ async fn doctor(
         },
         "binaries": {
             "ffmpeg": binary_available("ffmpeg"),
+            "ffprobe": binary_available("ffprobe"),
             "yt_dlp": binary_available("yt-dlp"),
+            "whisperx": binary_available("whisperx"),
+            "uv": binary_available("uv"),
         },
         "plugins": {
             "directories": plugin_dirs,

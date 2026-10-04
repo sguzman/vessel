@@ -52,6 +52,17 @@ Adopted target:
 Migration is replacement-first and deletion-second: prove each external adapter before retiring the
 legacy native path, then delete superseded duplicate machinery rather than maintaining parallel stacks.
 
+Current migration state:
+
+- yt-dlp adapter implemented;
+- `vessel update` defaults to yt-dlp for per-video metadata/caption discovery;
+- ASR audio acquisition uses yt-dlp on the default YouTube path;
+- WhisperX is the default local-ASR backend;
+- WhisperX is the default diarization backend;
+- native channel crawl/backlog remains temporarily active until the yt-dlp channel-discovery replacement
+  preserves the required reconciliation semantics;
+- native download/ASR/diarization code remains temporarily available for migration comparison/recovery.
+
 See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
 
 ## New Priority Order
@@ -190,17 +201,19 @@ Provider precedence:
 
 ## Milestone 16: Local ASR
 
-Status: **In Progress**
+Status: **In Progress — external-tool migration active**
 
 Implemented:
 
-- dedicated `vessel-asr` crate
-- pure-Rust `whisper-candle-core` backend
-- CPU-first default
-- multilingual `small` default model
+- dedicated `vessel-asr` adapter boundary
+- WhisperX subprocess backend
+- WhisperX `large-v3` as the default local-ASR path
+- WhisperX as the default optional diarization path
 - ASR result normalization into `TranscriptCandidate`
 - engine/model provenance for Sourcearium v1
-- backend kept outside Sourcearium and YouTube-specific layers
+- yt-dlp acquisition of best audio for the default update path
+- FFmpeg normalization to 16 kHz mono PCM WAV
+- legacy `whisper-candle`, Phonon-2, and Sherpa paths retained temporarily during cutover
 
 Implemented additionally:
 
