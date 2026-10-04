@@ -7994,7 +7994,7 @@ note = "cohort only"
         let Commands::Update(args) = cli.command else {
             panic!("expected update command");
         };
-        let error = reject_retired_speaker_controls(&args)
+        let error = super::reject_retired_speaker_controls(&args)
             .expect_err("speaker embedding controls must be retired");
         assert!(error.to_string().contains("retired from active Vessel"));
     }
