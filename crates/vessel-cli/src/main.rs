@@ -127,28 +127,6 @@ struct UpdateArgs {
     asr_language: Option<String>,
     #[arg(long)]
     diarize: bool,
-    #[arg(long = "diarization-backend", default_value = "whisperx")]
-    diarization_backend: String,
-    #[arg(long = "diarization-segmentation-model")]
-    diarization_segmentation_model: Option<PathBuf>,
-    #[arg(long = "diarization-embedding-model")]
-    diarization_embedding_model: Option<PathBuf>,
-    #[arg(long = "diarization-runtime-dir")]
-    diarization_runtime_dir: Option<PathBuf>,
-    #[arg(long = "diarization-provider", default_value = "cpu")]
-    diarization_provider: String,
-    #[arg(long = "diarization-num-threads", default_value_t = 4)]
-    diarization_num_threads: i32,
-    #[arg(
-        long = "diarization-clustering-threshold",
-        default_value_t = DEFAULT_CLUSTERING_THRESHOLD
-    )]
-    diarization_clustering_threshold: f32,
-    #[arg(
-        long = "diarization-window-shift-ratio",
-        default_value_t = DEFAULT_WINDOW_SHIFT_RATIO
-    )]
-    diarization_window_shift_ratio: f32,
     #[arg(long = "diarization-model")]
     diarization_model: Option<String>,
     #[arg(long = "min-speakers")]
@@ -2441,7 +2419,6 @@ fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
 
 async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
     let asr_config = resolve_asr_config(&args);
-    let diarization_config = resolve_diarization_config(&args)?;
     let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
         args.sourcearium.clone()
@@ -2463,7 +2440,6 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
         .join("vessel.sqlite");
     let (operational_store, _) = init_sqlite_database_path(&operational_db_path).await?;
     let mut asr_backend: Option<LoadedAsrBackend> = None;
-    let mut diarization_backend: Option<SherpaOnnxDiarizer> = None;
     let mut source_reports = Vec::new();
     let mut remote_videos_processed = 0usize;
     let mut limit_reached = false;
@@ -3013,9 +2989,6 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                             "executable": &asr_config.executable,
                             "device": &asr_config.device,
                             "diarize": args.diarize,
-                            "diarization_backend": &args.diarization_backend,
-                            "diarization_segmentation_model": &args.diarization_segmentation_model,
-                            "diarization_embedding_model": &args.diarization_embedding_model,
                             "caption_probe": caption_probe,
                         }),
                     );
@@ -3067,72 +3040,6 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                 );
                 continue;
             };
-
-            if let Some(config) = diarization_config.as_ref() {
-                if let Some(cache_dir) = asr_cache_dir.as_ref() {
-                    increment_summary(&mut summary, "diarization_attempted", 1);
-                    let wav = cache_dir.join("whisper-input.wav");
-                    match acquire_local_diarization(&wav, diarization_backend.take(), config).await
-                    {
-                        Ok((result, backend)) => {
-                            diarization_backend = Some(backend);
-                            if let Err(error) = result.apply_to_candidate(&mut candidate) {
-                                push_update_error(&mut summary, &video.video_id, error);
-                                continue;
-                            }
-                            let evidence =
-                                match result.to_speaker_evidence(&video.video_id, &candidate) {
-                                    Ok(evidence) => evidence,
-                                    Err(error) => {
-                                        push_update_error(&mut summary, &video.video_id, error);
-                                        continue;
-                                    }
-                                };
-                            let evidence_dir = sourcearium_root
-                                .join(".cache")
-                                .join("vessel")
-                                .join("speaker-evidence");
-                            match persist_speaker_evidence(&evidence_dir, &evidence) {
-                                Ok(path) => {
-                                    increment_summary(&mut summary, "diarization_completed", 1);
-                                    push_update_item(
-                                        &mut summary,
-                                        report_items,
-                                        &video.video_id,
-                                        "diarized",
-                                        serde_json::json!({
-                                            "backend": result.engine,
-                                            "model": result.model,
-                                            "segments": result.segments.len(),
-                                            "speaker_embeddings": result.speaker_embeddings.len(),
-                                            "evidence": path,
-                                        }),
-                                    );
-                                }
-                                Err(error) => {
-                                    push_update_error(&mut summary, &video.video_id, error);
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            push_update_error(&mut summary, &video.video_id, error);
-                            continue;
-                        }
-                    }
-                } else {
-                    increment_summary(&mut summary, "diarization_skipped", 1);
-                    push_update_item(
-                        &mut summary,
-                        report_items,
-                        &video.video_id,
-                        "diarization_skipped",
-                        serde_json::json!({
-                            "reason": "Rust-native diarization currently runs on the normalized local-ASR audio path; caption-backed audio preparation is not wired yet",
-                        }),
-                    );
-                }
-            }
 
             if args.preview {
                 let existing_derivation = existing
@@ -3262,15 +3169,9 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
         "local_asr_implemented": true,
         "diarization": {
             "enabled": args.diarize,
-            "backend": args.diarization_backend,
-            "segmentation_model": args.diarization_segmentation_model,
-            "embedding_model": args.diarization_embedding_model,
-            "runtime_dir": args.diarization_runtime_dir,
-            "runtime_loading": "dynamic_at_execution",
-            "build_time_fetch": false,
-            "provider": args.diarization_provider,
-            "num_threads": args.diarization_num_threads,
-            "backend_loaded": diarization_backend.is_some(),
+            "backend": "whisperx/pyannote",
+            "model": asr_config.diarization_model,
+            "scope": "local_asr",
         },
         "asr": {
             "engine": asr_config.backend,
@@ -3341,77 +3242,6 @@ fn transcript_upgrade_probe_due(
     elapsed_seconds >= 0 && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
 }
 
-fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationConfig>> {
-    if !args.diarize || args.diarization_backend == "whisperx" {
-        return Ok(None);
-    }
-    if args.diarization_backend != SHERPA_ONNX_BACKEND_NAME {
-        return Err(VesselError::Config(format!(
-            "unsupported diarization backend {:?}",
-            args.diarization_backend
-        )));
-    }
-
-    let default_root = default_diarization_model_root();
-    let (default_segmentation, default_embedding) = sherpa_model_paths(&default_root);
-    let runtime_root = args
-        .diarization_runtime_dir
-        .clone()
-        .unwrap_or_else(default_diarization_runtime_root);
-    let runtime_library = find_sherpa_runtime_library(&runtime_root).map_err(|_| {
-        VesselError::Config(format!(
-            "sherpa-onnx runtime is missing; run vessel diarization fetch or pass --diarization-runtime-dir explicitly (expected default under {})",
-            runtime_root.display()
-        ))
-    })?;
-    let segmentation_model = args
-        .diarization_segmentation_model
-        .clone()
-        .unwrap_or(default_segmentation);
-    let embedding_model = args
-        .diarization_embedding_model
-        .clone()
-        .unwrap_or(default_embedding);
-    if !segmentation_model.is_file() || !embedding_model.is_file() {
-        return Err(VesselError::Config(format!(
-            "sherpa-onnx diarization models are missing; run vessel diarization fetch or pass --diarization-segmentation-model and --diarization-embedding-model explicitly (expected defaults under {})",
-            default_root.display()
-        )));
-    }
-
-    let num_speakers = match (args.min_speakers, args.max_speakers) {
-        (None, None) => None,
-        (Some(min), Some(max)) if min == max => Some(min),
-        (Some(_), Some(_)) => {
-            return Err(VesselError::Config(
-                "sherpa-onnx currently accepts an exact speaker count; set --min-speakers and --max-speakers to the same value, or omit both".into(),
-            ));
-        }
-        _ => {
-            return Err(VesselError::Config(
-                "sherpa-onnx speaker-count hints require both --min-speakers and --max-speakers with the same value".into(),
-            ));
-        }
-    };
-
-    let config = DiarizationConfig {
-        backend: SHERPA_ONNX_BACKEND_NAME.into(),
-        runtime_library,
-        segmentation_model,
-        embedding_model,
-        provider: args.diarization_provider.clone(),
-        num_threads: args.diarization_num_threads,
-        num_speakers,
-        clustering_threshold: args.diarization_clustering_threshold,
-        window_shift_ratio: args.diarization_window_shift_ratio,
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
-        speaker_embeddings: false,
-    };
-    config.validate()?;
-    Ok(Some(config))
-}
-
 fn update_yt_dlp_config(args: &UpdateArgs, config: &Config) -> YtDlpConfig {
     YtDlpConfig::new(
         args.yt_dlp_executable.clone(),
@@ -3469,7 +3299,7 @@ fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     if let Some(language) = args.asr_language.as_deref() {
         config.language = Some(language.to_owned());
     }
-    config.diarize = args.diarize && args.diarization_backend == "whisperx";
+    config.diarize = args.diarize;
     if let Some(model) = args.diarization_model.as_deref() {
         config.diarization_model = model.to_owned();
     }
@@ -5931,7 +5761,6 @@ mod tests {
         };
         assert_eq!(args.yt_dlp_executable, PathBuf::from("yt-dlp"));
         assert!(Cli::try_parse_from(["vessel", "update", "--youtube-backend", "native"]).is_err());
-        assert_eq!(args.diarization_backend, "whisperx");
         let asr = resolve_asr_config(&args);
         assert_eq!(asr.backend, vessel_asr::WHISPERX_BACKEND_NAME);
         assert_eq!(asr.model, "large-v3");
@@ -5952,14 +5781,6 @@ mod tests {
             asr_device: Some("cpu".into()),
             asr_language: Some("es".into()),
             diarize: true,
-            diarization_backend: "sherpa-onnx".into(),
-            diarization_segmentation_model: None,
-            diarization_embedding_model: None,
-            diarization_runtime_dir: None,
-            diarization_provider: "cpu".into(),
-            diarization_num_threads: 4,
-            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: Some("example/diarizer".into()),
             min_speakers: Some(1),
             max_speakers: Some(3),
@@ -6004,14 +5825,6 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: false,
-            diarization_backend: "sherpa-onnx".into(),
-            diarization_segmentation_model: None,
-            diarization_embedding_model: None,
-            diarization_runtime_dir: None,
-            diarization_provider: "cpu".into(),
-            diarization_num_threads: 4,
-            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -6040,14 +5853,6 @@ mod tests {
             asr_device: None,
             asr_language: None,
             diarize: true,
-            diarization_backend: "whisperx".into(),
-            diarization_segmentation_model: None,
-            diarization_embedding_model: None,
-            diarization_runtime_dir: None,
-            diarization_provider: "cpu".into(),
-            diarization_num_threads: 4,
-            diarization_clustering_threshold: DEFAULT_CLUSTERING_THRESHOLD,
-            diarization_window_shift_ratio: DEFAULT_WINDOW_SHIFT_RATIO,
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
@@ -6091,75 +5896,6 @@ mod tests {
         assert!(args.force_local_asr);
         assert_eq!(args.video_ids, vec!["video-1"]);
         assert_eq!(args.max_videos, Some(1));
-    }
-
-    #[test]
-    fn rust_diarization_config_is_independent_from_asr_backend() {
-        let root =
-            std::env::temp_dir().join(format!("vessel-diarization-config-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("temp model dir");
-        let segmentation = root.join("segmentation.onnx");
-        let embedding = root.join("embedding.onnx");
-        let runtime = root.join(if cfg!(target_os = "windows") {
-            "sherpa-onnx-c-api.dll"
-        } else if cfg!(target_os = "macos") {
-            "libsherpa-onnx-c-api.dylib"
-        } else {
-            "libsherpa-onnx-c-api.so"
-        });
-        fs::write(&segmentation, b"model").expect("segmentation model");
-        fs::write(&embedding, b"model").expect("embedding model");
-        fs::write(&runtime, b"runtime").expect("runtime library");
-
-        let args = UpdateArgs {
-            sourcearium: PathBuf::from("."),
-            max_videos: None,
-            video_ids: Vec::new(),
-            yt_dlp_executable: PathBuf::from("yt-dlp"),
-            force_local_asr: false,
-            asr_backend: Some("phonon-2".into()),
-            asr_model: None,
-            asr_model_dir: None,
-            asr_executable: None,
-            asr_device: None,
-            asr_language: Some("en".into()),
-            diarize: true,
-            diarization_backend: "sherpa-onnx".into(),
-            diarization_segmentation_model: Some(segmentation.clone()),
-            diarization_embedding_model: Some(embedding.clone()),
-            diarization_runtime_dir: Some(root.clone()),
-            diarization_provider: "cpu".into(),
-            diarization_num_threads: 6,
-            diarization_clustering_threshold: 0.57,
-            diarization_window_shift_ratio: 0.12,
-            diarization_model: None,
-            min_speakers: Some(2),
-            max_speakers: Some(2),
-            hf_token_env: "HF_TOKEN".into(),
-            upgrade_check_days: 30,
-            report_items: false,
-            preview: false,
-        };
-
-        let asr = resolve_asr_config(&args);
-        assert_eq!(asr.backend, "phonon-2");
-        assert!(!asr.diarize);
-        let diarization = resolve_diarization_config(&args)
-            .expect("resolve diarization")
-            .expect("configured");
-        assert_eq!(diarization.backend, "sherpa-onnx");
-        assert_eq!(diarization.runtime_library, runtime);
-        assert_eq!(diarization.segmentation_model, segmentation);
-        assert_eq!(diarization.embedding_model, embedding);
-        assert_eq!(diarization.provider, "cpu");
-        assert_eq!(diarization.num_threads, 6);
-        assert_eq!(diarization.num_speakers, Some(2));
-        assert_eq!(diarization.clustering_threshold, 0.57);
-        assert_eq!(diarization.window_shift_ratio, 0.12);
-        assert!(!diarization.speaker_embeddings);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
