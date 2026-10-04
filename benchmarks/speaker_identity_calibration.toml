@@ -53,6 +53,42 @@ identity_key = "guest:abigail_thorn"
 truth = "negative"
 note = "Known creator-positive cluster"
 
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_03"
+identity_key = "creator"
+truth = "positive"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_08"
+identity_key = "creator"
+truth = "positive"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_14"
+identity_key = "creator"
+truth = "positive"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_16"
+identity_key = "creator"
+truth = "positive"
+note = "Known creator-positive cluster"
+
+[[trials]]
+target_video_id = "jD-PbF3ywGo"
+target_cluster = "SPEAKER_32"
+identity_key = "creator"
+truth = "positive"
+note = "Known creator-positive cluster"
+
 [[trials]]
 target_video_id = "g5o-OpVUHF0"
 target_cluster = "*"
