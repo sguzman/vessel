@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::env;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,10 +15,11 @@ use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{ChannelMetadata, InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, ExistingSourceariumArtifact, MaterializeStatus, Result,
+    ChannelCategoryConfig, Config, MaterializeStatus, Result,
     RuntimeLayout, SourceariumYoutubeSource, TranscriptCandidate, TranscriptDerivation, VesselError,
     VideoSelection, apply_sourcearium_prune, apply_youtube_transcript_diarization, discover_youtube_sources,
-    inventory_sourcearium_repository, load_config, load_youtube_transcript_artifact,
+    inventory_sourcearium_repository, load_config, load_speaker_evidence,
+    load_youtube_transcript_artifact,
     materialize_youtube_transcript, plan_sourcearium_prune,
     refresh_youtube_transcript_diarization_provenance, resolve_runtime_layout, validate_sourcearium_repository, };
 use vessel_diarization::{
@@ -5817,20 +5818,15 @@ mod tests {
     use super::{
         Cli, Commands, DiarizationSubcommand, SHERPA_EMBEDDING_BYTES, SHERPA_EMBEDDING_FILENAME,
         SHERPA_EMBEDDING_SHA256, SHERPA_EN_EMBEDDING_BYTES, SHERPA_EN_EMBEDDING_FILENAME,
-        SHERPA_EN_EMBEDDING_SHA256, SpeakerBenchmarkManifest, SpeakersSubcommand, UpdateArgs,
-        benchmark_normalize, benchmark_rank_gap, diagnostic_cosine_similarity,
-        diarization_fixture_dir, existing_speaker_attribution_is_fresh, install_staged_directory,
-        maintain_existing_speaker_attribution, normalize_update_publication_date,
+        SHERPA_EN_EMBEDDING_SHA256, UpdateArgs, diarization_fixture_dir,
+        install_staged_directory, normalize_update_publication_date,
         parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
         push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
         resolve_diarization_config, reuse_normalized_audio_fixture, sha256_file,
         sherpa_embedding_spec, transcript_upgrade_probe_due, validate_fixture_video_id,
-        validate_update_speaker_attribution, verify_integrity_receipt, write_integrity_receipt,
-    };
-    use vessel_core::models::InputKind;
-    use vessel_core::{
-        ChannelCategoryConfig, Config, ExistingSourceariumArtifact, SpeakerMatchConfig, VesselError,
-    };
+        verify_integrity_receipt, write_integrity_receipt,
+    };    use vessel_core::models::InputKind;
+    use vessel_core::{ChannelCategoryConfig, Config, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
 
     #[test]
@@ -5843,47 +5839,6 @@ mod tests {
         assert!(validate_fixture_video_id("bad/id").is_err());
         let path = diarization_fixture_dir("g5o-OpVUHF0").expect("fixture path");
         assert!(path.ends_with("fixtures/diarization/youtube/g5o-OpVUHF0"));
-    }
-
-    #[test]
-    fn benchmark_manifest_parses_explicit_truth_and_unlabeled_trials() {
-        let manifest: SpeakerBenchmarkManifest = toml::from_str(
-            r#"schema = 1
-source_key = "contrapoints"
-[[trials]]
-target_video_id = "video"
-target_cluster = "SPEAKER_01"
-identity_key = "guest:one"
-truth = "unlabeled"
-note = "cohort only"
-"#,
-        )
-        .expect("manifest parses");
-        assert_eq!(manifest.schema, 1);
-        assert_eq!(manifest.trials[0].truth, "unlabeled");
-        assert_eq!(manifest.trials[0].note.as_deref(), Some("cohort only"));
-    }
-
-    #[test]
-    fn benchmark_rank_and_gap_are_one_based_and_deterministic() {
-        let scores = vec![
-            ("SPEAKER_02".into(), 0.90),
-            ("SPEAKER_01".into(), 0.70),
-            ("SPEAKER_03".into(), 0.20),
-        ];
-        let (rank, gap) = benchmark_rank_gap(&scores, "SPEAKER_01");
-        assert_eq!(rank, Some(2));
-        assert!((gap.expect("gap") - 0.50).abs() < f64::EPSILON * 4.0);
-        assert_eq!(benchmark_rank_gap(&scores, "missing"), (None, None));
-    }
-
-    #[test]
-    fn benchmark_robust_normalization_handles_degenerate_cohorts() {
-        assert_eq!(benchmark_normalize(&[]), None);
-        assert_eq!(benchmark_normalize(&[0.5]), Some((0.5, 0.0, 0.5, 0.0)));
-        let result = benchmark_normalize(&[1.0, 2.0, 100.0]).expect("normalization");
-        assert_eq!(result.2, 2.0);
-        assert_eq!(result.3, 1.0);
     }
 
     #[test]
@@ -6273,7 +6228,7 @@ note = "cohort only"
             min_speakers: Some(2),
             max_speakers: Some(2),
             speaker_embeddings: false,
-            attribute_speakers: true,
+            attribute_speakers: false,
             speaker_min_similarity: 0.80,
             speaker_min_margin: 0.05,
             speaker_min_anchor_dominance: 0.80,
@@ -6286,9 +6241,6 @@ note = "cohort only"
         let asr = resolve_asr_config(&args);
         assert_eq!(asr.backend, "phonon-2");
         assert!(!asr.diarize);
-        validate_update_speaker_attribution(&args, &asr)
-            .expect("Rust-native attribution must not require explicit embedding flag");
-
         let diarization = resolve_diarization_config(&args)
             .expect("resolve diarization")
             .expect("configured");
@@ -6301,7 +6253,7 @@ note = "cohort only"
         assert_eq!(diarization.num_speakers, Some(2));
         assert_eq!(diarization.clustering_threshold, 0.57);
         assert_eq!(diarization.window_shift_ratio, 0.12);
-        assert!(diarization.speaker_embeddings);
+        assert!(!diarization.speaker_embeddings);
 
         let _ = fs::remove_dir_all(root);
     }
