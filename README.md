@@ -2,7 +2,7 @@
 
 **Project color:** Vessel Wake Teal `#16A7A0`
 
-Vessel is a Rust-native media acquisition and text-materialization engine for building durable research corpora.
+Vessel is a media acquisition and text-materialization orchestrator for building durable research corpora.
 
 Its primary job is no longer to chase `yt-dlp` feature parity or maintain metadata time series. The existing YouTube extractor, downloader, subtitle, comment, and SQLite machinery remains valuable, but future development is organized around:
 
@@ -130,8 +130,12 @@ These capabilities are substrate, not the future product definition.
 
 ## Development Philosophy
 
-- Rust-native strongly preferred.
-- No silent Python/`yt-dlp` fallback for supported native behavior.
+- Own Vessel-specific semantics; outsource mature specialized machinery.
+- Rust remains the implementation language for Vessel's control plane, not a mandate to reimplement external tools.
+- yt-dlp is the target first-class YouTube acquisition backend.
+- WhisperX/pyannote are the target heavy ASR/diarization toolchain.
+- FFmpeg/ffprobe remain external media plumbing.
+- Python tooling is acceptable behind an isolated subprocess boundary, preferably managed with uv.
 - Sourcearium schema v1 is an external frozen contract.
 - Preserve source / representation / acquisition provenance separately.
 - Operational state is replaceable; Sourcearium text is durable.
@@ -159,6 +163,7 @@ target/release/vessel --help
 - [Project Charter](docs/charter.md)
 - [Sourcearium Contract](docs/sourcearium-contract.md)
 - [Architecture](docs/architecture.md)
+- [Toolchain Migration Autopsy](docs/toolchain-migration-autopsy-2026-10-03.md)
 - [Roadmap](docs/roadmap.md)
 - [Storage Model](docs/storage.md)
 - [Capability Matrix](docs/parity-matrix.md)
