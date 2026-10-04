@@ -157,16 +157,6 @@ struct UpdateArgs {
     min_speakers: Option<usize>,
     #[arg(long = "max-speakers")]
     max_speakers: Option<usize>,
-    #[arg(long = "speaker-embeddings")]
-    speaker_embeddings: bool,
-    #[arg(long = "attribute-speakers")]
-    attribute_speakers: bool,
-    #[arg(long = "speaker-min-similarity", default_value_t = 0.80)]
-    speaker_min_similarity: f64,
-    #[arg(long = "speaker-min-margin", default_value_t = 0.05)]
-    speaker_min_margin: f64,
-    #[arg(long = "speaker-min-anchor-dominance", default_value_t = 0.80)]
-    speaker_min_anchor_dominance: f64,
     #[arg(long = "hf-token-env", default_value = "HF_TOKEN")]
     hf_token_env: String,
     #[arg(long = "upgrade-check-days", default_value_t = 30)]
@@ -2468,7 +2458,6 @@ fn absolute_sourcearium_root(path: PathBuf) -> Result<PathBuf> {
 
 async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
     validate_update_youtube_backend(&args)?;
-    reject_retired_speaker_controls(&args)?;
     let asr_config = resolve_asr_config(&args);
     let diarization_config = resolve_diarization_config(&args)?;
     let report_items = args.report_items || args.preview;
@@ -3301,10 +3290,6 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             "build_time_fetch": false,
             "provider": args.diarization_provider,
             "num_threads": args.diarization_num_threads,
-            "speaker_embeddings": diarization_config
-                .as_ref()
-                .map(|config| config.speaker_embeddings)
-                .unwrap_or(asr_config.speaker_embeddings),
             "backend_loaded": diarization_backend.is_some(),
         },
         "asr": {
@@ -3319,7 +3304,6 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             "diarization_model": asr_config.diarization_model,
             "min_speakers": asr_config.min_speakers,
             "max_speakers": asr_config.max_speakers,
-            "speaker_embeddings": asr_config.speaker_embeddings,
             "model_loaded": asr_backend.is_some(),
         },
     });
@@ -3375,15 +3359,6 @@ fn transcript_upgrade_probe_due(
         .unix_timestamp()
         .saturating_sub(last_probed_at.unix_timestamp());
     elapsed_seconds >= 0 && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
-}
-
-fn reject_retired_speaker_controls(args: &UpdateArgs) -> Result<()> {
-    if args.attribute_speakers || args.speaker_embeddings {
-        return Err(VesselError::Unsupported(
-            "named-speaker identity/embedding controls are retired from active Vessel; use --diarize with the WhisperX backend for anonymous speaker separation".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationConfig>> {
@@ -6087,11 +6062,6 @@ mod tests {
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
-            speaker_embeddings: false,
-            attribute_speakers: false,
-            speaker_min_similarity: 0.80,
-            speaker_min_margin: 0.05,
-            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -6129,11 +6099,6 @@ mod tests {
             diarization_model: None,
             min_speakers: None,
             max_speakers: None,
-            speaker_embeddings: false,
-            attribute_speakers: false,
-            speaker_min_similarity: 0.80,
-            speaker_min_margin: 0.05,
-            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
@@ -6146,19 +6111,17 @@ mod tests {
     }
 
     #[test]
-    fn retired_speaker_controls_are_rejected() {
-        let cli = Cli::try_parse_from([
-            "vessel",
-            "update",
-            "--speaker-embeddings",
-        ])
-        .expect("legacy flag still parses during migration");
-        let Commands::Update(args) = cli.command else {
-            panic!("expected update command");
-        };
-        let error = super::reject_retired_speaker_controls(&args)
-            .expect_err("speaker embedding controls must be retired");
-        assert!(error.to_string().contains("retired from active Vessel"));
+    fn named_speaker_update_flags_are_removed() {
+        assert!(
+            Cli::try_parse_from(["vessel", "update", "--attribute-speakers"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["vessel", "update", "--speaker-embeddings"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["vessel", "update", "--speaker-min-similarity", "0.9"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -6227,11 +6190,6 @@ mod tests {
             diarization_model: None,
             min_speakers: Some(2),
             max_speakers: Some(2),
-            speaker_embeddings: false,
-            attribute_speakers: false,
-            speaker_min_similarity: 0.80,
-            speaker_min_margin: 0.05,
-            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
