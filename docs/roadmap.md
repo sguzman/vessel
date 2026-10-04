@@ -59,8 +59,13 @@ Current migration state:
 - ASR audio acquisition uses yt-dlp on the default YouTube path;
 - WhisperX is the default local-ASR backend;
 - WhisperX is the default diarization backend;
-- native channel crawl/backlog remains temporarily active until the yt-dlp channel-discovery replacement
-  preserves the required reconciliation semantics;
+- yt-dlp now owns default channel discovery as well as per-video metadata/caption discovery and ASR
+  audio acquisition;
+- SQLite remains responsible for Vessel's durable operational backlog/reconcile state, while native
+  YouTube continuation tokens are legacy-only on `--youtube-backend native`;
+- WhisperX is the default local-ASR and optional diarization backend;
+- named-speaker identity controls are rejected by the active update path and the legacy `speakers`
+  command family is hidden/retired;
 - native download/ASR/diarization code remains temporarily available for migration comparison/recovery.
 
 See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).

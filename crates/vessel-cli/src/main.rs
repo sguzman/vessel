@@ -82,6 +82,7 @@ enum Commands {
     Project(ProjectCommand),
     Asr(AsrCommand),
     Diarization(DiarizationCommand),
+    #[command(hide = true)]
     Speakers(SpeakersCommand),
     Info(UrlArg),
     Formats(UrlArg),
@@ -783,19 +784,9 @@ async fn main() -> Result<()> {
             DiarizationSubcommand::Apply(args) => diarization_apply(args).await,
             DiarizationSubcommand::Reembed(args) => diarization_reembed(args),
         },
-        Commands::Speakers(cmd) => match cmd.command {
-            SpeakersSubcommand::Show(args) => speakers_show(args),
-            SpeakersSubcommand::Init(args) => speakers_init(args),
-            SpeakersSubcommand::Add(args) => speakers_add(args),
-            SpeakersSubcommand::Anchor(args) => speakers_anchor(args),
-            SpeakersSubcommand::AnchorCache(args) => speakers_anchor_cache(args),
-            SpeakersSubcommand::Benchmark(args) => speakers_benchmark(args),
-            SpeakersSubcommand::Match(args) => speakers_match(args),
-            SpeakersSubcommand::Diagnose(args) => speakers_diagnose(args),
-            SpeakersSubcommand::Status(args) => speakers_status(args),
-            SpeakersSubcommand::Apply(args) => speakers_apply(args),
-            SpeakersSubcommand::Render(args) => speakers_render(args),
-        },
+        Commands::Speakers(_) => Err(VesselError::Unsupported(
+            "named-speaker identity commands are retired from active Vessel; use anonymous WhisperX diarization when speaker separation is required".into(),
+        )),
         Commands::Info(arg) => extract_preview(arg.url, InputKind::Url, &paths, &layout).await,
         Commands::Formats(arg) => formats(arg.url).await,
         Commands::Download(args) => download(args, &layout).await,
@@ -4080,6 +4071,7 @@ fn maintain_existing_speaker_attribution(
 
 async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
     validate_update_youtube_backend(&args)?;
+    reject_retired_speaker_controls(&args)?;
     let asr_config = resolve_asr_config(&args);
     validate_update_speaker_attribution(&args, &asr_config)?;
     let diarization_config = resolve_diarization_config(&args)?;
@@ -5159,6 +5151,15 @@ fn transcript_upgrade_probe_due(
         .unix_timestamp()
         .saturating_sub(last_probed_at.unix_timestamp());
     elapsed_seconds >= 0 && (elapsed_seconds as u64) >= interval_days.saturating_mul(86_400)
+}
+
+fn reject_retired_speaker_controls(args: &UpdateArgs) -> Result<()> {
+    if args.attribute_speakers || args.speaker_embeddings {
+        return Err(VesselError::Unsupported(
+            "named-speaker identity/embedding controls are retired from active Vessel; use --diarize with the WhisperX backend for anonymous speaker separation".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_update_speaker_attribution(args: &UpdateArgs, config: &AsrConfig) -> Result<()> {
@@ -7980,6 +7981,22 @@ note = "cohort only"
         assert_eq!(config.backend, "whisperx");
         assert_eq!(config.model, "large-v3");
         assert!(config.diarize);
+    }
+
+    #[test]
+    fn retired_speaker_controls_are_rejected() {
+        let cli = Cli::try_parse_from([
+            "vessel",
+            "update",
+            "--speaker-embeddings",
+        ])
+        .expect("legacy flag still parses during migration");
+        let Commands::Update(args) = cli.command else {
+            panic!("expected update command");
+        };
+        let error = reject_retired_speaker_controls(&args)
+            .expect_err("speaker embedding controls must be retired");
+        assert!(error.to_string().contains("retired from active Vessel"));
     }
 
     #[test]
