@@ -1,6 +1,8 @@
 # Vessel Toolchain Migration Autopsy
 
-**Status:** adopted migration direction  
+> **Completion:** The migration described below is complete. yt-dlp, FFmpeg, and WhisperX now own the external machinery; the superseded native YouTube/download/format/postprocess/Whisper/Sherpa and named-speaker stacks were deleted. The maintained CLI is the Sourcearium reconcile surface only.
+
+**Status:** completed 2026-10-03/04  
 **Date:** 2026-10-03
 
 ## Executive conclusion

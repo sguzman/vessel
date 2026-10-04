@@ -1,177 +1,107 @@
 # Architecture
 
-## Architectural North Star
+## North Star
 
-Vessel is an acquisition/materialization engine, not the canonical research archive.
-
-The architecture is split into two state domains:
+Vessel is the durable control plane between upstream media and Sourcearium.
 
 ```text
-upstream media
-    |
-    v
-Vessel acquisition engine
-    |
-    +-- operational cache / SQLite / temporary media
-    |
-    v
-external corpus repository
-    |
-    +-- durable text
-    +-- timestamps
-    +-- provenance
-    +-- Git history
+Sourcearium policy
+      |
+      v
+    Vessel
+      |
+      +---------- yt-dlp ---------- YouTube
+      |
+      +---------- FFmpeg ---------- media normalization
+      |
+      +---------- WhisperX -------- ASR / optional diarization
+      |
+      v
+normalized TranscriptCandidate
+      |
+      v
+policy + provenance + reconcile + validation
+      |
+      v
+Sourcearium schema v1
 ```
 
-The corpus must remain useful without Vessel running.
+## Owned Semantics
 
-## Core Pipeline
+Vessel owns:
 
-A corpus update is modeled as:
+1. source-policy parsing;
+2. include/exclude/date selection;
+3. transcript precedence;
+4. operational SQLite reconciliation state;
+5. normalized transcript and provenance structures;
+6. create/preserve/upgrade/no-op decisions;
+7. deterministic Sourcearium serialization;
+8. validation and atomic materialization;
+9. explicit prune semantics.
 
-1. **Discover** candidate upstream objects.
-2. **Select** candidates using declarative policy.
-3. **Resolve text** using the preferred transcript providers.
-4. **Acquire media** only if text cannot otherwise be obtained.
-5. **Transcribe** locally when required.
-6. **Normalize** text and timestamp structure.
-7. **Materialize** durable Git-friendly artifacts.
-8. **Record operational state** outside the durable artifact unless it is meaningful provenance.
+## External Adapters
 
-This is a desired-state reconcile loop, not a metadata polling loop.
+### YouTube
+
+`vessel-extractors::youtube::YtDlpConfig` is the canonical YouTube boundary. Vessel consumes yt-dlp JSON and uses yt-dlp for temporary ASR audio acquisition.
+
+There is no native watch-page/InnerTube/signature/cipher implementation.
+
+### ASR
+
+`vessel-asr` is an executable adapter layer, not an inference library.
+
+- WhisperX is the default heavy backend.
+- Phonon-2 is an optional lightweight English QA backend.
+- WhisperX may invoke pyannote when anonymous diarization is requested.
+
+### Media
+
+FFmpeg performs the only media normalization needed by the update path: converting acquired audio to 16 kHz mono PCM WAV for ASR.
 
 ## Transcript Provider Chain
 
-The default provider chain is:
-
 ```text
-Creator subtitles
+creator subtitles
       |
-      v
-Platform automatic captions
+platform automatic captions
       |
-      v
-Local ASR
+local ASR
 ```
 
-Provider choice and provenance are separate concepts. Even when all providers normalize to the same internal transcript structure, the emitted artifact must retain which provider produced it.
-
-## Workspace Map
-
-Existing crates remain useful:
-
-- `vessel-cli`: user-facing CLI and command wiring
-- `vessel-core`: config, errors, events, normalized metadata
-- `vessel-extractors`: source discovery and site-specific extraction
-- `vessel-ledger`: idempotency and operational decisions
-- `vessel-store`: local SQLite/cache persistence
-- `vessel-logging`: tracing/log formatting
-- `vessel-formats`: media format selection
-- `vessel-download`: media acquisition
-- `vessel-postprocess`: FFmpeg-backed media transformations
-- `vessel-testing`: shared test fixtures
-
-Future corpus work should introduce boundaries rather than overload existing crates:
-
-- transcript-provider abstraction
-- local ASR backend abstraction
-- corpus policy parser/evaluator
-- corpus materializer/exporter
-
-Exact crate names are implementation decisions, not charter-level commitments.
+A stronger representation may replace a weaker one. A weaker representation never automatically downgrades a stronger existing artifact.
 
 ## State Authority
 
-### Durable authority
+Sourcearium is authoritative for durable acquired text.
 
-The external corpus repository is authoritative for acquired research text.
+SQLite/cache state is operational and replaceable. It may contain discovery membership, publication facts, transcript probe times, and other reconciliation bookkeeping. Losing it must not invalidate already materialized corpus artifacts.
 
-It should contain ordinary inspectable files and provenance.
+## Workspace
 
-### Operational authority
+Maintained crates:
 
-Vessel may use SQLite and caches for:
+- `vessel-cli`: small product CLI and reconcile orchestration;
+- `vessel-core`: Sourcearium policy, models, transcript semantics, validation/materialization;
+- `vessel-extractors`: external acquisition adapters and caption normalization;
+- `vessel-asr`: external ASR adapters;
+- `vessel-store`: SQLite operational state;
+- `vessel-ledger`: store/idempotency support;
+- `vessel-logging`: logging;
+- `vessel-testing`: shared testing utilities.
 
-- discovered source identities
-- pagination/cursors
-- fetch attempts
-- local acquisition state
-- content hashes
-- materialization bookkeeping
-- temporary media paths
-- error/retry information
+The retired `vessel-diarization`, `vessel-download`, `vessel-formats`, and `vessel-postprocess` crates are deleted.
 
-Operational state may be deleted and rebuilt without invalidating the corpus.
+## Acceptance Boundary
 
-## Selection Policy
+CI protects the migration by:
 
-Selection policy belongs with the corpus or a user-controlled project configuration.
-
-Initial policy should remain deliberately small:
-
-- source/channel
-- publication date cutoff
-- explicit include identifiers
-- explicit exclude identifiers
-
-Do not begin by building a query language.
-
-More expressive rules can be added only when real corpus use demonstrates the need.
-
-## Materialization Contract
-
-A materialized transcript should support:
-
-- stable upstream identifier
-- source URL
-- source/channel identity
-- title
-- publication date when known
-- language
-- transcript provenance class
-- ASR engine/model when applicable
-- timestamped segments when available
-- normalized readable text
-
-The durable format should be Git-friendly and human-readable. Markdown with structured front matter is the baseline design candidate.
-
-## Update And Prune
-
-`vessel update` should converge toward the desired corpus set without destroying previously acquired material.
-
-If existing material falls outside current policy:
-
-- leave it in place during update
-- report it as no longer selected when useful
-- remove it only through an explicit prune operation
-
-## Runtime And Toolchain Policy
-
-Vessel owns policy, reconciliation, provenance, validation, and materialization.
-
-Mature external tools should own volatile or specialized machinery when a stable process boundary exists.
-
-Target runtime boundaries:
-
-- yt-dlp for YouTube discovery, metadata, captions, format selection, and media acquisition
-- FFmpeg/ffprobe for media normalization and probing
-- WhisperX for heavy ASR, alignment, and optional diarization
-- pyannote as the diarization implementation underneath the external toolchain where applicable
-- Phonon-2 only where its lightweight QA role remains materially useful
-- uv for isolated Python tool environments
-
-Python is acceptable behind an explicit subprocess boundary. Vessel should consume structured output and
-record tool/model provenance rather than embedding ML implementation details into the core architecture.
-
-Rust remains appropriate for Vessel's durable control plane, but implementation language is not a product
-goal.
+- rejecting retired native machinery;
+- testing the full workspace on Linux;
+- compiling/testing durable layers on Windows;
+- running a deterministic end-to-end `update --preview` test with a fake yt-dlp executable;
+- checking the reduced CLI and offline doctor behavior;
+- checking formatting.
 
 See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
-
-## Source Extensibility
-
-Vessel is media-oriented.
-
-The external corpus can be heterogeneous. That does not imply Vessel itself must ingest every textual source type.
-
-For example, tweets may belong in the same corpus as YouTube transcripts while being populated by an entirely different acquisition tool. The shared contract is provenance-preserving text, not a single universal scraper.

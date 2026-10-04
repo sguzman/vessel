@@ -2,195 +2,106 @@
 
 **Project color:** Vessel Wake Teal `#16A7A0`
 
-Vessel is a media acquisition and text-materialization orchestrator for building durable research corpora.
+Vessel is a small Rust control plane for maintaining media-derived research text in Sourcearium.
 
-Its primary job is no longer to chase `yt-dlp` feature parity or maintain metadata time series. The existing YouTube extractor, downloader, subtitle, comment, and SQLite machinery remains valuable, but future development is organized around:
+Its governing rule is:
 
-```text
-discover -> select -> materialize text -> preserve provenance
-```
+> **Own the semantics; outsource the machinery.**
 
-The intended steady-state workflow is:
+The steady-state loop is:
 
 ```bash
-vessel inventory
-vessel validate
-vessel update
+vessel inventory --sourcearium /path/to/sourcearium
+vessel validate --sourcearium /path/to/sourcearium
+vessel update --sourcearium /path/to/sourcearium
 ```
 
-Before materializing a newly configured source, use preview mode:
+Use preview for bounded inspection:
 
 ```bash
-vessel update --preview --max-videos 3
+vessel update --sourcearium /path/to/sourcearium --preview --max-videos 3 --report-items
 ```
 
-Preview performs real discovery and caption probing but does not write Sourcearium artifacts or run local ASR. It may warm disposable operational state under `.cache/vessel/`.
-
-For diagnostic runs:
+Destructive cleanup is explicit:
 
 ```bash
-vessel update --max-videos 3 --report-items
+vessel prune --sourcearium /path/to/sourcearium
+vessel prune --sourcearium /path/to/sourcearium --apply
 ```
 
-`--report-items` adds per-video decision traces without changing materialization semantics.
+## Architecture
 
-Vessel now targets **Sourcearium artifact schema v1** for durable corpus output.
+Vessel owns:
 
-See [Sourcearium Contract](docs/sourcearium-contract.md).
+- declarative source policy and selection;
+- transcript precedence: creator subtitles > platform auto captions > local ASR;
+- Sourcearium schema mapping and provenance;
+- idempotent reconciliation and representation upgrades;
+- validation, deterministic serialization, and atomic materialization;
+- SQLite operational state needed to make repeated updates reliable.
 
-## Primary Objective
+External tools own specialized machinery:
 
-Given declarative source policy, Vessel should:
+- **yt-dlp**: YouTube discovery, metadata, subtitle metadata, and temporary audio acquisition;
+- **FFmpeg/ffprobe**: media normalization and probing;
+- **WhisperX/faster-whisper**: heavy local ASR;
+- **pyannote through WhisperX**: optional anonymous diarization;
+- **Phonon-2**: optional lightweight English QA ASR.
 
-- discover selected media
-- prefer creator subtitles
-- fall back to platform automatic captions
-- fall back to local ASR when necessary
-- validate and materialize stable Sourcearium text artifacts
-- avoid rewriting durable output when nothing meaningful changed
+There is no maintained native YouTube protocol stack, native downloader/format selector, bespoke Whisper inference implementation, bespoke diarization implementation, or named-speaker identity system.
 
-Media downloads and operational metadata are supporting machinery.
+## Public CLI
 
-## Separation Of Responsibilities
+The maintained product surface is deliberately small:
 
-```text
-Vessel
-  - discovers upstream media
-  - applies selection policy
-  - acquires captions or temporary media
-  - transcribes when required
-  - validates/materializes Sourcearium artifacts
-  - keeps operational cache/state
+- `vessel doctor`
+- `vessel update`
+- `vessel validate`
+- `vessel inventory`
+- `vessel prune`
 
-Sourcearium
-  - owns artifact schema
-  - owns durable research text
-  - owns provenance semantics
-  - is Git-versioned
-  - may contain material from producers other than Vessel
-```
+The old dataset/channel/video/download/formats/plugin/ASR/diarization command families were migration-era machinery and are retired.
 
-## Transcript Preference
+## Local ASR
 
-Default order:
-
-1. creator-provided subtitles
-2. platform automatic captions
-3. local ASR
-
-A stronger representation may replace a weaker one for the same Sourcearium artifact identity.
-
-A weaker representation must not automatically downgrade an existing artifact.
-
-Local ASR is CPU-first by default. GPU acceleration is optional.
-
-## Update Semantics
-
-`vessel update` is intended to be a non-destructive reconcile operation.
-
-Normal update:
-
-- discovers the desired media set
-- persists disposable crawl/backlog state outside the corpus
-- materializes missing text
-- improves an artifact when a stronger representation becomes available
-- throttles weaker-transcript upgrade probes operationally
-- produces no durable diff on a no-op refresh
-- avoids metadata-only transcript churn
-- never deletes already acquired text merely because policy narrowed or upstream disappeared
-
-Destructive cleanup is explicit and offline:
+Default local ASR is WhisperX with `large-v3` on CPU unless overridden.
 
 ```bash
-vessel prune
-vessel prune --apply
+vessel update --force-local-asr
+vessel update --force-local-asr --asr-device cuda
+vessel update --force-local-asr --diarize
 ```
 
-Bare `vessel prune` only prints a plan. Deletion requires `--apply`.
+Diarization preserves only file-local labels such as `SPEAKER_00`. Vessel does not attempt cross-video speaker identity.
 
-Prune never deletes because an upstream source disappeared, became private, or stopped resolving. It only targets artifacts locally proven outside current Sourcearium policy by explicit exclusion or a known publication date before the configured cutoff.
+## Dependencies
 
-## Current Capabilities
-
-Legacy/native machinery still exists during the replacement-first migration, including:
-
-- native YouTube video extraction
-- native channel extraction and backlog crawling
-- channel-scoped sync
-- SQLite storage
-- subtitles and automatic-caption metadata
-- comments and thumbnails
-- native downloads
-- format selection
-- FFmpeg-backed postprocessing
-- plugin infrastructure
-- native YouTube signature/cipher handling
-
-These capabilities are migration substrate, not the target product definition. Superseded native
-implementations should be removed after their external replacements are proven.
-
-## Development Philosophy
-
-- Own Vessel-specific semantics; outsource mature specialized machinery.
-- Rust remains the implementation language for Vessel's control plane, not a mandate to reimplement external tools.
-- yt-dlp is the target first-class YouTube acquisition backend.
-- WhisperX/pyannote are the target heavy ASR/diarization toolchain.
-- FFmpeg/ffprobe remain external media plumbing.
-- Python tooling is acceptable behind an isolated subprocess boundary, preferably managed with uv.
-- Sourcearium schema v1 is an external frozen contract.
-- Preserve source / representation / acquisition provenance separately.
-- Operational state is replaceable; Sourcearium text is durable.
-- Serialize Sourcearium output deterministically.
-- Validate before writing.
-- Replace durable artifacts atomically.
-- Avoid Git churn from refresh telemetry.
-- Normal update is non-destructive.
-- Optimize for a boring one-command maintenance loop.
-
-## Build
-
-Requirements:
+Required for the relevant paths:
 
 - Rust toolchain
-- `yt-dlp` for the default YouTube acquisition path
-- `ffmpeg` / `ffprobe` for media normalization and probing
-- `whisperx` when local ASR or diarization is required
-- `uv` is recommended for installing/isolating the Python toolchain
+- `yt-dlp`
+- `ffmpeg` / `ffprobe`
+- `whisperx` when local ASR or diarization is needed
+- `uv` recommended for isolating the Python toolchain
+- `fermion` only if the optional Phonon-2 backend is used
 
 ```bash
 cargo build --release --locked
 target/release/vessel doctor
-target/release/vessel --help
 ```
 
-The migration keeps `--youtube-backend native` and explicit legacy ASR backends temporarily for
-comparison/recovery. They are not the target architecture.
+## Sourcearium
 
-## Documentation
+Sourcearium schema v1 is an external frozen contract. Vessel must preserve source, representation, and acquisition provenance separately and must not invent new v1 core fields.
+
+Normal `update` is conservative and non-destructive. It may create a missing artifact or upgrade a weaker representation, but it does not delete existing corpus material merely because upstream state or policy changed.
+
+See:
 
 - [Project Charter](docs/charter.md)
-- [Sourcearium Contract](docs/sourcearium-contract.md)
 - [Architecture](docs/architecture.md)
-- [Toolchain Migration Autopsy](docs/toolchain-migration-autopsy-2026-10-03.md)
+- [Sourcearium Contract](docs/sourcearium-contract.md)
+- [ASR](docs/asr.md)
+- [Speaker Diarization Boundary](docs/speaker-attribution.md)
+- [Migration Autopsy](docs/toolchain-migration-autopsy-2026-10-03.md)
 - [Roadmap](docs/roadmap.md)
-- [Storage Model](docs/storage.md)
-- [Capability Matrix](docs/parity-matrix.md)
-- [Session Guide](docs/session-guide.md)
-
-## Historical Note
-
-Vessel began as a Rust-native, replacement-oriented `yt-dlp` project with local dataset/history semantics.
-
-That work remains useful infrastructure, but the project north star is now:
-
-> maintain selected media-derived text as durable, provenance-preserving Sourcearium material.
-
-
-## YouTube Access Boundaries
-
-YouTube may allow channel discovery while bot-gating player requests, especially from hosted/cloud IP ranges.
-
-Vessel distinguishes this from parser failure. yt-dlp is now the first-class acquisition backend for
-per-video metadata/captions/audio, and browser-cookie use remains explicit through Vessel configuration.
-
-See [YouTube Access Boundaries](docs/youtube-access.md).

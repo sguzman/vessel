@@ -1,301 +1,62 @@
 # Vessel Roadmap
 
-## Scope Reset
-
-Vessel originally targeted broad Rust-native `yt-dlp` parity plus historical local metadata datasets.
-
-That work produced substantial reusable infrastructure. It is no longer the product north star.
-
-Current priority:
-
-> make selected media-derived text easy to maintain as durable, provenance-preserving Sourcearium artifacts.
-
-## Legacy Capability Baseline
-
-Already implemented and retained as useful substrate:
-
-- native YouTube video metadata extraction
-- channel extraction and backlog crawling
-- local SQLite state
-- channel sync
-- basic native download
-- subtitles
-- automatic-caption metadata
-- comments
-- thumbnails
-- format selection
-- resume/archive behavior
-- FFmpeg merge/remux/audio extraction
-- metadata/thumbnail embedding
-- subtitle conversion
-- plugin system
-- native YouTube signature/cipher download hardening
-
-These capabilities should not force future work to continue the old parity campaign.
-
-## Toolchain Migration — Adopted Direction
-
-The project is beginning an architecture migration away from bespoke implementations of volatile or
-specialized machinery.
-
-Adopted target:
-
-- yt-dlp becomes the first-class YouTube acquisition backend;
-- FFmpeg/ffprobe remain external media plumbing;
-- WhisperX becomes the preferred heavy ASR/alignment/diarization backend;
-- Phonon-2 remains only if its lightweight QA niche continues to justify itself;
-- Python tooling is isolated behind subprocess boundaries, preferably managed with uv;
-- cross-video named-speaker identity and calibration work are removed from the active roadmap;
-- Vessel continues to own policy, reconciliation, provenance, validation, operational state, and
-  Sourcearium materialization.
+## Current State
 
-Migration is replacement-first and deletion-second: prove each external adapter before retiring the
-legacy native path, then delete superseded duplicate machinery rather than maintaining parallel stacks.
+The 2026-10-03 toolchain migration is complete.
 
-Current migration state:
+The project has finished the architectural reset from "Rust-native media stack" to "small Sourcearium control plane around mature external tools."
 
-- yt-dlp adapter implemented;
-- `vessel update` defaults to yt-dlp for per-video metadata/caption discovery;
-- ASR audio acquisition uses yt-dlp on the default YouTube path;
-- WhisperX is the default local-ASR backend;
-- WhisperX is the default diarization backend;
-- yt-dlp now owns default channel discovery as well as per-video metadata/caption discovery and ASR
-  audio acquisition;
-- SQLite remains responsible for Vessel's durable operational backlog/reconcile state, while native
-  YouTube continuation tokens are legacy-only on `--youtube-backend native`;
-- WhisperX is the default local-ASR and optional diarization backend;
-- named-speaker identity controls and the `speakers` command family have been removed;
-- the registry, cross-video matcher, anchor/calibration implementation, and calibration manifest have
-  been removed from the maintained codebase;
-- only the backend-neutral anonymous diarization evidence format remains for compatibility with
-  explicit legacy diarization maintenance;
-- native download/ASR/diarization code remains temporarily available for migration comparison/recovery.
+Completed migration outcomes:
 
-See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
+- yt-dlp is the only maintained YouTube acquisition path;
+- the native YouTube protocol implementation is deleted;
+- the native downloader and format-selection crates are deleted;
+- the native postprocessing crate is deleted;
+- bespoke Whisper/Candle inference is deleted;
+- bespoke Sherpa diarization is deleted;
+- named-speaker identity/matching/calibration is deleted;
+- WhisperX is the default heavy ASR and optional diarization path;
+- Phonon-2 remains only as an optional external QA backend;
+- the public CLI is reduced to doctor/update/validate/inventory/prune;
+- deterministic external-toolchain acceptance is gated in CI.
 
-## New Priority Order
-
-1. Preserve Sourcearium contracts, reconciliation, provenance, validation, and non-destructive semantics.
-2. Introduce a first-class yt-dlp acquisition adapter.
-3. Prove discovery, metadata, creator-caption, auto-caption, and audio acquisition through that adapter.
-4. Introduce a WhisperX subprocess adapter for heavy ASR/alignment/optional diarization.
-5. Preserve a lightweight QA backend only where it materially reduces test cost.
-6. Cut normal `vessel update` over to the external acquisition/transcription toolchain.
-7. Verify idempotency, representation precedence, provenance, and atomic materialization after cutover.
-8. Retire superseded native YouTube/download/ASR/diarization machinery.
-9. ~~Remove named-speaker identity/matching/calibration machinery from the maintained product.~~ Completed.
-10. Generalize media-source support only where it materially improves corpus acquisition.
-
-## New Milestones
+## Maintained Product Work
 
-| Milestone | Title | Status |
-| --- | --- | --- |
-| 10 | Sourcearium Artifact Contract | Completed |
-| 11 | Sourcearium YouTube Policy | Completed |
-| 12 | Transcript Provider Abstraction | Completed |
-| 13 | Sourcearium Serializer + Validator | Completed |
-| 14 | `vessel update` Reconcile Loop | In Progress |
-| 15 | Subtitle Provider Integration | Completed |
-| 16 | Local ASR Fallback | In Progress |
-| 17 | Safe Prune + Replacement Semantics | Completed |
-| 18 | Additional Media Sources | Deferred |
+Future work should improve the corpus loop rather than rebuild external machinery.
 
-## Milestone 10: Sourcearium Artifact Contract
+### Reliability
 
-Completed:
+- harden yt-dlp JSON compatibility when upstream output changes;
+- improve diagnostics around browser cookies/authentication;
+- improve retry/reporting behavior without contaminating durable artifacts;
+- keep SQLite state recoverable and disposable.
 
-- Sourcearium artifact schema v1 frozen externally
-- exact YouTube transcript field mapping documented
-- provenance layers separated into source / representation / acquisition
-- stable artifact identity defined
-- deterministic serialization requirement defined
-- atomic candidate validation/replacement requirement defined
+### Corpus Semantics
 
-See [Sourcearium Contract](sourcearium-contract.md).
+- strengthen Sourcearium validation as real corpora expose edge cases;
+- improve transcript normalization only when source-preserving;
+- add representation providers only when they materially improve corpus coverage;
+- preserve deterministic no-op updates.
 
-## Milestone 11: Sourcearium YouTube Policy
+### Performance
 
-Completed:
+- reduce redundant remote probes;
+- reuse safe operational facts;
+- keep ASR bounded and explicit;
+- prefer the lightest sufficient external backend.
 
-- policy owned by Sourcearium
-- one `source.toml` per YouTube source directory
-- stable local `source_key`
-- inclusive publication cutoff
-- explicit include IDs
-- explicit exclude IDs
-- transcript provider permissions
-- execution throttles excluded from durable policy
-- include/exclude conflict defined as invalid
+## Explicitly Closed Branches
 
-See [Sourcearium YouTube Policy Contract](youtube-policy-contract.md).
+Do not reopen without a new product justification:
 
-## Milestone 12: Transcript Provider Abstraction
+- native YouTube protocol extraction;
+- native media downloader/format-selection parity;
+- bespoke Whisper inference;
+- bespoke diarization;
+- cross-video named-speaker identity;
+- embedding calibration and speaker registries;
+- broad yt-dlp replacement/parity work.
 
-Status: **Completed**
+## Product Success Metric
 
-Implemented one internal transcript resolution interface that can represent:
-
-- creator subtitles
-- platform automatic captions
-- local ASR
-
-It must return normalized transcript data plus enough provenance to materialize Sourcearium v1.
-
-Do not make Sourcearium serialization depend directly on YouTube response structs.
-
-## Milestone 13: Sourcearium Serializer + Validator
-
-Status: **Completed**
-
-Implemented deterministic artifact serialization and validation against Sourcearium v1.
-
-Acceptance intent:
-
-- stable TOML field order
-- stable body rendering
-- no-op serialization byte-equivalent
-- local ASR requires engine/model
-- transcript timestamp presence explicit
-- validate before replacement
-
-## Milestone 14: Update Reconcile Loop
-
-Status: **In Progress**
-
-Implemented:
-
-- Sourcearium YouTube policy discovery and validation
-- operational SQLite under `.cache/vessel/vessel.sqlite`
-- per-tab YouTube cursor reuse
-- completed backfills refresh first pages without recrawling full history
-- discovered channel/video membership stays operational rather than entering corpus files
-- membership table is used as a persistent processing backlog, so `--max-videos` cannot strand older discovered videos
-- channel discovery order is preserved instead of sorting by opaque video IDs, making limited runs process the upstream order predictably
-- cursor advancement is gated on durable membership persistence, so an operational-state failure causes safe rediscovery instead of silent loss
-- upgrade probes for weaker existing transcripts are operationally throttled (30 days by default) instead of refetching every historical watch page on every run
-- exact resolved publication dates are cached as replaceable operational state, so date-cutoff exclusions do not require repeated watch-page fetches
-- no operational cursor state is written to Sourcearium policy or artifacts
-- offline corpus inventory through `vessel inventory`
-- opt-in per-video decision reporting through `--report-items`
-- non-materializing preview mode through `--preview`; preview skips corpus writes and local ASR while allowing disposable cache warming
-
-Target:
-
-```bash
-vessel update
-```
-
-Acceptance intent:
-
-- scan Sourcearium YouTube policies
-- validate policies before network work
-- discover desired video sets
-- compare desired set against materialized artifact identities
-- acquire missing/upgradeable representations
-- never delete material during update
-- no Git churn on no-op runs
-
-## Milestone 15: Subtitle Provider Integration
-
-Status: **Completed**
-
-Existing subtitle/caption extraction is normalized behind the transcript-provider path.
-
-Provider precedence:
-
-1. creator subtitles
-2. platform automatic captions
-3. local ASR
-
-## Milestone 16: Local ASR
-
-Status: **In Progress — external-tool migration active**
-
-Implemented:
-
-- dedicated `vessel-asr` adapter boundary
-- WhisperX subprocess backend
-- WhisperX `large-v3` as the default local-ASR path
-- WhisperX as the default optional diarization path
-- ASR result normalization into `TranscriptCandidate`
-- engine/model provenance for Sourcearium v1
-- yt-dlp acquisition of best audio for the default update path
-- FFmpeg normalization to 16 kHz mono PCM WAV
-- legacy `whisper-candle`, Phonon-2, and Sherpa paths retained temporarily during cutover
-
-Implemented additionally:
-
-- `vessel update` invokes ASR when platform captions are unavailable and policy allows it
-- yt-dlp acquires temporary best-audio media on the default YouTube path; the native planner remains
-  only on the explicit legacy backend
-- ASR input normalized to 16 kHz mono PCM WAV
-- temporary ASR media retained on failure and deleted after successful materialization
-- durable 16 kHz diarization fixtures are reused as ASR input when present, avoiding duplicate media downloads and normalization
-- CLI overrides for ASR model, device, and language
-- explicit `--force-local-asr` update override for bounded diagnostics/acceptance; it skips caption acquisition but still requires Sourcearium policy to allow local ASR
-
-Implemented additionally:
-
-- one Whisper model is loaded lazily and reused across ASR fallbacks in the same update run
-- validator is available through `vessel validate` for offline corpus checks
-
-Local QA / acceptance rule:
-
-- when a test merely needs *some* local ASR output to exercise downstream Vessel behavior, use the lightest suitable backend: `phonon-2` for English fixtures
-- do not spend Whisper compute on generic QA
-- use `whisper-candle` or another heavier backend only when the test specifically targets that backend, multilingual behavior, or a quality characteristic that `phonon-2` cannot exercise
-- tests that only exercise diarization or persisted anonymous evidence must reuse existing audio/evidence and invoke no ASR at all
-
-Real-source acceptance discovered and documented:
-
-- hosted-runner YouTube anti-bot gate can block player metadata while channel crawl still succeeds
-- Vessel now classifies this as an access/environment failure rather than generic missing metadata
-- authentication/attestation is an explicit deferred design boundary, not a silent fallback
-
-Remaining before calling the ASR path proven:
-
-- real-world local-ASR smoke test against a configured Sourcearium video
-
-Optional acceleration is deferred until CPU behavior is proven and performance justifies it.
-
-## Milestone 17: Safe Prune
-
-Status: **Completed**
-
-`update` remains non-destructive.
-
-Offline cleanup is explicit:
-
-```bash
-vessel prune
-vessel prune --apply
-```
-
-Semantics:
-
-- bare `vessel prune` is plan-only
-- `--apply` is required for deletion
-- only configured YouTube source directories are considered
-- explicit `exclude_video_ids` can produce prune candidates
-- a known artifact publication date before `published_on_or_after` can produce a prune candidate
-- explicit include still overrides the date cutoff
-- missing/uncertain publication dates are preserved
-- disabled transcript acquisition does not imply deletion
-- removed/missing source policy does not imply deletion
-- upstream disappearance/private state never implies deletion
-- artifact identity is revalidated immediately before removal
-- candidate paths are canonicalized and must remain inside Sourcearium's `sources/` tree
-
-This keeps deletion policy local, inspectable, and independent of volatile upstream availability.
-
-## Deprioritized Work
-
-Not current success criteria:
-
-- option-level `yt-dlp` parity
-- external downloader parity
-- analytics dashboards
-- exhaustive metadata history
-- subscriber/view time-series collection
-- PostgreSQL support
-- generic non-media text acquisition
+A configured Sourcearium source should remain maintainable through a boring repeated `vessel update`, with trustworthy provenance and no unnecessary custom media/ML stack.

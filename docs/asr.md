@@ -1,124 +1,55 @@
 # Local ASR
 
-## Current direction
+## Maintained Architecture
 
-Vessel's default local-ASR backend is now **WhisperX**.
+Vessel delegates ASR through executable adapters.
 
-The architecture is intentionally process-based:
+```text
+yt-dlp -> temporary source audio
+FFmpeg -> 16 kHz mono PCM WAV
+WhisperX -> JSON
+Vessel -> TranscriptCandidate -> Sourcearium
+```
 
-~~~text
-Vessel
--> normalized local audio
--> whisperx executable
--> JSON
--> TranscriptCandidate
--> Sourcearium materialization
-~~~
+The default backend is **WhisperX** with `large-v3`. CPU is the default device; GPU acceleration may be selected explicitly.
 
-Vessel owns transcript precedence, normalization, provenance, reconciliation, validation, and durable
-materialization. It does not need to own Whisper inference or diarization internals.
+Phonon-2 remains an optional external English-only QA backend. It is not a second production ML stack inside Vessel.
 
-## Defaults
+## Diarization
 
-For `vessel update`:
+`vessel update --diarize` asks WhisperX to run anonymous diarization through pyannote.
 
-~~~text
-ASR backend = whisperx
-model = large-v3
-device = cpu
-diarization backend = whisperx
-~~~
+Vessel preserves file-local labels such as `SPEAKER_00` and records diarization provenance. It does not infer stable human identity across videos.
 
-Diarization is still opt-in. When enabled through the WhisperX path, anonymous labels such as
-`SPEAKER_00` and `SPEAKER_01` may be preserved in the normalized transcript.
+## Adapter Controls
 
-Cross-video named-speaker identity is not an active product goal.
+The update path supports:
 
-## External tool boundary
-
-WhisperX is invoked as an executable and its JSON is parsed into Vessel's existing normalized
-`TranscriptCandidate`.
-
-The adapter currently supports operational controls for:
-
+- ASR backend selection: WhisperX or Phonon-2;
 - model selection;
-- device selection;
-- language hints;
-- explicit model directories/cache-only use;
-- progress output;
-- optional diarization;
-- diarization model;
+- executable path;
+- device;
+- language hint;
+- explicit model/cache directory;
+- optional diarization model;
 - optional minimum/maximum speaker hints;
-- Hugging Face token environment for diarization model access.
+- configurable Hugging Face token environment.
 
-Python is an implementation detail behind this process boundary.
+Diarization requires WhisperX.
 
-Prefer an isolated installation managed with `uv` rather than making Vessel itself a Python
-application.
+## Removed Implementations
 
-## Media acquisition
+The migration deleted:
 
-When `vessel update` uses the default YouTube backend, ASR source audio is acquired through
-**yt-dlp**, not Vessel's native format planner/downloader.
+- `whisper-candle` inference;
+- Rust/Sherpa diarization;
+- speaker-embedding evidence persistence;
+- named-speaker matching/calibration machinery.
 
-Temporary media lives under:
+These are not fallback paths.
 
-~~~text
-<sourcearium>/.cache/vessel/asr/<video-id>/
-~~~
+## Failure Semantics
 
-Vessel then normalizes the source audio to 16 kHz mono PCM WAV through FFmpeg before transcription.
+Temporary media and ASR cache state live under `<sourcearium>/.cache/vessel/`.
 
-A durable compatible local fixture may still be reused to avoid a redundant network download.
-
-If acquisition, normalization, transcription, validation, or materialization fails, no durable
-Sourcearium artifact is replaced.
-
-## Provenance
-
-A local ASR artifact records the actual engine/model used.
-
-For the default path this is conceptually:
-
-~~~toml
-[representation]
-derivation = "local_asr"
-engine = "whisperx-faster-whisper"
-model = "large-v3"
-timestamps = true
-~~~
-
-If diarization is used, diarization engine/model provenance is recorded separately.
-
-Sourcearium semantics do not depend on WhisperX. The backend remains replaceable.
-
-## Legacy backends during migration
-
-The following implementations remain temporarily available while the external-tool migration is being
-proven:
-
-- `whisper-candle`;
-- `phonon-2`;
-- Rust/Sherpa diarization.
-
-They are not equal-priority roadmap branches.
-
-`phonon-2` may survive if its fast English QA niche remains useful. The bespoke Whisper/Sherpa paths
-should be retired once the replacement path has sufficient acceptance evidence.
-
-Do not invest new product work in named-speaker matching, embedding calibration, or speaker identity.
-
-## Operational validation
-
-Useful checks:
-
-~~~bash
-vessel doctor
-vessel asr doctor
-vessel update --preview --max-videos 3
-~~~
-
-A real local-ASR acceptance run should use a release build and a bounded source/video selection.
-
-The acceptance question is whether the external toolchain produces a valid Sourcearium candidate with
-correct provenance, not whether Vessel can reproduce the ML stack internally.
+If acquisition, normalization, transcription, validation, or materialization fails, Vessel preserves the existing durable Sourcearium artifact.
