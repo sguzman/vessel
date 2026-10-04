@@ -109,8 +109,6 @@ struct UpdateArgs {
     max_videos: Option<usize>,
     #[arg(long = "video-id")]
     video_ids: Vec<String>,
-    #[arg(long = "youtube-backend", default_value = "yt-dlp")]
-    youtube_backend: String,
     #[arg(long = "yt-dlp-executable", default_value = "yt-dlp")]
     yt_dlp_executable: PathBuf,
     #[arg(long = "force-local-asr")]
@@ -2442,7 +2440,6 @@ fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
 }
 
 async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
-    validate_update_youtube_backend(&args)?;
     let asr_config = resolve_asr_config(&args);
     let diarization_config = resolve_diarization_config(&args)?;
     let report_items = args.report_items || args.preview;
@@ -2506,7 +2503,8 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             summary["items"] = serde_json::json!([]);
         }
         summary["preview"] = serde_json::Value::Bool(args.preview);
-        summary["youtube_backend"] = serde_json::Value::String(args.youtube_backend.clone());
+        summary["youtube_backend"] =
+            serde_json::Value::String(YT_DLP_BACKEND_NAME.to_owned());
 
         if !policy.transcripts.enabled {
             summary["status"] = serde_json::Value::String("transcripts_disabled".into());
@@ -2541,7 +2539,7 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             }
         };
         summary["channel_discovery_backend"] =
-            serde_json::Value::String(args.youtube_backend.clone());
+            serde_json::Value::String(YT_DLP_BACKEND_NAME.to_owned());
 
         if let Some(expected_channel_id) = policy.channel.id.as_deref()
             && channel.channel_id != expected_channel_id
@@ -3024,14 +3022,13 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                     continue;
                 }
                 increment_summary(&mut summary, "local_asr_attempted", 1);
-                let yt_dlp = (args.youtube_backend == YT_DLP_BACKEND_NAME)
-                    .then(|| update_yt_dlp_config(&args, config));
+                let yt_dlp = update_yt_dlp_config(&args, config);
                 match acquire_local_asr_candidate(
                     &sourcearium_root,
                     &video,
                     asr_backend.take(),
                     &asr_config,
-                    yt_dlp.as_ref(),
+                    Some(&yt_dlp),
                 )
                 .await
                 {
@@ -3415,15 +3412,6 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
     Ok(Some(config))
 }
 
-fn validate_update_youtube_backend(args: &UpdateArgs) -> Result<()> {
-    match args.youtube_backend.as_str() {
-        YT_DLP_BACKEND_NAME | "native" => Ok(()),
-        other => Err(VesselError::Config(format!(
-            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
-        ))),
-    }
-}
-
 fn update_yt_dlp_config(args: &UpdateArgs, config: &Config) -> YtDlpConfig {
     YtDlpConfig::new(
         args.yt_dlp_executable.clone(),
@@ -3436,18 +3424,10 @@ async fn discover_update_channel(
     config: &Config,
     input: &InputRef,
 ) -> Result<(ChannelMetadata, Option<ChannelVideoCrawlReport>)> {
-    match args.youtube_backend.as_str() {
-        YT_DLP_BACKEND_NAME => {
-            let (channel, crawl) = update_yt_dlp_config(args, config)
-                .discover_channel(input)
-                .await?;
-            Ok((channel, Some(crawl)))
-        }
-        "native" => Ok((extract_channel(input).await?, None)),
-        other => Err(VesselError::Config(format!(
-            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
-        ))),
-    }
+    let (channel, crawl) = update_yt_dlp_config(args, config)
+        .discover_channel(input)
+        .await?;
+    Ok((channel, Some(crawl)))
 }
 
 async fn extract_update_video(
@@ -3455,17 +3435,7 @@ async fn extract_update_video(
     config: &Config,
     input: &InputRef,
 ) -> Result<VideoMetadata> {
-    match args.youtube_backend.as_str() {
-        YT_DLP_BACKEND_NAME => {
-            update_yt_dlp_config(args, config)
-                .extract_video(input)
-                .await
-        }
-        "native" => extract_video(input).await,
-        other => Err(VesselError::Config(format!(
-            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
-        ))),
-    }
+    update_yt_dlp_config(args, config).extract_video(input).await
 }
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
@@ -5959,8 +5929,8 @@ mod tests {
         let Commands::Update(args) = cli.command else {
             panic!("expected update command");
         };
-        assert_eq!(args.youtube_backend, "yt-dlp");
         assert_eq!(args.yt_dlp_executable, PathBuf::from("yt-dlp"));
+        assert!(Cli::try_parse_from(["vessel", "update", "--youtube-backend", "native"]).is_err());
         assert_eq!(args.diarization_backend, "whisperx");
         let asr = resolve_asr_config(&args);
         assert_eq!(asr.backend, vessel_asr::WHISPERX_BACKEND_NAME);
@@ -5973,7 +5943,6 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
-            youtube_backend: "yt-dlp".into(),
             yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisper-candle".into()),
@@ -6026,7 +5995,6 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
-            youtube_backend: "yt-dlp".into(),
             yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
@@ -6063,7 +6031,6 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
-            youtube_backend: "yt-dlp".into(),
             yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("whisperx".into()),
@@ -6149,7 +6116,6 @@ mod tests {
             sourcearium: PathBuf::from("."),
             max_videos: None,
             video_ids: Vec::new(),
-            youtube_backend: "yt-dlp".into(),
             yt_dlp_executable: PathBuf::from("yt-dlp"),
             force_local_asr: false,
             asr_backend: Some("phonon-2".into()),
