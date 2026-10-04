@@ -36,8 +36,9 @@ use vessel_diarization::{
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelTabCursor, ChannelVideoRef, YoutubeExtractor, acquire_best_caption_candidate,
-    crawl_channel_videos, extract_channel, extract_comments, extract_video,
+    ChannelTabCursor, ChannelVideoRef, YT_DLP_BACKEND_NAME, YtDlpConfig, YoutubeExtractor,
+    acquire_best_caption_candidate, crawl_channel_videos, extract_channel, extract_comments,
+    extract_video,
 };
 use vessel_extractors::{
     ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog, load_plugins,
@@ -115,6 +116,10 @@ struct UpdateArgs {
     max_videos: Option<usize>,
     #[arg(long = "video-id")]
     video_ids: Vec<String>,
+    #[arg(long = "youtube-backend", default_value = "yt-dlp")]
+    youtube_backend: String,
+    #[arg(long = "yt-dlp-executable", default_value = "yt-dlp")]
+    yt_dlp_executable: PathBuf,
     #[arg(long = "force-local-asr")]
     force_local_asr: bool,
     #[arg(long = "asr-backend")]
@@ -731,7 +736,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Doctor => doctor(&config, &paths, &loaded_from, &layout).await,
-        Commands::Update(args) => sourcearium_update(args).await,
+        Commands::Update(args) => sourcearium_update(args, &config).await,
         Commands::Validate(args) => sourcearium_validate(args),
         Commands::Inventory(args) => sourcearium_inventory(args),
         Commands::Prune(args) => sourcearium_prune(args),
@@ -4072,7 +4077,8 @@ fn maintain_existing_speaker_attribution(
     );
 }
 
-async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
+async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
+    validate_update_youtube_backend(&args)?;
     let asr_config = resolve_asr_config(&args);
     validate_update_speaker_attribution(&args, &asr_config)?;
     let diarization_config = resolve_diarization_config(&args)?;
@@ -4149,6 +4155,7 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             summary["items"] = serde_json::json!([]);
         }
         summary["preview"] = serde_json::Value::Bool(args.preview);
+        summary["youtube_backend"] = serde_json::Value::String(args.youtube_backend.clone());
 
         if !policy.transcripts.enabled {
             summary["status"] = serde_json::Value::String("transcripts_disabled".into());
@@ -4528,11 +4535,11 @@ async fn sourcearium_update(args: UpdateArgs) -> Result<()> {
             }
             remote_videos_processed += 1;
 
-            let video = match extract_video(&InputRef {
+            let video_input = InputRef {
                 raw: video_ref.video_id.clone(),
                 kind: InputKind::VideoId,
-            })
-            .await
+            };
+            let video = match extract_update_video(&args, config, &video_input).await
             {
                 Ok(video) => video,
                 Err(error) => {
@@ -5222,6 +5229,36 @@ fn resolve_diarization_config(args: &UpdateArgs) -> Result<Option<DiarizationCon
     Ok(Some(config))
 }
 
+fn validate_update_youtube_backend(args: &UpdateArgs) -> Result<()> {
+    match args.youtube_backend.as_str() {
+        YT_DLP_BACKEND_NAME | "native" => Ok(()),
+        other => Err(VesselError::Config(format!(
+            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
+        ))),
+    }
+}
+
+fn update_yt_dlp_config(args: &UpdateArgs, config: &Config) -> YtDlpConfig {
+    YtDlpConfig::new(
+        args.yt_dlp_executable.clone(),
+        config.youtube.cookies_from_browser.clone(),
+    )
+}
+
+async fn extract_update_video(
+    args: &UpdateArgs,
+    config: &Config,
+    input: &InputRef,
+) -> Result<VideoMetadata> {
+    match args.youtube_backend.as_str() {
+        YT_DLP_BACKEND_NAME => update_yt_dlp_config(args, config).extract_video(input).await,
+        "native" => extract_video(input).await,
+        other => Err(VesselError::Config(format!(
+            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
+        ))),
+    }
+}
+
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     let mut config = AsrConfig::default();
     if let Some(backend) = args.asr_backend.as_deref() {
@@ -5689,6 +5726,7 @@ async fn doctor(
         },
         "binaries": {
             "ffmpeg": binary_available("ffmpeg"),
+            "yt_dlp": binary_available("yt-dlp"),
         },
         "plugins": {
             "directories": plugin_dirs,
