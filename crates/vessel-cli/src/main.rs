@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
-use vessel_core::models::{InputKind, InputRef, VideoMetadata};
+use vessel_core::models::{ChannelMetadata, InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, ExistingSourceariumArtifact, MaterializeStatus, Result,
     RuntimeLayout, SPEAKER_ANCHOR_AGGREGATION_V1, SPEAKER_ANCHOR_CACHE_SCHEMA_V1,
@@ -36,7 +36,8 @@ use vessel_diarization::{
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelTabCursor, ChannelVideoRef, YT_DLP_BACKEND_NAME, YtDlpConfig, YoutubeExtractor,
+    ChannelTabCursor, ChannelVideoCrawlReport, ChannelVideoRef, YT_DLP_BACKEND_NAME, YtDlpConfig,
+    YoutubeExtractor,
     acquire_best_caption_candidate, crawl_channel_videos, extract_channel, extract_comments,
     extract_video,
 };
@@ -4209,18 +4210,22 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
         };
 
         let channel_input = parse_sourcearium_channel_input(&policy.channel.input)?;
-        let channel = match extract_channel(&channel_input).await {
-            Ok(channel) => channel,
-            Err(error) => {
-                summary["status"] = serde_json::Value::String("channel_resolution_failed".into());
-                summary["errors"]
-                    .as_array_mut()
-                    .expect("errors array")
-                    .push(serde_json::json!({"message": error.to_string()}));
-                source_reports.push(summary);
-                continue;
-            }
-        };
+        let (channel, external_crawl) =
+            match discover_update_channel(&args, config, &channel_input).await {
+                Ok(discovery) => discovery,
+                Err(error) => {
+                    summary["status"] =
+                        serde_json::Value::String("channel_resolution_failed".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                    source_reports.push(summary);
+                    continue;
+                }
+            };
+        summary["channel_discovery_backend"] =
+            serde_json::Value::String(args.youtube_backend.clone());
 
         if let Some(expected_channel_id) = policy.channel.id.as_deref()
             && channel.channel_id != expected_channel_id
@@ -4251,43 +4256,53 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             continue;
         }
 
-        let existing_cursors = match operational_store
-            .load_channel_tab_cursors(&channel.channel_id)
-            .await
-        {
-            Ok(cursors) => cursors
-                .into_iter()
-                .map(|cursor| ChannelTabCursor {
-                    tab_name: cursor.tab_name,
-                    continuation_token: cursor.continuation_token,
-                    visitor_data: cursor.visitor_data,
-                    delegated_session_id: cursor.delegated_session_id,
-                    last_seen_published_at: cursor.last_seen_published_at,
-                    backfill_complete: cursor.backfill_complete,
-                })
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                summary["status"] = serde_json::Value::String("operational_state_failed".into());
-                summary["errors"]
-                    .as_array_mut()
-                    .expect("errors array")
-                    .push(serde_json::json!({"message": error.to_string()}));
-                source_reports.push(summary);
-                continue;
+        let existing_cursors = if external_crawl.is_some() {
+            Vec::new()
+        } else {
+            match operational_store
+                .load_channel_tab_cursors(&channel.channel_id)
+                .await
+            {
+                Ok(cursors) => cursors
+                    .into_iter()
+                    .map(|cursor| ChannelTabCursor {
+                        tab_name: cursor.tab_name,
+                        continuation_token: cursor.continuation_token,
+                        visitor_data: cursor.visitor_data,
+                        delegated_session_id: cursor.delegated_session_id,
+                        last_seen_published_at: cursor.last_seen_published_at,
+                        backfill_complete: cursor.backfill_complete,
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    summary["status"] =
+                        serde_json::Value::String("operational_state_failed".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                    source_reports.push(summary);
+                    continue;
+                }
             }
         };
         summary["existing_tab_cursors"] = serde_json::Value::from(existing_cursors.len() as u64);
 
-        let crawl = match crawl_channel_videos(&channel_input, &existing_cursors).await {
-            Ok(crawl) => crawl,
-            Err(error) => {
-                summary["status"] = serde_json::Value::String("channel_crawl_failed".into());
-                summary["errors"]
-                    .as_array_mut()
-                    .expect("errors array")
-                    .push(serde_json::json!({"message": error.to_string()}));
-                source_reports.push(summary);
-                continue;
+        let crawl = if let Some(crawl) = external_crawl {
+            crawl
+        } else {
+            match crawl_channel_videos(&channel_input, &existing_cursors).await {
+                Ok(crawl) => crawl,
+                Err(error) => {
+                    summary["status"] =
+                        serde_json::Value::String("channel_crawl_failed".into());
+                    summary["errors"]
+                        .as_array_mut()
+                        .expect("errors array")
+                        .push(serde_json::json!({"message": error.to_string()}));
+                    source_reports.push(summary);
+                    continue;
+                }
             }
         };
         summary["discovered"] = serde_json::Value::from(crawl.videos.len() as u64);
@@ -5246,6 +5261,23 @@ fn update_yt_dlp_config(args: &UpdateArgs, config: &Config) -> YtDlpConfig {
         args.yt_dlp_executable.clone(),
         config.youtube.cookies_from_browser.clone(),
     )
+}
+
+async fn discover_update_channel(
+    args: &UpdateArgs,
+    config: &Config,
+    input: &InputRef,
+) -> Result<(ChannelMetadata, Option<ChannelVideoCrawlReport>)> {
+    match args.youtube_backend.as_str() {
+        YT_DLP_BACKEND_NAME => {
+            let (channel, crawl) = update_yt_dlp_config(args, config).discover_channel(input).await?;
+            Ok((channel, Some(crawl)))
+        }
+        "native" => Ok((extract_channel(input).await?, None)),
+        other => Err(VesselError::Config(format!(
+            "unsupported YouTube backend {other:?}; expected yt-dlp or native"
+        ))),
+    }
 }
 
 async fn extract_update_video(
