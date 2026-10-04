@@ -1291,6 +1291,91 @@ mod tests {
         assert!(resolve_asr_config(&args).is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_update_runs_end_to_end_through_fake_yt_dlp() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "vessel-toolchain-acceptance-{}-{nonce}",
+            std::process::id()
+        ));
+        let source_dir = root.join("sources/youtube/example");
+        fs::create_dir_all(&source_dir).expect("source dir");
+        fs::write(root.join("sourcearium.toml"), "").expect("sourcearium marker");
+        fs::write(
+            source_dir.join("source.toml"),
+            r#"schema = 1
+family = "youtube"
+source_key = "example"
+
+[channel]
+input = "https://www.youtube.com/@example"
+"#,
+        )
+        .expect("source policy");
+
+        let fake = root.join("fake-yt-dlp");
+        fs::write(
+            &fake,
+            r#"#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$last" in
+  *watch?v=video123)
+    cat <<'JSON'
+{"id":"video123","channel_id":"UC_TEST","webpage_url":"https://www.youtube.com/watch?v=video123","title":"Fixture video","upload_date":"20261003","formats":[],"subtitles":{},"automatic_captions":{},"thumbnails":[]}
+JSON
+    ;;
+  *)
+    cat <<'JSON'
+{"id":"UC_TEST","channel_id":"UC_TEST","channel":"Example","uploader_id":"@example","channel_url":"https://www.youtube.com/channel/UC_TEST","entries":[{"id":"video123","ie_key":"Youtube","url":"https://www.youtube.com/watch?v=video123","title":"Fixture video","upload_date":"20261003"}]}
+JSON
+    ;;
+esac
+"#,
+        )
+        .expect("fake yt-dlp");
+        let mut permissions = fs::metadata(&fake).expect("fake metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake, permissions).expect("make fake executable");
+
+        let args = UpdateArgs {
+            sourcearium: root.clone(),
+            max_videos: Some(1),
+            video_ids: Vec::new(),
+            yt_dlp_executable: fake,
+            force_local_asr: false,
+            asr_backend: None,
+            asr_model: None,
+            asr_model_dir: None,
+            asr_executable: None,
+            asr_device: None,
+            asr_language: None,
+            diarize: false,
+            diarization_model: None,
+            min_speakers: None,
+            max_speakers: None,
+            hf_token_env: "HF_TOKEN".into(),
+            upgrade_check_days: 0,
+            report_items: true,
+            preview: true,
+        };
+
+        sourcearium_update(args, &Config::default())
+            .await
+            .expect("end-to-end preview update");
+        assert!(root.join(".cache/vessel/vessel.sqlite").is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn publication_dates_normalize() {
         assert_eq!(normalize_update_publication_date(Some("20261003")), Some("2026-10-03".into()));

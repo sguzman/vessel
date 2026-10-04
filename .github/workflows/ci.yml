@@ -24,26 +24,22 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Guard against build-time sherpa downloader
+      - name: Guard retired machinery
         shell: bash
         run: |
-          if grep -Eq 'name = "sherpa-onnx(-sys)?"' Cargo.lock; then
-            echo "sherpa-onnx Cargo packages are forbidden: sherpa acquisition must remain explicit at runtime"
-            exit 1
-          fi
+          test ! -d crates/vessel-diarization
+          test ! -d crates/vessel-download
+          test ! -d crates/vessel-formats
+          test ! -d crates/vessel-postprocess
+          ! grep -R -E 'SherpaOnnx|whisper_candle|whisper-candle-core|youtube_backend'             crates/vessel-cli crates/vessel-asr crates/vessel-extractors Cargo.toml
 
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
 
-      - name: Prove diarization planning and doctor are offline
+      - name: Verify reduced CLI and offline doctor
         shell: bash
         env:
           HTTP_PROXY: http://127.0.0.1:9
@@ -51,28 +47,16 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
           NO_PROXY: ""
         run: |
-          cargo run --locked --offline -q -p vessel-cli -- diarization fetch --plan > /tmp/diarization-plan.json
-          grep -q '"network_io": false' /tmp/diarization-plan.json
-          grep -q '"build_time_fetch": false' /tmp/diarization-plan.json
-          cargo run --locked --offline -q -p vessel-cli -- diarization doctor > /tmp/diarization-doctor.json
-          grep -q '"build_time_fetch": false' /tmp/diarization-doctor.json
+          cargo run --locked --offline -q -p vessel-cli -- --help > /tmp/vessel-help.txt
+          grep -q 'update' /tmp/vessel-help.txt
+          grep -q 'validate' /tmp/vessel-help.txt
+          grep -q 'inventory' /tmp/vessel-help.txt
+          grep -q 'prune' /tmp/vessel-help.txt
+          cargo run --locked --offline -q -p vessel-cli -- doctor > /tmp/vessel-doctor.json
+          grep -q '"architecture": "external-toolchain"' /tmp/vessel-doctor.json
 
-      - name: Format active migration files
-        if: always()
-        run: |
-          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr -p vessel-diarization -p vessel-cli
-          git diff --exit-code -- \
-            crates/vessel-cli/src/main.rs \
-            crates/vessel-core/src/error.rs \
-            crates/vessel-core/src/lib.rs \
-            crates/vessel-core/src/sourcearium.rs \
-            crates/vessel-core/src/sourcearium_repo.rs \
-            crates/vessel-core/src/speaker_evidence.rs \
-            crates/vessel-core/src/transcript.rs \
-            crates/vessel-extractors/src/youtube/transcript.rs \
-            crates/vessel-extractors/src/youtube/yt_dlp.rs \
-            crates/vessel-asr/src/lib.rs \
-            crates/vessel-diarization/src/lib.rs
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   windows-smoke:
     runs-on: windows-latest
@@ -86,8 +70,8 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Test path and corpus layers
-        run: cargo test --locked -p vessel-core -p vessel-store -p vessel-asr -p vessel-diarization --all-targets
+      - name: Test durable layers
+        run: cargo test --locked -p vessel-core -p vessel-store -p vessel-asr -p vessel-extractors --all-targets
 
-      - name: Compile native Windows CLI
+      - name: Compile Windows CLI
         run: cargo check --locked -p vessel-cli
