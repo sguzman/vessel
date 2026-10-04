@@ -3960,6 +3960,7 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "tokio",
  "toml",
  "tracing",
  "url",
