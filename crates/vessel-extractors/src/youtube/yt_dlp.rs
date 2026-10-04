@@ -50,8 +50,9 @@ impl YtDlpConfig {
                 &output.stderr,
             ));
         }
-        let version = String::from_utf8(output.stdout)
-            .map_err(|error| VesselError::Extractor(format!("yt-dlp version output was not UTF-8: {error}")))?;
+        let version = String::from_utf8(output.stdout).map_err(|error| {
+            VesselError::Extractor(format!("yt-dlp version output was not UTF-8: {error}"))
+        })?;
         Ok(version.trim().to_owned())
     }
 
@@ -189,7 +190,8 @@ fn command_failure(executable: &Path, code: Option<i32>, stderr: &[u8]) -> Vesse
     VesselError::Extractor(format!(
         "yt-dlp executable {} failed with status {}{}",
         executable.display(),
-        code.map(|value| value.to_string()).unwrap_or_else(|| "signal".into()),
+        code.map(|value| value.to_string())
+            .unwrap_or_else(|| "signal".into()),
         if stderr.is_empty() {
             String::new()
         } else {
@@ -283,9 +285,7 @@ pub fn parse_video_json(raw: Value) -> Result<VideoMetadata> {
 
 pub fn parse_channel_json(raw: &Value, requested_url: &str) -> Result<ChannelMetadata> {
     let channel_id = string(raw, "channel_id")
-        .or_else(|| {
-            string(raw, "id").filter(|value| value.starts_with("UC"))
-        })
+        .or_else(|| string(raw, "id").filter(|value| value.starts_with("UC")))
         .ok_or_else(|| {
             VesselError::Extractor(
                 "yt-dlp channel JSON is missing a stable YouTube channel_id".into(),
@@ -348,7 +348,9 @@ pub fn parse_channel_listing_json(raw: &Value) -> Result<ChannelVideoCrawlReport
     let entries = raw
         .get("entries")
         .and_then(Value::as_array)
-        .ok_or_else(|| VesselError::Extractor("yt-dlp channel JSON did not contain entries".into()))?;
+        .ok_or_else(|| {
+            VesselError::Extractor("yt-dlp channel JSON did not contain entries".into())
+        })?;
 
     let mut videos = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -396,14 +398,7 @@ fn collect_channel_entries(
         let tab = infer_channel_tab(entry).unwrap_or_else(|| inherited_tab.to_owned());
 
         if let Some(nested) = entry.get("entries").and_then(Value::as_array) {
-            collect_channel_entries(
-                nested,
-                &tab,
-                videos,
-                seen,
-                videos_per_tab,
-                tabs_visited,
-            );
+            collect_channel_entries(nested, &tab, videos, seen, videos_per_tab, tabs_visited);
             continue;
         }
 
@@ -426,8 +421,7 @@ fn collect_channel_entries(
             video_id: video_id.to_owned(),
             tab_name: tab,
             title: string(entry, "title"),
-            published_at: string(entry, "upload_date")
-                .or_else(|| string(entry, "release_date")),
+            published_at: string(entry, "upload_date").or_else(|| string(entry, "release_date")),
         });
     }
 }
@@ -442,7 +436,10 @@ fn looks_like_video_entry(value: &Value) -> bool {
         return false;
     }
 
-    let ie_key = value.get("ie_key").and_then(Value::as_str).unwrap_or_default();
+    let ie_key = value
+        .get("ie_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if ie_key.eq_ignore_ascii_case("Youtube") {
         return true;
     }
@@ -579,15 +576,19 @@ fn string(value: &Value, key: &str) -> Option<String> {
 }
 
 fn required_string(value: &Value, key: &str) -> Result<String> {
-    string(value, key).filter(|value| !value.is_empty()).ok_or_else(|| {
-        VesselError::Extractor(format!("yt-dlp JSON is missing required field {key:?}"))
-    })
+    string(value, key)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            VesselError::Extractor(format!("yt-dlp JSON is missing required field {key:?}"))
+        })
 }
 
 fn unsigned(value: &Value, key: &str) -> Option<u64> {
-    value
-        .get(key)
-        .and_then(|value| value.as_u64().or_else(|| value.as_f64().map(|value| value.max(0.0) as u64)))
+    value.get(key).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_f64().map(|value| value.max(0.0) as u64))
+    })
 }
 
 fn string_array(value: &Value, key: &str) -> Vec<String> {
@@ -651,8 +652,18 @@ mod tests {
         assert_eq!(video.channel_id.as_deref(), Some("UC_TEST"));
         assert_eq!(video.duration_seconds, Some(12));
         assert_eq!(video.subtitles.len(), 2);
-        assert!(video.subtitles.iter().any(|track| !track.is_auto_generated && track.language == "en"));
-        assert!(video.subtitles.iter().any(|track| track.is_auto_generated && track.language == "es"));
+        assert!(
+            video
+                .subtitles
+                .iter()
+                .any(|track| !track.is_auto_generated && track.language == "en")
+        );
+        assert!(
+            video
+                .subtitles
+                .iter()
+                .any(|track| track.is_auto_generated && track.language == "es")
+        );
         assert_eq!(video.formats.len(), 1);
         assert!(!video.formats[0].has_video);
         assert!(video.formats[0].has_audio);
@@ -732,7 +743,8 @@ mod tests {
             "entries": []
         });
 
-        let channel = parse_channel_json(&raw, "https://www.youtube.com/@example").expect("channel");
+        let channel =
+            parse_channel_json(&raw, "https://www.youtube.com/@example").expect("channel");
         assert_eq!(channel.channel_id, "UC_TEST");
         assert_eq!(channel.handle.as_deref(), Some("@example"));
         assert_eq!(channel.title.as_deref(), Some("Example"));

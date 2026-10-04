@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,13 +15,14 @@ use tracing::{debug, info, warn};
 use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{ChannelMetadata, InputKind, InputRef, VideoMetadata};
 use vessel_core::{
-    ChannelCategoryConfig, Config, MaterializeStatus, Result,
-    RuntimeLayout, TranscriptCandidate, TranscriptDerivation, VesselError,
-    VideoSelection, apply_sourcearium_prune, apply_youtube_transcript_diarization, discover_youtube_sources,
+    ChannelCategoryConfig, Config, MaterializeStatus, Result, RuntimeLayout, TranscriptCandidate,
+    TranscriptDerivation, VesselError, VideoSelection, apply_sourcearium_prune,
+    apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_evidence,
-    load_youtube_transcript_artifact,
-    materialize_youtube_transcript, plan_sourcearium_prune,
-    refresh_youtube_transcript_diarization_provenance, resolve_runtime_layout, validate_sourcearium_repository, };
+    load_youtube_transcript_artifact, materialize_youtube_transcript, plan_sourcearium_prune,
+    refresh_youtube_transcript_diarization_provenance, resolve_runtime_layout,
+    validate_sourcearium_repository,
+};
 use vessel_diarization::{
     DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO, DiarizationConfig, DiarizationResult,
     DiarizationSegment, SHERPA_ONNX_BACKEND_NAME, SHERPA_ONNX_RUNTIME_VERSION, SherpaOnnxDiarizer,
@@ -29,10 +30,9 @@ use vessel_diarization::{
 };
 use vessel_download::{BasicDownloadPlanner, DownloadPlanner, execute_download};
 use vessel_extractors::youtube::{
-    ChannelTabCursor, ChannelVideoCrawlReport, ChannelVideoRef, YT_DLP_BACKEND_NAME, YtDlpConfig,
-    YoutubeExtractor,
-    acquire_best_caption_candidate, crawl_channel_videos, extract_channel, extract_comments,
-    extract_video,
+    ChannelTabCursor, ChannelVideoCrawlReport, ChannelVideoRef, YT_DLP_BACKEND_NAME,
+    YoutubeExtractor, YtDlpConfig, acquire_best_caption_candidate, crawl_channel_videos,
+    extract_channel, extract_comments, extract_video,
 };
 use vessel_extractors::{
     ExtractContext, ExtractRequest, ExtractedItem, ExtractorRegistry, PluginCatalog, load_plugins,
@@ -2441,21 +2441,6 @@ fn asr_fetch(args: AsrFetchArgs) -> Result<()> {
     Ok(())
 }
 
-fn absolute_sourcearium_root(path: PathBuf) -> Result<PathBuf> {
-    let root = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    if !root.join("sourcearium.toml").is_file() {
-        return Err(VesselError::Corpus(format!(
-            "{} does not look like a Sourcearium root; sourcearium.toml is missing",
-            root.display()
-        )));
-    }
-    Ok(root)
-}
-
 async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
     validate_update_youtube_backend(&args)?;
     let asr_config = resolve_asr_config(&args);
@@ -2541,20 +2526,20 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
         }
 
         let channel_input = parse_sourcearium_channel_input(&policy.channel.input)?;
-        let (channel, external_crawl) =
-            match discover_update_channel(&args, config, &channel_input).await {
-                Ok(discovery) => discovery,
-                Err(error) => {
-                    summary["status"] =
-                        serde_json::Value::String("channel_resolution_failed".into());
-                    summary["errors"]
-                        .as_array_mut()
-                        .expect("errors array")
-                        .push(serde_json::json!({"message": error.to_string()}));
-                    source_reports.push(summary);
-                    continue;
-                }
-            };
+        let (channel, external_crawl) = match discover_update_channel(&args, config, &channel_input)
+            .await
+        {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                summary["status"] = serde_json::Value::String("channel_resolution_failed".into());
+                summary["errors"]
+                    .as_array_mut()
+                    .expect("errors array")
+                    .push(serde_json::json!({"message": error.to_string()}));
+                source_reports.push(summary);
+                continue;
+            }
+        };
         summary["channel_discovery_backend"] =
             serde_json::Value::String(args.youtube_backend.clone());
 
@@ -2625,8 +2610,7 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             match crawl_channel_videos(&channel_input, &existing_cursors).await {
                 Ok(crawl) => crawl,
                 Err(error) => {
-                    summary["status"] =
-                        serde_json::Value::String("channel_crawl_failed".into());
+                    summary["status"] = serde_json::Value::String("channel_crawl_failed".into());
                     summary["errors"]
                         .as_array_mut()
                         .expect("errors array")
@@ -2868,8 +2852,7 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                 raw: video_ref.video_id.clone(),
                 kind: InputKind::VideoId,
             };
-            let video = match extract_update_video(&args, config, &video_input).await
-            {
+            let video = match extract_update_video(&args, config, &video_input).await {
                 Ok(video) => video,
                 Err(error) => {
                     push_update_error(&mut summary, &video_ref.video_id, error);
@@ -3455,7 +3438,9 @@ async fn discover_update_channel(
 ) -> Result<(ChannelMetadata, Option<ChannelVideoCrawlReport>)> {
     match args.youtube_backend.as_str() {
         YT_DLP_BACKEND_NAME => {
-            let (channel, crawl) = update_yt_dlp_config(args, config).discover_channel(input).await?;
+            let (channel, crawl) = update_yt_dlp_config(args, config)
+                .discover_channel(input)
+                .await?;
             Ok((channel, Some(crawl)))
         }
         "native" => Ok((extract_channel(input).await?, None)),
@@ -3471,7 +3456,11 @@ async fn extract_update_video(
     input: &InputRef,
 ) -> Result<VideoMetadata> {
     match args.youtube_backend.as_str() {
-        YT_DLP_BACKEND_NAME => update_yt_dlp_config(args, config).extract_video(input).await,
+        YT_DLP_BACKEND_NAME => {
+            update_yt_dlp_config(args, config)
+                .extract_video(input)
+                .await
+        }
         "native" => extract_video(input).await,
         other => Err(VesselError::Config(format!(
             "unsupported YouTube backend {other:?}; expected yt-dlp or native"
@@ -5793,14 +5782,15 @@ mod tests {
     use super::{
         Cli, Commands, DiarizationSubcommand, SHERPA_EMBEDDING_BYTES, SHERPA_EMBEDDING_FILENAME,
         SHERPA_EMBEDDING_SHA256, SHERPA_EN_EMBEDDING_BYTES, SHERPA_EN_EMBEDDING_FILENAME,
-        SHERPA_EN_EMBEDDING_SHA256, UpdateArgs, diarization_fixture_dir,
-        install_staged_directory, normalize_update_publication_date,
-        parse_sourcearium_channel_input, planned_remaining_bytes, preview_materialization_action,
-        push_update_error, push_update_item, resolve_asr_config, resolve_configured_channels,
+        SHERPA_EN_EMBEDDING_SHA256, UpdateArgs, diarization_fixture_dir, install_staged_directory,
+        normalize_update_publication_date, parse_sourcearium_channel_input,
+        planned_remaining_bytes, preview_materialization_action, push_update_error,
+        push_update_item, resolve_asr_config, resolve_configured_channels,
         resolve_diarization_config, reuse_normalized_audio_fixture, sha256_file,
         sherpa_embedding_spec, transcript_upgrade_probe_due, validate_fixture_video_id,
         verify_integrity_receipt, write_integrity_receipt,
-    };    use vessel_core::models::InputKind;
+    };
+    use vessel_core::models::InputKind;
     use vessel_core::{ChannelCategoryConfig, Config, VesselError};
     use vessel_diarization::{DEFAULT_CLUSTERING_THRESHOLD, DEFAULT_WINDOW_SHIFT_RATIO};
 
@@ -6107,15 +6097,10 @@ mod tests {
 
     #[test]
     fn named_speaker_update_flags_are_removed() {
+        assert!(Cli::try_parse_from(["vessel", "update", "--attribute-speakers"]).is_err());
+        assert!(Cli::try_parse_from(["vessel", "update", "--speaker-embeddings"]).is_err());
         assert!(
-            Cli::try_parse_from(["vessel", "update", "--attribute-speakers"]).is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["vessel", "update", "--speaker-embeddings"]).is_err()
-        );
-        assert!(
-            Cli::try_parse_from(["vessel", "update", "--speaker-min-similarity", "0.9"])
-                .is_err()
+            Cli::try_parse_from(["vessel", "update", "--speaker-min-similarity", "0.9"]).is_err()
         );
     }
 
