@@ -145,15 +145,28 @@ If existing material falls outside current policy:
 - report it as no longer selected when useful
 - remove it only through an explicit prune operation
 
-## Rust And Runtime Policy
+## Runtime And Toolchain Policy
 
-Rust-native remains the preferred implementation strategy.
+Vessel owns policy, reconciliation, provenance, validation, and materialization.
 
-Supported native features must not silently invoke Python or `yt-dlp`.
+Mature external tools should own volatile or specialized machinery when a stable process boundary exists.
 
-FFmpeg remains acceptable media plumbing.
+Target runtime boundaries:
 
-ASR should default to a CPU-capable Rust-facing backend. The transcript interface must not depend on one implementation, model family, or accelerator.
+- yt-dlp for YouTube discovery, metadata, captions, format selection, and media acquisition
+- FFmpeg/ffprobe for media normalization and probing
+- WhisperX for heavy ASR, alignment, and optional diarization
+- pyannote as the diarization implementation underneath the external toolchain where applicable
+- Phonon-2 only where its lightweight QA role remains materially useful
+- uv for isolated Python tool environments
+
+Python is acceptable behind an explicit subprocess boundary. Vessel should consume structured output and
+record tool/model provenance rather than embedding ML implementation details into the core architecture.
+
+Rust remains appropriate for Vessel's durable control plane, but implementation language is not a product
+goal.
+
+See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
 
 ## Source Extensibility
 
