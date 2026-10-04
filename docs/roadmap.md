@@ -33,17 +33,38 @@ Already implemented and retained as useful substrate:
 
 These capabilities should not force future work to continue the old parity campaign.
 
+## Toolchain Migration — Adopted Direction
+
+The project is beginning an architecture migration away from bespoke implementations of volatile or
+specialized machinery.
+
+Adopted target:
+
+- yt-dlp becomes the first-class YouTube acquisition backend;
+- FFmpeg/ffprobe remain external media plumbing;
+- WhisperX becomes the preferred heavy ASR/alignment/diarization backend;
+- Phonon-2 remains only if its lightweight QA niche continues to justify itself;
+- Python tooling is isolated behind subprocess boundaries, preferably managed with uv;
+- cross-video named-speaker identity and calibration work are removed from the active roadmap;
+- Vessel continues to own policy, reconciliation, provenance, validation, operational state, and
+  Sourcearium materialization.
+
+Migration is replacement-first and deletion-second: prove each external adapter before retiring the
+legacy native path, then delete superseded duplicate machinery rather than maintaining parallel stacks.
+
+See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
+
 ## New Priority Order
 
-1. Define external Sourcearium contracts.
-2. Implement transcript-provider abstraction.
-3. Implement Sourcearium v1 serializer + validator.
-4. Implement desired-set reconciliation behind `vessel update`.
-5. Integrate existing subtitle acquisition into the provider chain.
-6. Add CPU-first local ASR fallback.
-7. Make update idempotent and non-destructive.
-8. Add explicit safe prune behavior. Preview is already implemented separately from pruning.
-9. Harden provenance, replacement rules, and transcript verification.
+1. Preserve Sourcearium contracts, reconciliation, provenance, validation, and non-destructive semantics.
+2. Introduce a first-class yt-dlp acquisition adapter.
+3. Prove discovery, metadata, creator-caption, auto-caption, and audio acquisition through that adapter.
+4. Introduce a WhisperX subprocess adapter for heavy ASR/alignment/optional diarization.
+5. Preserve a lightweight QA backend only where it materially reduces test cost.
+6. Cut normal `vessel update` over to the external acquisition/transcription toolchain.
+7. Verify idempotency, representation precedence, provenance, and atomic materialization after cutover.
+8. Retire superseded native YouTube/download/ASR/diarization machinery.
+9. Remove named-speaker identity/matching/calibration machinery from the maintained product.
 10. Generalize media-source support only where it materially improves corpus acquisition.
 
 ## New Milestones
