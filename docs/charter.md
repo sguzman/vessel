@@ -10,7 +10,7 @@ The color is stable project identity. Use it in future Codex/director prompts, p
 
 ## Mission
 
-Vessel is a Rust-native acquisition and text-materialization engine for research corpora.
+Vessel is an acquisition and text-materialization orchestrator for research corpora.
 
 Its job is to turn declarative interest in media sources into durable text artifacts with provenance.
 
@@ -103,16 +103,41 @@ A stronger representation may replace a weaker one for the same Sourcearium arti
 
 A weaker representation must not automatically overwrite a stronger one.
 
-## ASR Policy
+## ASR And External Tool Policy
 
-- CPU-first default
-- GPU optional
-- Rust-native implementation preferred
-- transcription backend behind a stable interface
-- temporary media disposable after successful materialization unless policy says otherwise
-- ASR engine/model recorded in Sourcearium representation provenance
+- transcription remains behind a stable replaceable interface
+- heavy ASR/alignment/diarization should be delegated to mature external tooling
+- WhisperX is the target heavy ASR/diarization backend
+- Phonon-2 may remain only where its lightweight QA role is materially useful
+- Python tooling is acceptable behind an isolated subprocess boundary, preferably managed with uv
+- temporary media remains disposable after successful materialization unless policy says otherwise
+- ASR engine/model/tool provenance must be recorded in Sourcearium representation provenance
 
 The transcription backend is replaceable without invalidating Sourcearium semantics.
+
+The same principle applies to media acquisition: yt-dlp is the target first-class YouTube acquisition
+backend, while Vessel retains authority over policy, reconciliation, provenance, and durable output.
+
+## Toolchain Ownership Rule
+
+Vessel should own domain semantics and delegate commodity or specialized machinery.
+
+The default decision test is:
+
+~~~text
+does this code encode Vessel/Sourcearium semantics?
+-> yes: Vessel may own it
+
+does this code primarily reimplement a mature external tool's specialty?
+-> yes: prefer an adapter/process boundary
+~~~
+
+Rust is the control-plane implementation language, not a mandate to rebuild YouTube, codecs, ASR,
+diarization, or speaker-recognition infrastructure.
+
+Cross-video named-speaker identity is not an active product goal.
+
+See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
 
 ## Destructive Operations
 
