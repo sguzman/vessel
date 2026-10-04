@@ -4090,9 +4090,9 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
     .validate()?;
     let report_items = args.report_items || args.preview;
     let sourcearium_root = if args.sourcearium.is_absolute() {
-        args.sourcearium
+        args.sourcearium.clone()
     } else {
-        std::env::current_dir()?.join(args.sourcearium)
+        std::env::current_dir()?.join(&args.sourcearium)
     };
 
     if !sourcearium_root.join("sourcearium.toml").is_file() {
