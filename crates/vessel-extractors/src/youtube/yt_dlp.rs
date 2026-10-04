@@ -10,9 +10,35 @@ use vessel_core::models::{
 };
 use vessel_core::{Result, VesselError};
 
-use super::{ChannelVideoCrawlReport, ChannelVideoRef};
-
 pub const YT_DLP_BACKEND_NAME: &str = "yt-dlp";
+
+#[derive(Debug, Clone)]
+pub struct ChannelVideoRef {
+    pub video_id: String,
+    pub tab_name: String,
+    pub title: Option<String>,
+    pub published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChannelTabCursor {
+    pub tab_name: String,
+    pub continuation_token: Option<String>,
+    pub visitor_data: Option<String>,
+    pub delegated_session_id: Option<String>,
+    pub last_seen_published_at: Option<String>,
+    pub backfill_complete: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ChannelVideoCrawlReport {
+    pub videos: Vec<ChannelVideoRef>,
+    pub cursors: Vec<ChannelTabCursor>,
+    pub videos_per_tab: std::collections::BTreeMap<String, usize>,
+    pub tabs_visited: Vec<String>,
+    pub tabs_completed: Vec<String>,
+    pub tabs_resumed_from_checkpoint: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct YtDlpConfig {
