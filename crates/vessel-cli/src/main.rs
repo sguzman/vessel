@@ -4730,11 +4730,14 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                     continue;
                 }
                 increment_summary(&mut summary, "local_asr_attempted", 1);
+                let yt_dlp = (args.youtube_backend == YT_DLP_BACKEND_NAME)
+                    .then(|| update_yt_dlp_config(&args, config));
                 match acquire_local_asr_candidate(
                     &sourcearium_root,
                     &video,
                     asr_backend.take(),
                     &asr_config,
+                    yt_dlp.as_ref(),
                 )
                 .await
                 {
@@ -5369,6 +5372,7 @@ async fn acquire_local_asr_candidate(
     video: &VideoMetadata,
     backend: Option<LoadedAsrBackend>,
     config: &AsrConfig,
+    yt_dlp: Option<&YtDlpConfig>,
 ) -> Result<(TranscriptCandidate, PathBuf, LoadedAsrBackend, bool)> {
     if cfg!(debug_assertions) {
         warn!(
@@ -5403,26 +5407,39 @@ async fn acquire_local_asr_candidate(
         );
         fixture_reused = true;
     } else {
-        let output_template = cache_dir
-            .join("source.%(ext)s")
-            .to_string_lossy()
-            .into_owned();
-        let planner = BasicDownloadPlanner;
-        let plan = planner.plan(video, FormatSelector::BestAudio, &output_template)?;
-        let source_audio = plan
-            .downloads
-            .first()
-            .map(|download| download.output_path.clone())
-            .ok_or_else(|| {
-                VesselError::Extractor(format!(
-                    "ASR audio planner produced no download for {}",
-                    video.video_id
-                ))
-            })?;
+        let source_audio = if let Some(yt_dlp) = yt_dlp {
+            let output_template = cache_dir.join("source.%(ext)s");
+            info!(
+                target: "asr",
+                video_id = %video.video_id,
+                "acquiring ASR source audio through yt-dlp"
+            );
+            yt_dlp
+                .download_best_audio(&video.video_id, &output_template)
+                .await?
+        } else {
+            let output_template = cache_dir
+                .join("source.%(ext)s")
+                .to_string_lossy()
+                .into_owned();
+            let planner = BasicDownloadPlanner;
+            let plan = planner.plan(video, FormatSelector::BestAudio, &output_template)?;
+            let source_audio = plan
+                .downloads
+                .first()
+                .map(|download| download.output_path.clone())
+                .ok_or_else(|| {
+                    VesselError::Extractor(format!(
+                        "ASR audio planner produced no download for {}",
+                        video.video_id
+                    ))
+                })?;
 
-        if !source_audio.is_file() {
-            execute_download(&plan).await?;
-        }
+            if !source_audio.is_file() {
+                execute_download(&plan).await?;
+            }
+            source_audio
+        };
 
         info!(
             target: "asr",
