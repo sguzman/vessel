@@ -11,3 +11,5 @@ subtitles
 *.mp4
 *.mp3
 *.webm
+*.json
+*.txt
