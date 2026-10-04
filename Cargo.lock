@@ -3879,35 +3879,21 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "vessel-core",
- "whisper-candle-core",
 ]
 
 [[package]]
 name = "vessel-cli"
 version = "0.1.0"
 dependencies = [
- "blake3",
- "bzip2",
  "clap",
- "reqwest",
- "serde",
  "serde_json",
- "sha2",
- "tar",
  "time",
  "tokio",
- "toml",
  "tracing",
- "uuid",
  "vessel-asr",
  "vessel-core",
- "vessel-diarization",
- "vessel-download",
  "vessel-extractors",
- "vessel-formats",
- "vessel-ledger",
  "vessel-logging",
- "vessel-postprocess",
  "vessel-store",
 ]
 
@@ -3929,28 +3915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vessel-diarization"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "vessel-core",
-]
-
-[[package]]
-name = "vessel-download"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tracing",
- "vessel-core",
- "vessel-formats",
-]
-
-[[package]]
 name = "vessel-extractors"
 version = "0.1.0"
 dependencies = [
@@ -3966,14 +3930,6 @@ dependencies = [
  "url",
  "uuid",
  "vessel-core",
-]
-
-[[package]]
-name = "vessel-formats"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3993,16 +3949,6 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
- "vessel-core",
-]
-
-[[package]]
-name = "vessel-postprocess"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tokio",
- "uuid",
  "vessel-core",
 ]
 

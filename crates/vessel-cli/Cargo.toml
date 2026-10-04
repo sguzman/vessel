@@ -9,26 +9,13 @@ name = "vessel"
 path = "src/main.rs"
 
 [dependencies]
-bzip2.workspace = true
-tar.workspace = true
-blake3.workspace = true
 clap.workspace = true
-reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 time.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tracing.workspace = true
-uuid.workspace = true
 vessel-asr = { path = "../vessel-asr" }
 vessel-core = { path = "../vessel-core" }
-vessel-diarization = { path = "../vessel-diarization" }
-vessel-download = { path = "../vessel-download" }
 vessel-extractors = { path = "../vessel-extractors" }
-vessel-formats = { path = "../vessel-formats" }
-vessel-ledger = { path = "../vessel-ledger" }
 vessel-logging = { path = "../vessel-logging" }
-vessel-postprocess = { path = "../vessel-postprocess" }
 vessel-store = { path = "../vessel-store" }
