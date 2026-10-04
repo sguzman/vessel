@@ -66,6 +66,65 @@ impl YtDlpConfig {
         parse_channel_listing_json(&json)
     }
 
+    pub async fn download_best_audio(
+        &self,
+        video_id: &str,
+        output_template: &Path,
+    ) -> Result<PathBuf> {
+        let target = format!("https://www.youtube.com/watch?v={video_id}");
+        let mut command = Command::new(&self.executable);
+        command
+            .arg("--no-config")
+            .arg("--quiet")
+            .arg("--no-warnings")
+            .arg("--no-playlist")
+            .arg("--format")
+            .arg("bestaudio")
+            .arg("--output")
+            .arg(output_template)
+            .arg("--print")
+            .arg("after_move:filepath");
+
+        if let Some(browser) = self.cookies_from_browser.as_deref() {
+            command.arg("--cookies-from-browser").arg(browser);
+        }
+        command.arg(&target);
+
+        let output = command
+            .output()
+            .await
+            .map_err(|error| command_start_error(&self.executable, error))?;
+        if !output.status.success() {
+            return Err(command_failure(
+                &self.executable,
+                output.status.code(),
+                &output.stderr,
+            ));
+        }
+
+        let stdout = String::from_utf8(output.stdout).map_err(|error| {
+            VesselError::Extractor(format!("yt-dlp download output was not UTF-8: {error}"))
+        })?;
+        let path = stdout
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                VesselError::Extractor(format!(
+                    "yt-dlp downloaded audio for {video_id} but did not report the output path"
+                ))
+            })?;
+        if !path.is_file() {
+            return Err(VesselError::Extractor(format!(
+                "yt-dlp reported audio output {} but the file does not exist",
+                path.display()
+            )));
+        }
+        Ok(path)
+    }
+
     async fn run_json(&self, target: &str, flat_playlist: bool) -> Result<Value> {
         let mut command = Command::new(&self.executable);
         command
