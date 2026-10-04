@@ -1,5 +1,7 @@
 # Speaker Diarization And Identity
 
+> **Project status (2026-10-03):** anonymous diarization may remain where it directly serves corpus materialization, but cross-video named-speaker identity is **experimental and deferred**. It is not an active Vessel milestone and must not receive further model, threshold, anchor, calibration, or benchmark work unless the human principal explicitly reopens it for a concrete corpus requirement. Prefer an existing external backend such as WhisperX over renewed bespoke speaker-recognition R&D when that keeps Vessel smaller and easier to maintain. See the [speaker-identity scope-hijack postmortem](postmortem-speaker-identity-scope-hijack-2026-10-03.md).
+
 ## Purpose
 
 Vessel must distinguish three separate operations:

@@ -134,6 +134,26 @@ Vessel predates the current director/grunt workflow. Going forward:
 - Corrections should preserve the macro-goal while narrowing or replacing the implementation task.
 - Documentation is part of implementation, not cleanup work deferred to the end.
 
+## Scope-Hijack Guard
+
+Optional subsystems must not become de facto project priorities merely because their next technical problem is solvable.
+
+Before extending an optional subsystem, the director must answer:
+
+1. Which current core Vessel milestone does this unblock?
+2. Can Vessel satisfy its corpus mission without it?
+3. Is an existing external tool materially cheaper than bespoke implementation?
+4. Is the next experiment bounded by a clear stopping condition?
+5. Would the human principal still recognize and want to maintain Vessel after the change?
+
+If the work does not materially advance durable corpus production, the default decision is **defer**.
+
+A failed optional experiment does not automatically justify a more elaborate experiment. Re-evaluate whether the feature is needed before extending the research branch.
+
+Rust-native implementation is a preference, not a justification for rebuilding an existing external capability when doing so would expand Vessel beyond its mission.
+
+See [the 2026-10-03 speaker-identity scope-hijack postmortem](postmortem-speaker-identity-scope-hijack-2026-10-03.md).
+
 ## Engineering Invariants
 
 - Prefer explicit failure over hidden fallback.
