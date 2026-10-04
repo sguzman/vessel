@@ -16,7 +16,7 @@ use vessel_asr::{AsrConfig, LoadedAsrBackend};
 use vessel_core::models::{ChannelMetadata, InputKind, InputRef, VideoMetadata};
 use vessel_core::{
     ChannelCategoryConfig, Config, MaterializeStatus, Result,
-    RuntimeLayout, SourceariumYoutubeSource, TranscriptCandidate, TranscriptDerivation, VesselError,
+    RuntimeLayout, TranscriptCandidate, TranscriptDerivation, VesselError,
     VideoSelection, apply_sourcearium_prune, apply_youtube_transcript_diarization, discover_youtube_sources,
     inventory_sourcearium_repository, load_config, load_speaker_evidence,
     load_youtube_transcript_artifact,
@@ -6004,11 +6004,6 @@ mod tests {
             diarization_model: Some("example/diarizer".into()),
             min_speakers: Some(1),
             max_speakers: Some(3),
-            speaker_embeddings: true,
-            attribute_speakers: false,
-            speaker_min_similarity: 0.80,
-            speaker_min_margin: 0.05,
-            speaker_min_anchor_dominance: 0.80,
             hf_token_env: "TEST_HF_TOKEN".into(),
             upgrade_check_days: 30,
             report_items: false,
