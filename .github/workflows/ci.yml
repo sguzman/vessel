@@ -34,7 +34,10 @@ jobs:
           test ! -d crates/vessel-download
           test ! -d crates/vessel-formats
           test ! -d crates/vessel-postprocess
-          ! grep -R -E 'SherpaOnnx|whisper_candle|whisper-candle-core|youtube_backend'             crates/vessel-cli crates/vessel-asr crates/vessel-extractors Cargo.toml
+          if grep -R -E 'SherpaOnnx|whisper_candle|whisper-candle-core|BasicDownloadPlanner' crates/vessel-cli crates/vessel-asr crates/vessel-extractors Cargo.toml; then
+            echo "retired implementation machinery reappeared"
+            exit 1
+          fi
 
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
