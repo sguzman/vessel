@@ -748,8 +748,14 @@ mod tests {
 
     #[test]
     fn backend_default_models_are_explicit() {
-        assert_eq!(default_model_for_backend(PHONON2_BACKEND_NAME).unwrap(), "phonon-2");
-        assert_eq!(default_model_for_backend(WHISPERX_BACKEND_NAME).unwrap(), "large-v3");
+        assert_eq!(
+            default_model_for_backend(PHONON2_BACKEND_NAME).unwrap(),
+            "phonon-2"
+        );
+        assert_eq!(
+            default_model_for_backend(WHISPERX_BACKEND_NAME).unwrap(),
+            "large-v3"
+        );
         assert!(default_model_for_backend("whisper-candle").is_err());
     }
 
@@ -785,7 +791,10 @@ mod tests {
           "truncated": false
         }"#;
         let candidate = parse_phonon_json(raw, "phonon-2").expect("parse phonon");
-        assert_eq!(candidate.engine.as_deref(), Some("fermion-phonon2-five-value-cpu"));
+        assert_eq!(
+            candidate.engine.as_deref(),
+            Some("fermion-phonon2-five-value-cpu")
+        );
         assert_eq!(candidate.language.as_deref(), Some("en"));
     }
 

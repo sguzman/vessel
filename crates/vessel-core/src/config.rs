@@ -1,7 +1,7 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -212,7 +212,8 @@ pub fn resolve_runtime_layout(
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            paths.project
+            paths
+                .project
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(".cache")
@@ -252,7 +253,10 @@ pub fn resolve_runtime_layout(
 fn default_project_name() -> String {
     env::current_dir()
         .ok()
-        .and_then(|cwd| cwd.file_name().map(|value| value.to_string_lossy().into_owned()))
+        .and_then(|cwd| {
+            cwd.file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+        })
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "default".to_owned())
 }
@@ -279,9 +283,7 @@ fn sanitize_project_name(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Config, ConfigPaths, DatabaseConfig, DownloadConfig, resolve_runtime_layout,
-    };
+    use super::{Config, ConfigPaths, DatabaseConfig, DownloadConfig, resolve_runtime_layout};
     use std::path::PathBuf;
 
     #[test]
@@ -294,8 +296,14 @@ mod tests {
         };
         let layout = resolve_runtime_layout(&config, &paths, Some("alpha")).unwrap();
         assert_eq!(layout.project_name, "alpha");
-        assert_eq!(layout.project_root, PathBuf::from("/workspace/demo/.cache/vessel/alpha"));
-        assert_eq!(layout.database_path, layout.project_root.join("vessel.sqlite"));
+        assert_eq!(
+            layout.project_root,
+            PathBuf::from("/workspace/demo/.cache/vessel/alpha")
+        );
+        assert_eq!(
+            layout.database_path,
+            layout.project_root.join("vessel.sqlite")
+        );
         assert!(
             layout
                 .database_url
@@ -332,7 +340,10 @@ mod tests {
         let layout = resolve_runtime_layout(&config, &paths, None).unwrap();
         assert_eq!(layout.project_name, "beta");
         assert_eq!(layout.cache_root, PathBuf::from("/data/vessel-cache"));
-        assert_eq!(layout.project_root, PathBuf::from("/data/vessel-cache/beta"));
+        assert_eq!(
+            layout.project_root,
+            PathBuf::from("/data/vessel-cache/beta")
+        );
         assert_eq!(layout.database_url, "sqlite:///tmp/custom.sqlite");
         assert_eq!(layout.download_output, "custom/%(id)s.%(ext)s");
     }

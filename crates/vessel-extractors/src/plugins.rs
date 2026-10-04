@@ -144,7 +144,10 @@ struct LoadedPluginArtifacts {
     providers: Vec<LoadedProviderEntry>,
 }
 
-fn load_one_plugin(directory: &Path, manifest_path: &Path) -> std::result::Result<LoadedPluginArtifacts, String> {
+fn load_one_plugin(
+    directory: &Path,
+    manifest_path: &Path,
+) -> std::result::Result<LoadedPluginArtifacts, String> {
     let raw = fs::read_to_string(manifest_path)
         .map_err(|err| format!("failed to read plugin manifest: {err}"))?;
     let manifest = toml::from_str::<PluginManifest>(&raw)
@@ -162,7 +165,11 @@ fn load_one_plugin(directory: &Path, manifest_path: &Path) -> std::result::Resul
     let mut providers = Vec::new();
     for provider in manifest.providers.iter().cloned() {
         provider_names.push(format!("{}.{}", manifest.id, provider.id));
-        providers.push(LoadedProviderEntry::from_manifest(&manifest.id, directory, provider)?);
+        providers.push(LoadedProviderEntry::from_manifest(
+            &manifest.id,
+            directory,
+            provider,
+        )?);
     }
 
     Ok(LoadedPluginArtifacts {
@@ -190,16 +197,27 @@ fn load_fixture_extractor(
         ));
     }
     let fixture_path = directory.join(&manifest.fixtures);
-    let fixture_raw = fs::read_to_string(&fixture_path)
-        .map_err(|err| format!("failed to read extractor fixture file {}: {err}", fixture_path.display()))?;
-    let fixtures = serde_json::from_str::<FixtureData>(&fixture_raw)
-        .map_err(|err| format!("failed to parse extractor fixture file {}: {err}", fixture_path.display()))?;
+    let fixture_raw = fs::read_to_string(&fixture_path).map_err(|err| {
+        format!(
+            "failed to read extractor fixture file {}: {err}",
+            fixture_path.display()
+        )
+    })?;
+    let fixtures = serde_json::from_str::<FixtureData>(&fixture_raw).map_err(|err| {
+        format!(
+            "failed to parse extractor fixture file {}: {err}",
+            fixture_path.display()
+        )
+    })?;
     Ok(FixtureExtractorPlugin {
         plugin_id: plugin_id.to_owned(),
         extractor_id: manifest.id,
         display_name: manifest.name,
         match_contains: manifest.match_contains,
-        support: manifest.support_level.unwrap_or(SupportLevelConfig::Generic).into(),
+        support: manifest
+            .support_level
+            .unwrap_or(SupportLevelConfig::Generic)
+            .into(),
         fixtures,
     })
 }
@@ -288,7 +306,11 @@ impl Extractor for FixtureExtractorPlugin {
         }
     }
 
-    async fn extract(&self, request: ExtractRequest, _ctx: ExtractContext) -> Result<ExtractedItem> {
+    async fn extract(
+        &self,
+        request: ExtractRequest,
+        _ctx: ExtractContext,
+    ) -> Result<ExtractedItem> {
         if is_channel_input(&request.input) {
             if let Some(channel) = self
                 .fixtures
@@ -321,14 +343,18 @@ fn lookup_video_fixture(
     input: &InputRef,
 ) -> Option<VideoMetadata> {
     match input.kind {
-        InputKind::VideoId => videos
-            .get(&input.raw)
-            .cloned()
-            .or_else(|| videos.values().find(|video| video.video_id == input.raw).cloned()),
-        InputKind::Url => videos
-            .get(&input.raw)
-            .cloned()
-            .or_else(|| videos.values().find(|video| video.url == input.raw).cloned()),
+        InputKind::VideoId => videos.get(&input.raw).cloned().or_else(|| {
+            videos
+                .values()
+                .find(|video| video.video_id == input.raw)
+                .cloned()
+        }),
+        InputKind::Url => videos.get(&input.raw).cloned().or_else(|| {
+            videos
+                .values()
+                .find(|video| video.url == input.raw)
+                .cloned()
+        }),
         _ => None,
     }
 }
@@ -357,26 +383,22 @@ impl LoadedProviderEntry {
         manifest: ProviderPluginManifest,
     ) -> std::result::Result<Self, String> {
         let resolver = match manifest.kind.as_str() {
-            "env" => ProviderResolver::Env(
-                manifest
-                    .env
-                    .ok_or_else(|| format!("provider {}.{} is missing `env`", plugin_id, manifest.id))?,
-            ),
+            "env" => ProviderResolver::Env(manifest.env.ok_or_else(|| {
+                format!("provider {}.{} is missing `env`", plugin_id, manifest.id)
+            })?),
             "file" => {
                 let relative = manifest.path.ok_or_else(|| {
                     format!("provider {}.{} is missing `path`", plugin_id, manifest.id)
                 })?;
                 ProviderResolver::File(directory.join(relative))
             }
-            "static" => ProviderResolver::Static(
-                manifest.value.ok_or_else(|| {
-                    format!("provider {}.{} is missing `value`", plugin_id, manifest.id)
-                })?,
-            ),
+            "static" => ProviderResolver::Static(manifest.value.ok_or_else(|| {
+                format!("provider {}.{} is missing `value`", plugin_id, manifest.id)
+            })?),
             other => {
                 return Err(format!(
                     "unsupported provider plugin kind `{other}`; supported kinds are env, file, static"
-                ))
+                ));
             }
         };
         Ok(Self {
@@ -407,8 +429,9 @@ enum ProviderResolver {
 impl ProviderResolver {
     fn resolve(&self) -> std::result::Result<String, String> {
         match self {
-            ProviderResolver::Env(name) => std::env::var(name)
-                .map_err(|_| format!("environment variable `{name}` is not set")),
+            ProviderResolver::Env(name) => {
+                std::env::var(name).map_err(|_| format!("environment variable `{name}` is not set"))
+            }
             ProviderResolver::File(path) => fs::read_to_string(path)
                 .map(|value| value.trim().to_owned())
                 .map_err(|err| format!("failed to read {}: {err}", path.display())),
@@ -494,7 +517,10 @@ value = "token123"
     }
 
     fn temp_plugin_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("vessel-plugin-test-{label}-{}", uuid::Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!(
+            "vessel-plugin-test-{label}-{}",
+            uuid::Uuid::now_v7()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root

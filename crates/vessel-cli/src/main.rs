@@ -20,7 +20,11 @@ use vessel_extractors::youtube::{
 use vessel_store::init_sqlite_database_path;
 
 #[derive(Debug, Parser)]
-#[command(name = "vessel", version, about = "Sourcearium media-text acquisition orchestrator")]
+#[command(
+    name = "vessel",
+    version,
+    about = "Sourcearium media-text acquisition orchestrator"
+)]
 struct Cli {
     #[arg(short = 'q', long = "quiet", global = true)]
     quiet: bool,
@@ -173,8 +177,7 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
             summary["items"] = serde_json::json!([]);
         }
         summary["preview"] = serde_json::Value::Bool(args.preview);
-        summary["youtube_backend"] =
-            serde_json::Value::String(YT_DLP_BACKEND_NAME.to_owned());
+        summary["youtube_backend"] = serde_json::Value::String(YT_DLP_BACKEND_NAME.to_owned());
 
         if !policy.transcripts.enabled {
             summary["status"] = serde_json::Value::String("transcripts_disabled".into());
@@ -870,7 +873,9 @@ async fn extract_update_video(
     config: &Config,
     input: &InputRef,
 ) -> Result<VideoMetadata> {
-    update_yt_dlp_config(args, config).extract_video(input).await
+    update_yt_dlp_config(args, config)
+        .extract_video(input)
+        .await
 }
 
 fn resolve_asr_config(args: &UpdateArgs) -> Result<AsrConfig> {
@@ -1249,8 +1254,11 @@ async fn doctor() -> Result<()> {
             "phonon_qa": binary_available("fermion"),
         },
     });
-    println!("{}", serde_json::to_string_pretty(&report)
-        .map_err(|error| VesselError::Config(error.to_string()))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| VesselError::Config(error.to_string()))?
+    );
     Ok(())
 }
 
@@ -1268,8 +1276,21 @@ mod tests {
 
     #[test]
     fn cli_is_reduced_to_corpus_maintenance_surface() {
-        for removed in ["dataset", "channel", "video", "download", "formats", "plugin", "diarization", "info", "asr"] {
-            assert!(Cli::try_parse_from(["vessel", removed]).is_err(), "{removed} must stay retired");
+        for removed in [
+            "dataset",
+            "channel",
+            "video",
+            "download",
+            "formats",
+            "plugin",
+            "diarization",
+            "info",
+            "asr",
+        ] {
+            assert!(
+                Cli::try_parse_from(["vessel", removed]).is_err(),
+                "{removed} must stay retired"
+            );
         }
         assert!(Cli::try_parse_from(["vessel", "update", "--youtube-backend", "native"]).is_err());
     }
@@ -1277,7 +1298,9 @@ mod tests {
     #[test]
     fn update_defaults_to_external_toolchain() {
         let cli = Cli::try_parse_from(["vessel", "update"]).expect("parse update");
-        let Commands::Update(args) = cli.command else { panic!("expected update command") };
+        let Commands::Update(args) = cli.command else {
+            panic!("expected update command")
+        };
         assert_eq!(args.yt_dlp_executable, PathBuf::from("yt-dlp"));
         let asr = resolve_asr_config(&args).expect("default ASR config");
         assert_eq!(asr.backend, vessel_asr::WHISPERX_BACKEND_NAME);
@@ -1286,8 +1309,12 @@ mod tests {
 
     #[test]
     fn diarization_requires_whisperx() {
-        let cli = Cli::try_parse_from(["vessel", "update", "--asr-backend", "phonon-2", "--diarize"]).expect("parse");
-        let Commands::Update(args) = cli.command else { panic!("expected update") };
+        let cli =
+            Cli::try_parse_from(["vessel", "update", "--asr-backend", "phonon-2", "--diarize"])
+                .expect("parse");
+        let Commands::Update(args) = cli.command else {
+            panic!("expected update")
+        };
         assert!(resolve_asr_config(&args).is_err());
     }
 
@@ -1378,7 +1405,13 @@ esac
 
     #[test]
     fn publication_dates_normalize() {
-        assert_eq!(normalize_update_publication_date(Some("20261003")), Some("2026-10-03".into()));
-        assert_eq!(normalize_update_publication_date(Some("2026-10-03T12:00:00Z")), Some("2026-10-03".into()));
+        assert_eq!(
+            normalize_update_publication_date(Some("20261003")),
+            Some("2026-10-03".into())
+        );
+        assert_eq!(
+            normalize_update_publication_date(Some("2026-10-03T12:00:00Z")),
+            Some("2026-10-03".into())
+        );
     }
 }

@@ -227,7 +227,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn add_tracked_channel(&self, channel: &ChannelMetadata, category: &str) -> Result<()> {
+    pub async fn add_tracked_channel(
+        &self,
+        channel: &ChannelMetadata,
+        category: &str,
+    ) -> Result<()> {
         let added_at = channel
             .fetched_at
             .format(&time::format_description::well_known::Rfc3339)
@@ -428,10 +432,7 @@ ORDER BY MIN(discovered_at) ASC, video_id ASC
             .collect())
     }
 
-    pub async fn load_source_video_published_on(
-        &self,
-        video_id: &str,
-    ) -> Result<Option<String>> {
+    pub async fn load_source_video_published_on(&self, video_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT published_on FROM source_video_state WHERE video_id = ?1",
         )
@@ -495,7 +496,10 @@ ON CONFLICT(video_id) DO UPDATE SET
         Ok(())
     }
 
-    pub async fn aggregate_channel_video_view_count(&self, channel_id: &str) -> Result<Option<u64>> {
+    pub async fn aggregate_channel_video_view_count(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<u64>> {
         let total = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT SUM(view_count) FROM videos WHERE channel_id = ?1",
         )
@@ -674,12 +678,12 @@ ORDER BY fetched_at DESC
         let metrics = metric_rows
             .into_iter()
             .map(|row| VideoMetricSample {
-                    video_id: row.get("video_id"),
-                    fetched_at: row.get("fetched_at"),
-                    view_count: row.get("view_count"),
-                    like_count: row.get("like_count"),
-                    comment_count: row.get("comment_count"),
-                })
+                video_id: row.get("video_id"),
+                fetched_at: row.get("fetched_at"),
+                view_count: row.get("view_count"),
+                like_count: row.get("like_count"),
+                comment_count: row.get("comment_count"),
+            })
             .collect::<Vec<_>>();
 
         let revision_rows = sqlx::query(
@@ -722,7 +726,7 @@ ORDER BY recorded_at DESC
                     changed_fields: serde_json::from_str::<Vec<String>>(
                         &row.get::<String, _>("changed_fields_json"),
                     )
-                    .map_err(|err| VesselError::Database(err.to_string()))?
+                    .map_err(|err| VesselError::Database(err.to_string()))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1226,7 +1230,9 @@ impl SnapshotStore for SqliteStore {
             .map_err(|err| VesselError::Database(err.to_string()))?;
         let _ = raw_json;
         let next_projection = channel_snapshot_projection(channel);
-        let previous_projection = self.latest_channel_revision_projection(&channel.channel_id).await?;
+        let previous_projection = self
+            .latest_channel_revision_projection(&channel.channel_id)
+            .await?;
         let changed_fields = previous_projection
             .as_ref()
             .map(|previous| diff_paths(previous, &next_projection))
@@ -2133,11 +2139,7 @@ mod tests {
         );
 
         store
-            .save_source_video_published_on(
-                "video-date",
-                Some("UC-date"),
-                "2024-01-02",
-            )
+            .save_source_video_published_on("video-date", Some("UC-date"), "2024-01-02")
             .await
             .expect("save date");
         assert_eq!(
@@ -2150,11 +2152,7 @@ mod tests {
         );
 
         store
-            .save_source_video_published_on(
-                "video-date",
-                Some("UC-date"),
-                "2024-01-03",
-            )
+            .save_source_video_published_on("video-date", Some("UC-date"), "2024-01-03")
             .await
             .expect("replace date");
         assert_eq!(

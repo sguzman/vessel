@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::registry::LookupSpan;
 
 use vessel_core::{LoggingFormat, Result, VesselError};
@@ -123,7 +123,8 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(trim_quotes(rendered));
         } else if field.name() != "progress" {
-            self.fields.push((field.name().to_owned(), trim_quotes(rendered)));
+            self.fields
+                .push((field.name().to_owned(), trim_quotes(rendered)));
         }
     }
 
@@ -131,7 +132,8 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(value.to_owned());
         } else if field.name() != "progress" {
-            self.fields.push((field.name().to_owned(), value.to_owned()));
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
         }
     }
 
