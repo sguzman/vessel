@@ -910,7 +910,6 @@ fn resolve_asr_config(args: &UpdateArgs) -> Result<AsrConfig> {
     }
     config.min_speakers = config.diarize.then_some(args.min_speakers).flatten();
     config.max_speakers = config.diarize.then_some(args.max_speakers).flatten();
-    config.speaker_embeddings = false;
     config.hf_token_env = args.hf_token_env.clone();
     if config.backend != vessel_asr::WHISPERX_BACKEND_NAME
         && config.backend != vessel_asr::PHONON2_BACKEND_NAME
