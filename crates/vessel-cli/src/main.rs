@@ -2067,9 +2067,9 @@ async fn diarization_seed(args: DiarizationSeedArgs) -> Result<()> {
 
 fn diarization_reembed(args: DiarizationReembedArgs) -> Result<()> {
     let sourcearium_root = if args.sourcearium.is_absolute() {
-        args.sourcearium
+        args.sourcearium.clone()
     } else {
-        std::env::current_dir()?.join(args.sourcearium)
+        std::env::current_dir()?.join(&args.sourcearium)
     };
     let source = discover_youtube_sources(&sourcearium_root)?
         .into_iter()
