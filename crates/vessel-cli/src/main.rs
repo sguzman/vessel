@@ -136,7 +136,7 @@ struct UpdateArgs {
     asr_language: Option<String>,
     #[arg(long)]
     diarize: bool,
-    #[arg(long = "diarization-backend", default_value = "sherpa-onnx")]
+    #[arg(long = "diarization-backend", default_value = "whisperx")]
     diarization_backend: String,
     #[arg(long = "diarization-segmentation-model")]
     diarization_segmentation_model: Option<PathBuf>,
@@ -5264,6 +5264,10 @@ async fn extract_update_video(
 
 fn resolve_asr_config(args: &UpdateArgs) -> AsrConfig {
     let mut config = AsrConfig::default();
+    if args.asr_backend.is_none() {
+        config.backend = vessel_asr::WHISPERX_BACKEND_NAME.to_owned();
+        config.model = "large-v3".to_owned();
+    }
     if let Some(backend) = args.asr_backend.as_deref() {
         config.backend = backend.to_owned();
         if args.asr_model.is_none() {
