@@ -57,17 +57,20 @@ jobs:
           cargo run --locked --offline -q -p vessel-cli -- diarization doctor > /tmp/diarization-doctor.json
           grep -q '"build_time_fetch": false' /tmp/diarization-doctor.json
 
-      - name: Format active corpus files
+      - name: Format active migration files
         if: always()
         run: |
-          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr -p vessel-diarization
+          cargo fmt -p vessel-core -p vessel-extractors -p vessel-asr -p vessel-diarization -p vessel-cli
           git diff --exit-code -- \
+            crates/vessel-cli/src/main.rs \
             crates/vessel-core/src/error.rs \
             crates/vessel-core/src/lib.rs \
             crates/vessel-core/src/sourcearium.rs \
             crates/vessel-core/src/sourcearium_repo.rs \
+            crates/vessel-core/src/speaker_evidence.rs \
             crates/vessel-core/src/transcript.rs \
             crates/vessel-extractors/src/youtube/transcript.rs \
+            crates/vessel-extractors/src/youtube/yt_dlp.rs \
             crates/vessel-asr/src/lib.rs \
             crates/vessel-diarization/src/lib.rs
 

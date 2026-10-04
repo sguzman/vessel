@@ -64,8 +64,11 @@ Current migration state:
 - SQLite remains responsible for Vessel's durable operational backlog/reconcile state, while native
   YouTube continuation tokens are legacy-only on `--youtube-backend native`;
 - WhisperX is the default local-ASR and optional diarization backend;
-- named-speaker identity controls are rejected by the active update path and the legacy `speakers`
-  command family is hidden/retired;
+- named-speaker identity controls and the `speakers` command family have been removed;
+- the registry, cross-video matcher, anchor/calibration implementation, and calibration manifest have
+  been removed from the maintained codebase;
+- only the backend-neutral anonymous diarization evidence format remains for compatibility with
+  explicit legacy diarization maintenance;
 - native download/ASR/diarization code remains temporarily available for migration comparison/recovery.
 
 See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
@@ -80,7 +83,7 @@ See [Toolchain Migration Autopsy](toolchain-migration-autopsy-2026-10-03.md).
 6. Cut normal `vessel update` over to the external acquisition/transcription toolchain.
 7. Verify idempotency, representation precedence, provenance, and atomic materialization after cutover.
 8. Retire superseded native YouTube/download/ASR/diarization machinery.
-9. Remove named-speaker identity/matching/calibration machinery from the maintained product.
+9. ~~Remove named-speaker identity/matching/calibration machinery from the maintained product.~~ Completed.
 10. Generalize media-source support only where it materially improves corpus acquisition.
 
 ## New Milestones
@@ -223,7 +226,8 @@ Implemented:
 Implemented additionally:
 
 - `vessel update` invokes ASR when platform captions are unavailable and policy allows it
-- existing `bestaudio` download planning reused for temporary media
+- yt-dlp acquires temporary best-audio media on the default YouTube path; the native planner remains
+  only on the explicit legacy backend
 - ASR input normalized to 16 kHz mono PCM WAV
 - temporary ASR media retained on failure and deleted after successful materialization
 - durable 16 kHz diarization fixtures are reused as ASR input when present, avoiding duplicate media downloads and normalization
@@ -240,7 +244,7 @@ Local QA / acceptance rule:
 - when a test merely needs *some* local ASR output to exercise downstream Vessel behavior, use the lightest suitable backend: `phonon-2` for English fixtures
 - do not spend Whisper compute on generic QA
 - use `whisper-candle` or another heavier backend only when the test specifically targets that backend, multilingual behavior, or a quality characteristic that `phonon-2` cannot exercise
-- tests that only exercise diarization, speaker matching, attribution, rendering, or persisted evidence must reuse existing audio/evidence and invoke no ASR at all
+- tests that only exercise diarization or persisted anonymous evidence must reuse existing audio/evidence and invoke no ASR at all
 
 Real-source acceptance discovered and documented:
 
