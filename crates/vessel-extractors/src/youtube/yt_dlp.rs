@@ -213,17 +213,45 @@ fn command_start_error(executable: &Path, error: std::io::Error) -> VesselError 
 fn command_failure(executable: &Path, code: Option<i32>, stderr: &[u8]) -> VesselError {
     let stderr = String::from_utf8_lossy(stderr);
     let stderr = stderr.trim();
-    VesselError::Extractor(format!(
-        "yt-dlp executable {} failed with status {}{}",
+    let mut message = format!(
+        "yt-dlp executable {} failed with status {}",
         executable.display(),
         code.map(|value| value.to_string())
-            .unwrap_or_else(|| "signal".into()),
-        if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {stderr}")
-        }
-    ))
+            .unwrap_or_else(|| "signal".into())
+    );
+    if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr);
+    }
+    if let Some(hint) = yt_dlp_failure_hint(stderr) {
+        message.push_str("; hint: ");
+        message.push_str(hint);
+    }
+    VesselError::Extractor(message)
+}
+
+fn yt_dlp_failure_hint(stderr: &str) -> Option<&'static str> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("sign in to confirm you're not a bot")
+        || lower.contains("sign in to confirm your age")
+        || lower.contains("age-restricted")
+        || lower.contains("login required")
+    {
+        return Some(
+            "YouTube requires authentication; configure youtube.cookies_from_browser with a readable browser profile",
+        );
+    }
+    if lower.contains("http error 429") || lower.contains("too many requests") {
+        return Some(
+            "YouTube is rate-limiting requests; avoid repeated probes and retry after the rate limit clears",
+        );
+    }
+    if lower.contains("cookies") && (lower.contains("error") || lower.contains("failed")) {
+        return Some(
+            "yt-dlp could not use browser cookies; verify the configured browser/profile is readable",
+        );
+    }
+    None
 }
 
 fn video_target(input: &InputRef) -> Result<String> {
@@ -775,6 +803,29 @@ mod tests {
         assert_eq!(channel.handle.as_deref(), Some("@example"));
         assert_eq!(channel.title.as_deref(), Some("Example"));
         assert_eq!(channel.subscriber_count, Some(42));
+    }
+
+    #[test]
+    fn yt_dlp_failure_hints_classify_auth_and_rate_limits() {
+        assert_eq!(
+            yt_dlp_failure_hint("ERROR: Sign in to confirm you're not a bot"),
+            Some(
+                "YouTube requires authentication; configure youtube.cookies_from_browser with a readable browser profile"
+            )
+        );
+        assert_eq!(
+            yt_dlp_failure_hint("ERROR: HTTP Error 429: Too Many Requests"),
+            Some(
+                "YouTube is rate-limiting requests; avoid repeated probes and retry after the rate limit clears"
+            )
+        );
+        assert_eq!(
+            yt_dlp_failure_hint("ERROR: failed to load cookies from chromium"),
+            Some(
+                "yt-dlp could not use browser cookies; verify the configured browser/profile is readable"
+            )
+        );
+        assert_eq!(yt_dlp_failure_hint("ERROR: video unavailable"), None);
     }
 
     #[test]
