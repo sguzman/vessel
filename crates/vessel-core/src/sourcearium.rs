@@ -519,6 +519,58 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pre_migration_extensions_remain_parseable() {
+        let raw = r#"+++
+schema = 1
+artifact_id = "youtube:video:legacy123:transcript"
+kind = "transcript"
+title = "Historical transcript"
+
+[source]
+family = "youtube"
+kind = "video"
+id = "legacy123"
+url = "https://www.youtube.com/watch?v=legacy123"
+creator = "Example"
+creator_id = "UCexample"
+published = "2026-10-01"
+
+[representation]
+derivation = "local_asr"
+language = "en"
+timestamps = true
+engine = "whisper-candle"
+model = "small"
+
+[acquisition]
+producer = "vessel"
+method = "local_asr"
+
+[extensions.diarization]
+engine = "sherpa-onnx"
+label_scope = "file_local"
+model = "legacy-model"
+
+[extensions.speaker_attribution]
+method = "embedding_cosine_v2_creator_prior"
+registry_revision = 2
++++
+
+[00:00:03] <speaker:SPEAKER_00> Historical line.
+"#;
+
+        let (artifact, body) =
+            SourceariumArtifactV1::parse_markdown(raw).expect("legacy artifact must remain valid");
+        assert_eq!(
+            artifact.representation.engine.as_deref(),
+            Some("whisper-candle")
+        );
+        assert!(artifact.extensions.contains_key("diarization"));
+        assert!(artifact.extensions.contains_key("speaker_attribution"));
+        assert_eq!(body, "[00:00:03] <speaker:SPEAKER_00> Historical line.\n");
+    }
+
+    #[test]
     fn local_asr_requires_engine_and_model() {
         let mut artifact = base_artifact();
         artifact.representation.derivation = "local_asr".into();
