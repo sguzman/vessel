@@ -1320,8 +1320,10 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn preview_update_runs_end_to_end_through_fake_yt_dlp() {
+    async fn materialize_then_repeat_is_idempotent_through_fake_toolchain() {
         use std::fs;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
         use std::os::unix::fs::PermissionsExt;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1348,16 +1350,31 @@ input = "https://www.youtube.com/@example"
         )
         .expect("source policy");
 
+        let listener = TcpListener::bind("127.0.0.1:0").expect("caption listener");
+        let caption_addr = listener.local_addr().expect("caption address");
+        let caption_server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("caption request");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read caption request");
+            let body = r#"{"events":[{"tStartMs":0,"segs":[{"utf8":"Fixture transcript."}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write caption response");
+        });
+        let caption_url = format!("http://{caption_addr}/timedtext?lang=en");
+
         let fake = root.join("fake-yt-dlp");
-        fs::write(
-            &fake,
-            r#"#!/bin/sh
+        let fake_script = r#"#!/bin/sh
 last=""
 for arg in "$@"; do last="$arg"; done
 case "$last" in
   *watch?v=video123)
     cat <<'JSON'
-{"id":"video123","channel_id":"UC_TEST","webpage_url":"https://www.youtube.com/watch?v=video123","title":"Fixture video","upload_date":"20261003","formats":[],"subtitles":{},"automatic_captions":{},"thumbnails":[]}
+{"id":"video123","channel_id":"UC_TEST","webpage_url":"https://www.youtube.com/watch?v=video123","title":"Fixture video","upload_date":"20261003","formats":[],"subtitles":{"en":[{"url":"__CAPTION_URL__","ext":"json3"}]},"automatic_captions":{},"thumbnails":[]}
 JSON
     ;;
   *)
@@ -1366,18 +1383,18 @@ JSON
 JSON
     ;;
 esac
-"#,
-        )
-        .expect("fake yt-dlp");
+"#
+        .replace("__CAPTION_URL__", &caption_url);
+        fs::write(&fake, fake_script).expect("fake yt-dlp");
         let mut permissions = fs::metadata(&fake).expect("fake metadata").permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&fake, permissions).expect("make fake executable");
 
-        let args = UpdateArgs {
+        let make_args = || UpdateArgs {
             sourcearium: root.clone(),
             max_videos: Some(1),
             video_ids: Vec::new(),
-            yt_dlp_executable: fake,
+            yt_dlp_executable: fake.clone(),
             force_local_asr: false,
             asr_backend: None,
             asr_model: None,
@@ -1392,12 +1409,46 @@ esac
             hf_token_env: "HF_TOKEN".into(),
             upgrade_check_days: 0,
             report_items: true,
-            preview: true,
+            preview: false,
         };
 
-        sourcearium_update(args, &Config::default())
+        sourcearium_update(make_args(), &Config::default())
             .await
-            .expect("end-to-end preview update");
+            .expect("materializing update");
+        caption_server.join().expect("caption server");
+
+        let transcript_path = source_dir
+            .join("transcripts")
+            .join("2026-10-03__video123__fixture-video.md");
+        let first_bytes = fs::read(&transcript_path).expect("materialized transcript");
+        let first_text = String::from_utf8(first_bytes.clone()).expect("transcript utf-8");
+        assert!(first_text.contains("derivation = \"creator_subtitles\""));
+        assert!(first_text.contains("[00:00:00] Fixture transcript."));
+
+        let validation = validate_sourcearium_repository(&root).expect("validate materialized corpus");
+        assert!(validation.valid, "{:?}", validation.errors);
+        assert_eq!(validation.artifacts_validated, 1);
+
+        let inventory = inventory_sourcearium_repository(&root).expect("inventory corpus");
+        assert_eq!(inventory.artifacts, 1);
+        assert_eq!(
+            inventory.by_derivation.get("creator_subtitles"),
+            Some(&1)
+        );
+
+        sourcearium_update(make_args(), &Config::default())
+            .await
+            .expect("repeat update");
+        let second_bytes = fs::read(&transcript_path).expect("repeat transcript");
+        assert_eq!(second_bytes, first_bytes, "repeat update must be a durable no-op");
+
+        let inventory_after =
+            inventory_sourcearium_repository(&root).expect("inventory repeated corpus");
+        assert_eq!(inventory_after.artifacts, 1);
+        assert_eq!(
+            inventory_after.by_derivation.get("creator_subtitles"),
+            Some(&1)
+        );
         assert!(root.join(".cache/vessel/vessel.sqlite").is_file());
 
         let _ = fs::remove_dir_all(root);
