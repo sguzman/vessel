@@ -82,13 +82,15 @@ Required for the relevant paths:
 - `yt-dlp`
 - `ffmpeg` / `ffprobe`
 - `whisperx` when local ASR or diarization is needed
-- `uv` recommended for isolating the Python toolchain
+- `uv` is the only supported manager for Python-backed tooling; provision ahead of ingestion with source builds disabled
 - `fermion` only if the optional Phonon-2 backend is used
 
 ```bash
 cargo build --release --locked
 target/release/vessel doctor
 ```
+
+Normal `vessel update` never installs or builds Python packages. WhisperX/pyannote must be provisioned explicitly ahead of time; offline/cached preparation is preferred when practical.
 
 ## Sourcearium
 
