@@ -26,17 +26,19 @@ Future work should improve the corpus loop rather than rebuild external machiner
 
 ### Reliability
 
-- harden yt-dlp JSON compatibility when upstream output changes;
-- improve diagnostics around browser cookies/authentication;
-- improve retry/reporting behavior without contaminating durable artifacts;
-- keep SQLite state recoverable and disposable.
+- [ ] harden yt-dlp JSON compatibility when upstream output changes;
+- [x] classify authentication, browser-cookie, and rate-limit failures with actionable diagnostics;
+- [ ] improve bounded retry/reporting behavior without contaminating durable artifacts;
+- [x] gate a deterministic materialize -> validate/inventory -> repeat/no-op corpus loop in CI;
+- [ ] keep hardening SQLite recovery/disposability only when real corpus runs expose a failure.
 
 ### Corpus Semantics
 
-- strengthen Sourcearium validation as real corpora expose edge cases;
-- improve transcript normalization only when source-preserving;
-- add representation providers only when they materially improve corpus coverage;
-- preserve deterministic no-op updates.
+- [ ] strengthen Sourcearium validation as real corpora expose edge cases;
+- [ ] improve transcript normalization only when source-preserving;
+- [ ] add representation providers only when they materially improve corpus coverage;
+- [x] preserve deterministic no-op updates for the strongest existing representation in acceptance tests;
+- [ ] prove no-op behavior against a real target-environment Sourcearium run.
 
 ### Performance
 
