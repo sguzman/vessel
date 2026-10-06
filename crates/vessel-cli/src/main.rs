@@ -566,7 +566,7 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
                 "caption_fetch_skipped": args.force_local_asr,
             });
 
-            let (mut candidate, asr_cache_dir) = if let Some(candidate) = caption_candidate {
+            let (candidate, asr_cache_dir) = if let Some(candidate) = caption_candidate {
                 (candidate, None)
             } else if existing.is_some() && !args.force_local_asr {
                 increment_summary(&mut summary, "preserved_without_better_caption", 1);
@@ -1245,13 +1245,19 @@ fn init_logging(config: &Config, cli: &Cli) -> Result<()> {
 async fn doctor() -> Result<()> {
     let report = serde_json::json!({
         "architecture": "external-toolchain",
+        "python_policy": {
+            "manager": "uv",
+            "runtime_installs": false,
+            "source_builds": false,
+            "offline_preparation_preferred": true,
+        },
         "binaries": {
-            "yt_dlp": binary_available("yt-dlp"),
-            "ffmpeg": binary_available("ffmpeg"),
-            "ffprobe": binary_available("ffprobe"),
-            "whisperx": binary_available("whisperx"),
-            "uv": binary_available("uv"),
-            "phonon_qa": binary_available("fermion"),
+            "yt_dlp": binary_available("yt-dlp", &["--version"]),
+            "ffmpeg": binary_available("ffmpeg", &["-version"]),
+            "ffprobe": binary_available("ffprobe", &["-version"]),
+            "whisperx": binary_available("whisperx", &["--help"]),
+            "uv": binary_available("uv", &["--version"]),
+            "phonon_qa": binary_available("fermion", &["--version"]),
         },
     });
     println!(
@@ -1262,9 +1268,9 @@ async fn doctor() -> Result<()> {
     Ok(())
 }
 
-fn binary_available(binary: &str) -> bool {
+fn binary_available(binary: &str, args: &[&str]) -> bool {
     std::process::Command::new(binary)
-        .arg("--version")
+        .args(args)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
