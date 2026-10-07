@@ -1,0 +1,74 @@
+#!/usr/bin/env fish
+
+# Prefetch WhisperX ASR + pyannote diarization assets into a Sourcearium-local cache.
+# This is deliberately separate from vessel update so corpus work can run offline.
+
+if test (count $argv) -lt 1
+    echo "usage: fish scripts/prefetch-whisperx-models.fish <sourcearium-root>" >&2
+    exit 2
+end
+
+set -l sourcearium_root (realpath $argv[1])
+if not test -f "$sourcearium_root/sourcearium.toml"
+    echo "$sourcearium_root does not look like a Sourcearium root" >&2
+    exit 2
+end
+
+if not set -q HF_TOKEN
+    echo "HF_TOKEN is required for pyannote/speaker-diarization-community-1." >&2
+    echo "Accept the model's Hugging Face user conditions, then export a read token for this shell." >&2
+    exit 2
+end
+
+set -l tool_root (uv tool dir)
+or exit $status
+set -l python "$tool_root/whisperx/bin/python"
+
+if not test -x "$python"
+    echo "WhisperX uv tool environment not found at $python" >&2
+    echo "Run fish scripts/provision-whisperx.fish first." >&2
+    exit 2
+end
+
+set -l cache_root "$sourcearium_root/.cache/vessel/models"
+set -l whisper_dir "$cache_root/whisperx/large-v3"
+set -l pyannote_dir "$cache_root/pyannote/speaker-diarization-community-1"
+
+mkdir -p "$whisper_dir" "$pyannote_dir"
+or exit $status
+
+echo "[prefetch] faster-whisper large-v3 -> $whisper_dir"
+env HF_TOKEN="$HF_TOKEN" "$python" - "$whisper_dir" <<'PY'
+import sys
+from faster_whisper import download_model
+
+target = sys.argv[1]
+path = download_model("large-v3", output_dir=target)
+print(path)
+PY
+or exit $status
+
+echo "[prefetch] pyannote speaker-diarization-community-1 -> $pyannote_dir"
+env HF_TOKEN="$HF_TOKEN" "$python" - "$pyannote_dir" <<'PY'
+import os
+import sys
+from huggingface_hub import snapshot_download
+
+target = sys.argv[1]
+path = snapshot_download(
+    repo_id="pyannote/speaker-diarization-community-1",
+    local_dir=target,
+    token=os.environ["HF_TOKEN"],
+)
+print(path)
+PY
+or exit $status
+
+echo
+echo "Model assets ready."
+echo "WhisperX model dir: $whisper_dir"
+echo "Pyannote model dir: $pyannote_dir"
+echo
+echo "Use these with Vessel:"
+echo "  --asr-model-dir $whisper_dir"
+echo "  --diarization-model $pyannote_dir"
