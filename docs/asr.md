@@ -64,7 +64,7 @@ fish scripts/prefetch-whisperx-models.fish <sourcearium-root>
 
 The script requires `HF_TOKEN` because `pyannote/speaker-diarization-community-1` is gated. It stores:
 
-- Faster-Whisper `large-v3` under `<sourcearium>/.cache/vessel/models/whisperx/large-v3`;
+- Faster-Whisper `large-v3` in the Hugging Face cache rooted at `<sourcearium>/.cache/vessel/models/whisperx`;
 - pyannote `speaker-diarization-community-1` under `<sourcearium>/.cache/vessel/models/pyannote/speaker-diarization-community-1`.
 
 The later Vessel run should pass those paths with `--asr-model-dir` and `--diarization-model`. WhisperX then uses cache-only loading for the ASR model, and pyannote loads its local pipeline directory.
