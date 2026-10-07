@@ -1128,6 +1128,8 @@ async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
         .arg("16000")
         .arg("-c:a")
         .arg("pcm_s16le")
+        .arg("-f")
+        .arg("wav")
         .arg(&partial)
         .status()
         .await
