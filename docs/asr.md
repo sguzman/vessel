@@ -103,6 +103,23 @@ The migration deleted:
 
 These are not fallback paths.
 
+
+## Cache Integrity And Retry Semantics
+
+Real target-environment acceptance exposed that an interrupted normalization can leave cache material that exists on disk without being a complete decodable WAV. Cache existence is therefore never sufficient proof of validity.
+
+The maintained retry contract is:
+
+- verify an existing normalized ASR input with ffprobe before reuse;
+- discard an invalid normalized cache entry automatically;
+- write normalization output to a temporary path that remains WAV-identifiable;
+- explicitly request the WAV muxer during normalization;
+- verify the completed 16 kHz mono PCM output before atomically promoting it to `whisper-input.wav`;
+- reuse downloaded source audio only when ffprobe confirms that it contains a valid audio stream;
+- never modify an existing durable Sourcearium artifact merely because an ASR retry fails.
+
+The 2026-10-07 Tiny Clipper acceptance run exercised this recovery path and subsequently completed WhisperX `large-v3` transcription plus pyannote diarization successfully.
+
 ## Failure Semantics
 
 Temporary media and ASR cache state live under `<sourcearium>/.cache/vessel/`.

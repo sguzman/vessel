@@ -6,6 +6,13 @@ The 2026-10-03 toolchain migration is complete.
 
 The project has finished the architectural reset from "Rust-native media stack" to "small Sourcearium control plane around mature external tools."
 
+As of 2026-10-07, the current external-toolchain architecture has also completed its first real target-environment production acceptance:
+
+- creator subtitles were materialized for `Saw | ContraPoints`;
+- WhisperX `large-v3` local ASR was materialized for Tiny Clipper `YOSJDOLe_R0`;
+- optional pyannote diarization completed on that same real target;
+- interrupted-cache recovery defects exposed by the run were repaired and the target subsequently completed successfully.
+
 Completed migration outcomes:
 
 - yt-dlp is the only maintained YouTube acquisition path;
@@ -30,15 +37,22 @@ Future work should improve the corpus loop rather than rebuild external machiner
 - [x] classify authentication, browser-cookie, and rate-limit failures with actionable diagnostics;
 - [ ] improve bounded retry/reporting behavior without contaminating durable artifacts;
 - [x] gate a deterministic materialize -> validate/inventory -> repeat/no-op corpus loop in CI;
-- [ ] keep hardening SQLite recovery/disposability only when real corpus runs expose a failure.
+- [x] reject interrupted/corrupt normalized-audio cache entries and promote normalized WAV atomically;
+- [x] reuse only verified cached source audio on retry;
+- [ ] keep hardening SQLite/cache recovery only when real corpus runs expose a new failure.
 
 ### Corpus Semantics
 
 - [ ] strengthen Sourcearium validation as real corpora expose edge cases;
 - [ ] improve transcript normalization only when source-preserving;
 - [ ] add representation providers only when they materially improve corpus coverage;
+- [x] materialize creator subtitles through the current external-toolchain path on a real target;
+- [x] materialize WhisperX local ASR through the current external-toolchain path on a real target;
+- [x] materialize optional file-local WhisperX/pyannote diarization on real material;
 - [x] preserve deterministic no-op updates for the strongest existing representation in acceptance tests;
-- [ ] prove no-op behavior against a real target-environment Sourcearium run.
+- [ ] prove no-op behavior against a real target-environment Sourcearium run;
+- [ ] materialize a real automatic-caption representation through the current toolchain;
+- [ ] prove existing Sourcearium text survives an upstream private/deleted/inaccessible state in practice.
 
 ### Performance
 
