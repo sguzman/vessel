@@ -992,14 +992,23 @@ async fn acquire_local_asr_candidate(
         }
 
         let output_template = cache_dir.join("source.%(ext)s");
-        info!(
-            target: "asr",
-            video_id = %video.video_id,
-            "acquiring ASR source audio through yt-dlp"
-        );
-        let source_audio = yt_dlp
-            .download_best_audio(&video.video_id, &output_template)
-            .await?;
+        let source_audio = if let Some(cached) = find_cached_source_audio(&cache_dir).await? {
+            info!(
+                target: "asr",
+                input = %cached.display(),
+                "reusing verified cached ASR source audio"
+            );
+            cached
+        } else {
+            info!(
+                target: "asr",
+                video_id = %video.video_id,
+                "acquiring ASR source audio through yt-dlp"
+            );
+            yt_dlp
+                .download_best_audio(&video.video_id, &output_template)
+                .await?
+        };
         info!(
             target: "asr",
             input = %source_audio.display(),
@@ -1055,6 +1064,35 @@ async fn acquire_local_asr_candidate(
 
     let (candidate, backend) = worker_result??;
     Ok((candidate, cache_dir, backend))
+}
+
+async fn find_cached_source_audio(cache_dir: &Path) -> Result<Option<PathBuf>> {
+    let mut entries = tokio::fs::read_dir(cache_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("source.") || name.ends_with(".partial") {
+            continue;
+        }
+        let output = tokio::process::Command::new("ffprobe")
+            .arg("-v")
+            .arg("error")
+            .arg("-select_streams")
+            .arg("a:0")
+            .arg("-show_entries")
+            .arg("stream=index")
+            .arg("-of")
+            .arg("csv=p=0")
+            .arg(&path)
+            .output()
+            .await;
+        if output.is_ok_and(|output| output.status.success() && !output.stdout.is_empty()) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 async fn asr_audio_is_valid(path: &Path) -> bool {
