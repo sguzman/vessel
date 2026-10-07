@@ -1101,7 +1101,15 @@ fn ffprobe_matches_asr_contract(output: &str) -> bool {
 }
 
 async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
-    let partial = destination.with_extension("wav.partial");
+    let partial = destination.with_file_name(
+        format!(
+            "{}.partial.wav",
+            destination
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("whisper-input")
+        )
+    );
     if partial.exists() {
         tokio::fs::remove_file(&partial).await?;
     }
