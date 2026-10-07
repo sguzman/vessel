@@ -32,8 +32,8 @@ if not test -x "$python"
 end
 
 set -l cache_root "$sourcearium_root/.cache/vessel/models"
-set -l whisper_dir "$cache_root/whisperx/large-v3"
-set -l align_dir "$cache_root/whisperx/alignment"
+set -l whisper_dir "$cache_root/whisperx"
+set -l align_dir "$cache_root/whisperx"
 set -l pyannote_dir "$cache_root/pyannote/speaker-diarization-community-1"
 
 mkdir -p "$whisper_dir" "$align_dir" "$pyannote_dir"
@@ -45,7 +45,7 @@ import sys
 from faster_whisper import download_model
 
 target = sys.argv[1]
-path = download_model("large-v3", output_dir=target)
+path = download_model("large-v3", cache_dir=target)
 print(path)
 PY
 or exit $status
@@ -98,5 +98,5 @@ echo "Alignment cache dir: $align_dir"
 echo "Pyannote model dir: $pyannote_dir"
 echo
 echo "Vessel should use:"
-echo "  --asr-model-dir $cache_root/whisperx"
+echo "  --asr-model-dir $whisper_dir"
 echo "  --diarization-model $pyannote_dir"
