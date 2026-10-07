@@ -68,6 +68,8 @@ struct UpdateArgs {
     sourcearium: PathBuf,
     #[arg(long = "max-videos")]
     max_videos: Option<usize>,
+    #[arg(long = "source-key")]
+    source_keys: Vec<String>,
     #[arg(long = "video-id")]
     video_ids: Vec<String>,
     #[arg(long = "yt-dlp-executable", default_value = "yt-dlp")]
@@ -135,7 +137,26 @@ async fn sourcearium_update(args: UpdateArgs, config: &Config) -> Result<()> {
         )));
     }
 
-    let sources = discover_youtube_sources(&sourcearium_root)?;
+    let mut sources = discover_youtube_sources(&sourcearium_root)?;
+    if !args.source_keys.is_empty() {
+        let available = sources
+            .iter()
+            .map(|source| source.policy.source_key.clone())
+            .collect::<HashSet<_>>();
+        let missing = args
+            .source_keys
+            .iter()
+            .filter(|source_key| !available.contains(*source_key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(VesselError::Corpus(format!(
+                "unknown Sourcearium YouTube source key(s): {}",
+                missing.join(", ")
+            )));
+        }
+        sources.retain(|source| args.source_keys.contains(&source.policy.source_key));
+    }
     let operational_db_path = sourcearium_root
         .join(".cache")
         .join("vessel")
@@ -1406,6 +1427,7 @@ esac
         let make_args = || UpdateArgs {
             sourcearium: root.clone(),
             max_videos: Some(1),
+            source_keys: Vec::new(),
             video_ids: Vec::new(),
             yt_dlp_executable: fake.clone(),
             force_local_asr: false,
