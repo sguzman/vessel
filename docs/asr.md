@@ -62,7 +62,7 @@ Keep network acquisition separate from transcription:
 fish scripts/prefetch-whisperx-models.fish <sourcearium-root>
 ```
 
-The script requires `HF_TOKEN` because `pyannote/speaker-diarization-community-1` is gated. It stores:
+The script requires Hugging Face authentication because `pyannote/speaker-diarization-community-1` is gated. Standard Hugging Face token storage is supported (`~/.cache/huggingface/token`, `HF_TOKEN_PATH`, `HF_HOME`, or `HF_TOKEN`). It stores:
 
 - Faster-Whisper `large-v3` in the Hugging Face cache rooted at `<sourcearium>/.cache/vessel/models/whisperx`;
 - pyannote `speaker-diarization-community-1` under `<sourcearium>/.cache/vessel/models/pyannote/speaker-diarization-community-1`.
