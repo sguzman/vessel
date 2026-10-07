@@ -34,61 +34,58 @@ mkdir -p "$whisper_dir" "$align_dir" "$pyannote_dir"
 or exit $status
 
 echo "[prefetch] faster-whisper large-v3 -> $whisper_dir"
-"$python" - "$whisper_dir" <<'PY'
-import sys
-from faster_whisper import download_model
-
-target = sys.argv[1]
-path = download_model("large-v3", cache_dir=target)
-print(path)
-PY
+printf '%s\n' \
+    'import sys' \
+    'from faster_whisper import download_model' \
+    '' \
+    'target = sys.argv[1]' \
+    'path = download_model("large-v3", cache_dir=target)' \
+    'print(path)' \
+    | "$python" - "$whisper_dir"
 or exit $status
 
 echo "[prefetch] English alignment model -> $align_dir"
-"$python" - "$align_dir" <<'PY'
-import gc
-import sys
-import torchaudio
-
-target = sys.argv[1]
-bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
-model = bundle.get_model(dl_kwargs={"model_dir": target})
-del model
-gc.collect()
-print(target)
-PY
+printf '%s\n' \
+    'import gc' \
+    'import sys' \
+    'import torchaudio' \
+    '' \
+    'target = sys.argv[1]' \
+    'bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H' \
+    'model = bundle.get_model(dl_kwargs={"model_dir": target})' \
+    'del model' \
+    'gc.collect()' \
+    'print(target)' \
+    | "$python" - "$align_dir"
 or exit $status
 
 echo "[prefetch] NLTK punkt_tab sentence data"
-"$python" - <<'PY'
-import nltk
-
-if not nltk.download("punkt_tab", quiet=False):
-    raise SystemExit("failed to download NLTK punkt_tab")
-print("punkt_tab ready")
-PY
+printf '%s\n' \
+    'import nltk' \
+    '' \
+    'if not nltk.download("punkt_tab", quiet=False):' \
+    '    raise SystemExit("failed to download NLTK punkt_tab")' \
+    'print("punkt_tab ready")' \
+    | "$python" -
 or exit $status
 
 echo "[prefetch] pyannote speaker-diarization-community-1 -> $pyannote_dir"
-"$python" - "$pyannote_dir" <<'PY'
-import sys
-from huggingface_hub import get_token, snapshot_download
-
-target = sys.argv[1]
-token = get_token()
-if not token:
-    raise SystemExit(
-        "No Hugging Face token found. Use the standard token file "
-        "(~/.cache/huggingface/token), HF_TOKEN_PATH/HF_HOME, or HF_TOKEN."
-    )
-
-path = snapshot_download(
-    repo_id="pyannote/speaker-diarization-community-1",
-    local_dir=target,
-    token=token,
-)
-print(path)
-PY
+printf '%s\n' \
+    'import sys' \
+    'from huggingface_hub import get_token, snapshot_download' \
+    '' \
+    'target = sys.argv[1]' \
+    'token = get_token()' \
+    'if not token:' \
+    '    raise SystemExit("No Hugging Face token found in standard credential storage.")' \
+    '' \
+    'path = snapshot_download(' \
+    '    repo_id="pyannote/speaker-diarization-community-1",' \
+    '    local_dir=target,' \
+    '    token=token,' \
+    ')' \
+    'print(path)' \
+    | "$python" - "$pyannote_dir"
 or exit $status
 
 echo
