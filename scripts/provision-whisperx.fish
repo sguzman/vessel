@@ -7,7 +7,7 @@
 set -l whisperx_version 3.8.6
 set -l uv_args tool install --python 3.12 --no-build "whisperx==$whisperx_version"
 
-if contains --offline $argv
+if contains -- --offline $argv
     set uv_args $uv_args --offline
 end
 
