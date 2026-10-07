@@ -974,13 +974,23 @@ async fn acquire_local_asr_candidate(
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     let whisper_wav = cache_dir.join("whisper-input.wav");
-    if whisper_wav.is_file() {
+    let cached_wav_valid = whisper_wav.is_file() && asr_audio_is_valid(&whisper_wav).await;
+    if cached_wav_valid {
         info!(
             target: "asr",
             input = %whisper_wav.display(),
-            "reusing cached normalized ASR audio"
+            "reusing verified cached normalized ASR audio"
         );
     } else {
+        if whisper_wav.exists() {
+            warn!(
+                target: "asr",
+                input = %whisper_wav.display(),
+                "discarding invalid cached normalized ASR audio"
+            );
+            tokio::fs::remove_file(&whisper_wav).await?;
+        }
+
         let output_template = cache_dir.join("source.%(ext)s");
         info!(
             target: "asr",
@@ -1047,7 +1057,55 @@ async fn acquire_local_asr_candidate(
     Ok((candidate, cache_dir, backend))
 }
 
+async fn asr_audio_is_valid(path: &Path) -> bool {
+    let output = match tokio::process::Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name,sample_rate,channels")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1")
+        .arg(path)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    ffprobe_matches_asr_contract(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn ffprobe_matches_asr_contract(output: &str) -> bool {
+    let mut codec = None;
+    let mut sample_rate = None;
+    let mut channels = None;
+
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("codec_name=") {
+            codec = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("sample_rate=") {
+            sample_rate = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("channels=") {
+            channels = Some(value.trim());
+        }
+    }
+
+    codec == Some("pcm_s16le") && sample_rate == Some("16000") && channels == Some("1")
+}
+
 async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
+    let partial = destination.with_extension("wav.partial");
+    if partial.exists() {
+        tokio::fs::remove_file(&partial).await?;
+    }
+
     let status = tokio::process::Command::new("ffmpeg")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -1062,7 +1120,7 @@ async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
         .arg("16000")
         .arg("-c:a")
         .arg("pcm_s16le")
-        .arg(destination)
+        .arg(&partial)
         .status()
         .await
         .map_err(|error| {
@@ -1070,12 +1128,23 @@ async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
         })?;
 
     if !status.success() {
+        let _ = tokio::fs::remove_file(&partial).await;
         return Err(VesselError::Extractor(format!(
             "ffmpeg failed to normalize ASR input {} -> {}",
             source.display(),
             destination.display()
         )));
     }
+
+    if !asr_audio_is_valid(&partial).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(VesselError::Extractor(format!(
+            "ffmpeg produced invalid normalized ASR audio {}",
+            partial.display()
+        )));
+    }
+
+    tokio::fs::rename(&partial, destination).await?;
     Ok(())
 }
 
@@ -1341,6 +1410,20 @@ fn huggingface_auth_source() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffprobe_contract_requires_pcm_s16le_16khz_mono() {
+        assert!(ffprobe_matches_asr_contract(
+            "codec_name=pcm_s16le\nsample_rate=16000\nchannels=1\n"
+        ));
+        assert!(!ffprobe_matches_asr_contract(
+            "codec_name=pcm_s16le\nsample_rate=48000\nchannels=1\n"
+        ));
+        assert!(!ffprobe_matches_asr_contract(
+            "codec_name=aac\nsample_rate=16000\nchannels=1\n"
+        ));
+        assert!(!ffprobe_matches_asr_contract(""));
+    }
 
     #[test]
     fn cli_is_reduced_to_corpus_maintenance_surface() {
