@@ -1,7 +1,8 @@
 #!/usr/bin/env fish
 
-# Prefetch WhisperX ASR + pyannote diarization assets into a Sourcearium-local cache.
-# This is deliberately separate from vessel update so corpus work can run offline.
+# Prefetch every network-fetched asset needed for the English WhisperX +
+# pyannote path used by Vessel. Keep this separate from vessel update so
+# transcription can run without depending on live network access.
 
 if test (count $argv) -lt 1
     echo "usage: fish scripts/prefetch-whisperx-models.fish <sourcearium-root>" >&2
@@ -32,9 +33,10 @@ end
 
 set -l cache_root "$sourcearium_root/.cache/vessel/models"
 set -l whisper_dir "$cache_root/whisperx/large-v3"
+set -l align_dir "$cache_root/whisperx/alignment"
 set -l pyannote_dir "$cache_root/pyannote/speaker-diarization-community-1"
 
-mkdir -p "$whisper_dir" "$pyannote_dir"
+mkdir -p "$whisper_dir" "$align_dir" "$pyannote_dir"
 or exit $status
 
 echo "[prefetch] faster-whisper large-v3 -> $whisper_dir"
@@ -45,6 +47,31 @@ from faster_whisper import download_model
 target = sys.argv[1]
 path = download_model("large-v3", output_dir=target)
 print(path)
+PY
+or exit $status
+
+echo "[prefetch] English alignment model -> $align_dir"
+"$python" - "$align_dir" <<'PY'
+import gc
+import sys
+import torchaudio
+
+target = sys.argv[1]
+bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
+model = bundle.get_model(dl_kwargs={"model_dir": target})
+del model
+gc.collect()
+print(target)
+PY
+or exit $status
+
+echo "[prefetch] NLTK punkt_tab sentence data"
+"$python" - <<'PY'
+import nltk
+
+if not nltk.download("punkt_tab", quiet=False):
+    raise SystemExit("failed to download NLTK punkt_tab")
+print("punkt_tab ready")
 PY
 or exit $status
 
@@ -67,8 +94,9 @@ or exit $status
 echo
 echo "Model assets ready."
 echo "WhisperX model dir: $whisper_dir"
+echo "Alignment cache dir: $align_dir"
 echo "Pyannote model dir: $pyannote_dir"
 echo
-echo "Use these with Vessel:"
-echo "  --asr-model-dir $whisper_dir"
+echo "Vessel should use:"
+echo "  --asr-model-dir $cache_root/whisperx"
 echo "  --diarization-model $pyannote_dir"
