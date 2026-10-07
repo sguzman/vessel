@@ -15,12 +15,6 @@ if not test -f "$sourcearium_root/sourcearium.toml"
     exit 2
 end
 
-if not set -q HF_TOKEN
-    echo "HF_TOKEN is required for pyannote/speaker-diarization-community-1." >&2
-    echo "Accept the model's Hugging Face user conditions, then export a read token for this shell." >&2
-    exit 2
-end
-
 set -l tool_root (uv tool dir)
 or exit $status
 set -l python "$tool_root/whisperx/bin/python"
@@ -40,7 +34,7 @@ mkdir -p "$whisper_dir" "$align_dir" "$pyannote_dir"
 or exit $status
 
 echo "[prefetch] faster-whisper large-v3 -> $whisper_dir"
-env HF_TOKEN="$HF_TOKEN" "$python" - "$whisper_dir" <<'PY'
+"$python" - "$whisper_dir" <<'PY'
 import sys
 from faster_whisper import download_model
 
@@ -76,16 +70,22 @@ PY
 or exit $status
 
 echo "[prefetch] pyannote speaker-diarization-community-1 -> $pyannote_dir"
-env HF_TOKEN="$HF_TOKEN" "$python" - "$pyannote_dir" <<'PY'
-import os
+"$python" - "$pyannote_dir" <<'PY'
 import sys
-from huggingface_hub import snapshot_download
+from huggingface_hub import get_token, snapshot_download
 
 target = sys.argv[1]
+token = get_token()
+if not token:
+    raise SystemExit(
+        "No Hugging Face token found. Use the standard token file "
+        "(~/.cache/huggingface/token), HF_TOKEN_PATH/HF_HOME, or HF_TOKEN."
+    )
+
 path = snapshot_download(
     repo_id="pyannote/speaker-diarization-community-1",
     local_dir=target,
-    token=os.environ["HF_TOKEN"],
+    token=token,
 )
 print(path)
 PY
