@@ -1251,6 +1251,13 @@ async fn doctor() -> Result<()> {
             "source_builds": false,
             "offline_preparation_preferred": true,
         },
+        "diarization_preflight": {
+            "hf_token_present": std::env::var("HF_TOKEN")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            "model": vessel_asr::DEFAULT_DIARIZATION_MODEL,
+            "named_speaker_identity": false,
+        },
         "binaries": {
             "yt_dlp": binary_available("yt-dlp", &["--version"]),
             "ffmpeg": binary_available("ffmpeg", &["-version"]),
