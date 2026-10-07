@@ -1273,9 +1273,8 @@ async fn doctor() -> Result<()> {
             "offline_preparation_preferred": true,
         },
         "diarization_preflight": {
-            "hf_token_present": std::env::var("HF_TOKEN")
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false),
+            "hf_auth_available": huggingface_auth_source().is_some(),
+            "hf_auth_source": huggingface_auth_source(),
             "model": vessel_asr::DEFAULT_DIARIZATION_MODEL,
             "named_speaker_identity": false,
         },
@@ -1303,6 +1302,41 @@ fn binary_available(binary: &str, args: &[&str]) -> bool {
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
+
+fn huggingface_auth_source() -> Option<&'static str> {
+    if std::env::var("HF_TOKEN")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Some("env");
+    }
+
+    if std::env::var_os("HF_TOKEN_PATH")
+        .map(PathBuf::from)
+        .is_some_and(|path| path.is_file())
+    {
+        return Some("token_file");
+    }
+
+    if std::env::var_os("HF_HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join("token"))
+        .is_some_and(|path| path.is_file())
+    {
+        return Some("token_file");
+    }
+
+    if std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".cache").join("huggingface").join("token"))
+        .is_some_and(|path| path.is_file())
+    {
+        return Some("token_file");
+    }
+
+    None
+}
+
 
 #[cfg(test)]
 mod tests {
