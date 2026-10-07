@@ -54,6 +54,21 @@ fish scripts/provision-whisperx.fish --offline
 
 Model weights are not Python package builds. WhisperX may fetch model weights when its cache is incomplete, but for predictable/offline work prefer preparing the model cache ahead of time and passing it with `--asr-model-dir`. Vessel then asks WhisperX to use cache-only model loading.
 
+## Offline Model Prefetch
+
+Keep network acquisition separate from transcription:
+
+```fish
+fish scripts/prefetch-whisperx-models.fish <sourcearium-root>
+```
+
+The script requires `HF_TOKEN` because `pyannote/speaker-diarization-community-1` is gated. It stores:
+
+- Faster-Whisper `large-v3` under `<sourcearium>/.cache/vessel/models/whisperx/large-v3`;
+- pyannote `speaker-diarization-community-1` under `<sourcearium>/.cache/vessel/models/pyannote/speaker-diarization-community-1`.
+
+The later Vessel run should pass those paths with `--asr-model-dir` and `--diarization-model`. WhisperX then uses cache-only loading for the ASR model, and pyannote loads its local pipeline directory.
+
 ## Diarization
 
 `vessel update --diarize` asks WhisperX to run anonymous diarization through pyannote.
