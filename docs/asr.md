@@ -38,6 +38,20 @@ uv ... --no-build
 
 When the required packages and metadata are already cached, uv's `--offline` mode may also be used. Provisioning is intentionally separate from corpus ingestion.
 
+For the supported persistent setup on the target Linux machine, run:
+
+```fish
+fish scripts/provision-whisperx.fish
+```
+
+That pins the current accepted stable WhisperX release, requests Python 3.12 through uv, and passes `--no-build`. If any required Python package lacks an installable wheel/cache entry, provisioning fails instead of compiling it.
+
+After the online provisioning pass has populated uv's package cache, the same environment can be recreated without network package access when cache coverage is complete:
+
+```fish
+fish scripts/provision-whisperx.fish --offline
+```
+
 Model weights are not Python package builds. WhisperX may fetch model weights when its cache is incomplete, but for predictable/offline work prefer preparing the model cache ahead of time and passing it with `--asr-model-dir`. Vessel then asks WhisperX to use cache-only model loading.
 
 ## Diarization
