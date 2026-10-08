@@ -244,6 +244,27 @@ Before removal, Vessel reparses every candidate, confirms artifact identity, can
 
 The complete prune plan is validated before the first deletion occurs. A stale or invalid candidate therefore aborts the apply phase with zero removals rather than producing a partially applied prune.
 
+## Mixed-corpus inventory and validation
+
+Sourcearium now supports source bundles that preserve legacy Markdown, structured
+text, annotations, and schema-bound derivatives without requiring Sourcearium
+artifact-v1 front matter. Vessel **does not** own those artifact schemas.
+
+The `vessel inventory` and `vessel validate` commands therefore inspect
+only recognizable Sourcearium artifact-v1 Markdown and canonical YouTube
+transcripts. Other Markdown is counted in `non_v1_markdown_skipped`, not
+misreported as a broken v1 artifact. A broken YouTube transcript still fails
+validation even if its front-matter opening delimiter is missing.
+
+These commands still validate YouTube source policies, v1 artifact identity
+and body invariants, and prohibited document container extensions. They **do
+not** certify bundle-v1 manifests or other Taria-owned schemas; those belong
+to Sourcearium's own migration/bundle verification workflows.
+
+The frozen YouTube paths remain `sources/youtube/<source-key>/source.toml`
+and `sources/youtube/<source-key>/transcripts/`. Vessel's update/prune
+scope has not expanded to the migrated non-YouTube source families.
+
 ## Compatibility Rule
 
 Sourcearium `schema = 1` is frozen.

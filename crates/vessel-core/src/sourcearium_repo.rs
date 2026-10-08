@@ -19,6 +19,8 @@ pub struct SourceariumInventoryReport {
     pub by_kind: BTreeMap<String, usize>,
     pub by_derivation: BTreeMap<String, usize>,
     pub by_language: BTreeMap<String, usize>,
+    /// Markdown outside the Sourcearium artifact-v1 contract is managed by Sourcearium bundles.
+    pub non_v1_markdown_skipped: usize,
     pub invalid_artifacts: Vec<String>,
 }
 
@@ -43,6 +45,7 @@ pub fn inventory_sourcearium_repository(
     let mut by_kind = BTreeMap::new();
     let mut by_derivation = BTreeMap::new();
     let mut by_language = BTreeMap::new();
+    let mut non_v1_markdown_skipped = 0;
     let mut invalid_artifacts = Vec::new();
 
     for path in files {
@@ -67,6 +70,10 @@ pub fn inventory_sourcearium_repository(
                 continue;
             }
         };
+        if !is_v1_artifact_candidate(&sources_root, &path, &raw) {
+            non_v1_markdown_skipped += 1;
+            continue;
+        }
         let (artifact, _) = match SourceariumArtifactV1::parse_markdown(&raw) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -91,6 +98,7 @@ pub fn inventory_sourcearium_repository(
         by_kind,
         by_derivation,
         by_language,
+        non_v1_markdown_skipped,
         invalid_artifacts,
     })
 }
@@ -99,11 +107,37 @@ fn increment_inventory(map: &mut BTreeMap<String, usize>, key: &str) {
     *map.entry(key.to_owned()).or_insert(0) += 1;
 }
 
+/// Vessel understands the frozen single-artifact v1 format, not every document
+/// that a Sourcearium bundle can preserve. Recognize v1 by its artifact_id
+/// front matter; always check the canonical YouTube transcript path strictly,
+/// so a damaged or missing v1 header cannot make a transcript disappear.
+fn is_v1_artifact_candidate(sources_root: &Path, path: &Path, raw: &str) -> bool {
+    if let Ok(relative) = path.strip_prefix(sources_root) {
+        let parts: Vec<_> = relative.iter().collect();
+        if parts.len() == 4
+            && parts[0].to_str() == Some("youtube")
+            && parts[2].to_str() == Some("transcripts")
+        {
+            return true;
+        }
+    }
+
+    let mut lines = raw.lines();
+    if lines.next() != Some("+++") {
+        return false;
+    }
+    lines
+        .take_while(|line| line.trim() != "+++")
+        .any(|line| line.split_once('=').is_some_and(|(key, _)| key.trim() == "artifact_id"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceariumValidationReport {
     pub valid: bool,
     pub policies_validated: usize,
     pub artifacts_validated: usize,
+    /// Non-v1 source-bound Markdown is outside Vessel's validation authority.
+    pub non_v1_markdown_skipped: usize,
     pub errors: Vec<String>,
 }
 
@@ -133,6 +167,7 @@ pub fn validate_sourcearium_repository(
 
     let mut artifact_paths_by_id = BTreeMap::<String, PathBuf>::new();
     let mut artifacts_validated = 0usize;
+    let mut non_v1_markdown_skipped = 0usize;
 
     for path in files {
         if path.file_name().and_then(|value| value.to_str()) == Some("speakers.toml") {
@@ -169,6 +204,10 @@ pub fn validate_sourcearium_repository(
             }
         };
 
+        if !is_v1_artifact_candidate(&sources_root, &path, &raw) {
+            non_v1_markdown_skipped += 1;
+            continue;
+        }
         let (artifact, body) = match SourceariumArtifactV1::parse_markdown(&raw) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -200,6 +239,7 @@ pub fn validate_sourcearium_repository(
         valid: errors.is_empty(),
         policies_validated,
         artifacts_validated,
+        non_v1_markdown_skipped,
         errors,
     })
 }
@@ -1597,6 +1637,95 @@ exclude_video_ids = [{exclude}]
                 .iter()
                 .any(|error| error.contains("timestamps must be monotonic"))
         );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+
+    #[test]
+    fn repository_checks_allow_migrated_bundle_markdown_alongside_v1_artifacts() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+
+        let legacy = root.join("sources").join("ai").join("aitarium").join("legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("gpt-2.md"), "# GPT-2 source ledger\\n").unwrap();
+
+        let analyses = root.join("sources").join("legal").join("matter").join("analyses");
+        fs::create_dir_all(&analyses).unwrap();
+        fs::write(analyses.join("claim.md"), "# A source-bound research note\\n").unwrap();
+
+        // A different TOML-front-matter format is not a Sourcearium artifact v1.
+        fs::write(
+            analyses.join("other-schema.md"),
+            "+++\\nschema = 1\\nbundle_id = \\"bundle:other\\"\\n+++\\n\\n# Other schema\\n",
+        )
+        .unwrap();
+
+        let inventory = inventory_sourcearium_repository(&root).unwrap();
+        assert_eq!(inventory.artifacts, 1);
+        assert_eq!(inventory.non_v1_markdown_skipped, 3);
+        assert!(inventory.invalid_artifacts.is_empty());
+
+        let validation = validate_sourcearium_repository(&root).unwrap();
+        assert!(validation.valid, "{:?}", validation.errors);
+        assert_eq!(validation.policies_validated, 1);
+        assert_eq!(validation.artifacts_validated, 1);
+        assert_eq!(validation.non_v1_markdown_skipped, 3);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_checks_still_reject_broken_youtube_v1_transcripts() {
+        let root = temp_sourcearium();
+        write_policy(&root, "alpha", "alpha");
+        let source = discover_youtube_sources(&root).unwrap().remove(0);
+        let video = sample_video();
+        let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
+        let materialized =
+            materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
+
+        // Removing the opening delimiter must not make a known transcript look
+        // like an unrelated plain Markdown file.
+        let original = fs::read_to_string(&materialized.path).unwrap();
+        fs::write(&materialized.path, original.replacen("+++\\n", "", 1)).unwrap();
+
+        let validation = validate_sourcearium_repository(&root).unwrap();
+        assert!(!validation.valid);
+        assert_eq!(validation.non_v1_markdown_skipped, 0);
+        assert!(validation.errors.iter().any(|error| error.contains("missing opening TOML delimiter")));
+
+        let inventory = inventory_sourcearium_repository(&root).unwrap();
+        assert_eq!(inventory.non_v1_markdown_skipped, 0);
+        assert_eq!(inventory.invalid_artifacts.len(), 1);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn repository_checks_reject_malformed_v1_metadata_outside_youtube() {
+        let root = temp_sourcearium();
+        let path = root.join("sources").join("web").join("example");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("broken.md"),
+            "+++\\nschema = 1\\nartifact_id = \\"web:article:example:source\\"\\n[source]\\nfamily = \\"web\\"\\n",
+        )
+        .unwrap();
+
+        let validation = validate_sourcearium_repository(&root).unwrap();
+        assert!(!validation.valid);
+        assert_eq!(validation.non_v1_markdown_skipped, 0);
+        assert_eq!(validation.errors.len(), 1);
+
+        let inventory = inventory_sourcearium_repository(&root).unwrap();
+        assert_eq!(inventory.non_v1_markdown_skipped, 0);
+        assert_eq!(inventory.invalid_artifacts.len(), 1);
 
         fs::remove_dir_all(root).expect("cleanup");
     }

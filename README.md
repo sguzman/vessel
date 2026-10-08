@@ -96,6 +96,11 @@ Normal `vessel update` never installs or builds Python packages. WhisperX/pyanno
 
 Sourcearium schema v1 is an external frozen contract. Vessel must preserve source, representation, and acquisition provenance separately and must not invent new v1 core fields.
 
+Sourcearium also holds migrated Taria source bundles and non-v1 Markdown. Vessel's
+`validate` and `inventory` check recognized v1 artifacts and YouTube
+policies, reporting skipped non-v1 Markdown explicitly; they are not a
+Sourcearium-wide bundle-schema validator.
+
 Normal `update` is conservative and non-destructive. It may create a missing artifact or upgrade a weaker representation, but it does not delete existing corpus material merely because upstream state or policy changed.
 
 See:
