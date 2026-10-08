@@ -1139,15 +1139,13 @@ fn ffprobe_matches_asr_contract(output: &str) -> bool {
 }
 
 async fn transcode_asr_audio(source: &Path, destination: &Path) -> Result<()> {
-    let partial = destination.with_file_name(
-        format!(
-            "{}.partial.wav",
-            destination
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("whisper-input")
-        )
-    );
+    let partial = destination.with_file_name(format!(
+        "{}.partial.wav",
+        destination
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("whisper-input")
+    ));
     if partial.exists() {
         tokio::fs::remove_file(&partial).await?;
     }
@@ -1454,7 +1452,6 @@ fn huggingface_auth_source() -> Option<&'static str> {
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1625,22 +1622,23 @@ esac
         assert!(first_text.contains("derivation = \"creator_subtitles\""));
         assert!(first_text.contains("[00:00:00] Fixture transcript."));
 
-        let validation = validate_sourcearium_repository(&root).expect("validate materialized corpus");
+        let validation =
+            validate_sourcearium_repository(&root).expect("validate materialized corpus");
         assert!(validation.valid, "{:?}", validation.errors);
         assert_eq!(validation.artifacts_validated, 1);
 
         let inventory = inventory_sourcearium_repository(&root).expect("inventory corpus");
         assert_eq!(inventory.artifacts, 1);
-        assert_eq!(
-            inventory.by_derivation.get("creator_subtitles"),
-            Some(&1)
-        );
+        assert_eq!(inventory.by_derivation.get("creator_subtitles"), Some(&1));
 
         sourcearium_update(make_args(), &Config::default())
             .await
             .expect("repeat update");
         let second_bytes = fs::read(&transcript_path).expect("repeat transcript");
-        assert_eq!(second_bytes, first_bytes, "repeat update must be a durable no-op");
+        assert_eq!(
+            second_bytes, first_bytes,
+            "repeat update must be a durable no-op"
+        );
 
         let inventory_after =
             inventory_sourcearium_repository(&root).expect("inventory repeated corpus");

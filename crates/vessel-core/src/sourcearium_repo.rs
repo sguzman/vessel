@@ -126,9 +126,10 @@ fn is_v1_artifact_candidate(sources_root: &Path, path: &Path, raw: &str) -> bool
     if lines.next() != Some("+++") {
         return false;
     }
-    lines
-        .take_while(|line| line.trim() != "+++")
-        .any(|line| line.split_once('=').is_some_and(|(key, _)| key.trim() == "artifact_id"))
+    lines.take_while(|line| line.trim() != "+++").any(|line| {
+        line.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "artifact_id")
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1641,7 +1642,6 @@ exclude_video_ids = [{exclude}]
         fs::remove_dir_all(root).expect("cleanup");
     }
 
-
     #[test]
     fn repository_checks_allow_migrated_bundle_markdown_alongside_v1_artifacts() {
         let root = temp_sourcearium();
@@ -1651,13 +1651,25 @@ exclude_video_ids = [{exclude}]
         let candidate = sample_candidate(TranscriptDerivation::CreatorSubtitles);
         materialize_youtube_transcript(&root, &source, &video, None, &candidate).unwrap();
 
-        let legacy = root.join("sources").join("ai").join("aitarium").join("legacy");
+        let legacy = root
+            .join("sources")
+            .join("ai")
+            .join("aitarium")
+            .join("legacy");
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("gpt-2.md"), "# GPT-2 source ledger\n").unwrap();
 
-        let analyses = root.join("sources").join("legal").join("matter").join("analyses");
+        let analyses = root
+            .join("sources")
+            .join("legal")
+            .join("matter")
+            .join("analyses");
         fs::create_dir_all(&analyses).unwrap();
-        fs::write(analyses.join("claim.md"), "# A source-bound research note\n").unwrap();
+        fs::write(
+            analyses.join("claim.md"),
+            "# A source-bound research note\n",
+        )
+        .unwrap();
 
         // A different TOML-front-matter format is not a Sourcearium artifact v1.
         fs::write(
@@ -1704,10 +1716,12 @@ bundle_id = "bundle:other"
         let validation = validate_sourcearium_repository(&root).unwrap();
         assert!(!validation.valid);
         assert_eq!(validation.non_v1_markdown_skipped, 0);
-        assert!(validation
-            .errors
-            .iter()
-            .any(|error| error.contains("missing opening TOML delimiter")));
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("missing opening TOML delimiter"))
+        );
 
         let inventory = inventory_sourcearium_repository(&root).unwrap();
         assert_eq!(inventory.non_v1_markdown_skipped, 0);
