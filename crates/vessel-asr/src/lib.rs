@@ -574,16 +574,19 @@ mod tests {
     }
 
     #[test]
-    fn backend_default_models_are_explicit() {
-        assert_eq!(
-            default_model_for_backend(PHONON2_BACKEND_NAME).unwrap(),
-            "phonon-2"
-        );
-        assert_eq!(
-            default_model_for_backend(WHISPERX_BACKEND_NAME).unwrap(),
-            "large-v3"
-        );
-        assert!(default_model_for_backend("whisper-candle").is_err());
+    fn backend_model_selection_and_retired_backend_rejection_are_explicit() {
+        let whisper = LoadedAsrBackend::load(AsrConfig::default()).expect("WhisperX");
+        assert_eq!(whisper.model_name(), "large-v3");
+
+        let mut phonon_config = AsrConfig::default();
+        phonon_config.backend = PHONON2_BACKEND_NAME.into();
+        phonon_config.model = "phonon-2".into();
+        let phonon = LoadedAsrBackend::load(phonon_config).expect("Phonon-2");
+        assert_eq!(phonon.model_name(), "phonon-2");
+
+        let mut retired_config = AsrConfig::default();
+        retired_config.backend = "whisper-candle".into();
+        assert!(LoadedAsrBackend::load(retired_config).is_err());
     }
 
     #[test]
