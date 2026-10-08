@@ -1653,16 +1653,22 @@ exclude_video_ids = [{exclude}]
 
         let legacy = root.join("sources").join("ai").join("aitarium").join("legacy");
         fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("gpt-2.md"), "# GPT-2 source ledger\\n").unwrap();
+        fs::write(legacy.join("gpt-2.md"), "# GPT-2 source ledger\n").unwrap();
 
         let analyses = root.join("sources").join("legal").join("matter").join("analyses");
         fs::create_dir_all(&analyses).unwrap();
-        fs::write(analyses.join("claim.md"), "# A source-bound research note\\n").unwrap();
+        fs::write(analyses.join("claim.md"), "# A source-bound research note\n").unwrap();
 
         // A different TOML-front-matter format is not a Sourcearium artifact v1.
         fs::write(
             analyses.join("other-schema.md"),
-            "+++\\nschema = 1\\nbundle_id = \\"bundle:other\\"\\n+++\\n\\n# Other schema\\n",
+            r#"+++
+schema = 1
+bundle_id = "bundle:other"
++++
+
+# Other schema
+"#,
         )
         .unwrap();
 
@@ -1693,12 +1699,15 @@ exclude_video_ids = [{exclude}]
         // Removing the opening delimiter must not make a known transcript look
         // like an unrelated plain Markdown file.
         let original = fs::read_to_string(&materialized.path).unwrap();
-        fs::write(&materialized.path, original.replacen("+++\\n", "", 1)).unwrap();
+        fs::write(&materialized.path, original.replacen("+++\n", "", 1)).unwrap();
 
         let validation = validate_sourcearium_repository(&root).unwrap();
         assert!(!validation.valid);
         assert_eq!(validation.non_v1_markdown_skipped, 0);
-        assert!(validation.errors.iter().any(|error| error.contains("missing opening TOML delimiter")));
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("missing opening TOML delimiter")));
 
         let inventory = inventory_sourcearium_repository(&root).unwrap();
         assert_eq!(inventory.non_v1_markdown_skipped, 0);
@@ -1714,7 +1723,12 @@ exclude_video_ids = [{exclude}]
         fs::create_dir_all(&path).unwrap();
         fs::write(
             path.join("broken.md"),
-            "+++\\nschema = 1\\nartifact_id = \\"web:article:example:source\\"\\n[source]\\nfamily = \\"web\\"\\n",
+            r#"+++
+schema = 1
+artifact_id = "web:article:example:source"
+[source]
+family = "web"
+"#,
         )
         .unwrap();
 
